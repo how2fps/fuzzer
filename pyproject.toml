@@ -1,0 +1,22 @@
+[project]
+name = "my_fuzzer"
+version = "0.1.0"
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+# This allows you to run 'fuzz-now' in the terminal to start your fuzzer
+fuzz-now = "fuzzer.main:main"
+
+[tool.ruff]
+# Configure your linter for clean code
+line-length = 88
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "ruff>=0.15.2",
+]
