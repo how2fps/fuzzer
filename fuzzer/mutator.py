@@ -5,21 +5,45 @@ import random
 #'{"__complex__": true, "real": 1, "imag": 2}'
 #'{"json":"obj"}'
 #need to add json specific ones, and ipv4/ipv6 ones
-class Mutator:
-        def __init__(self):
-                self.interesting_8 = 0
 
-        def mutate(self, data: bytearray) -> bytearray:
-                res = data[:]
-                if not res: return bytearray(b"0")
-        
-                for _ in range(random.randint(1, 10)):
-                        method = random.choice([
-                                self.bit_flip, self.arithmetic, self.interesting_value, 
-                                self.delete_block, self.clone_block
-                        ])
-                        res = method(res)
-                return res
+json_grammar_map = {
+    "START":      ,
+    "OBJ_BODY":   ,
+    "VAL_IN_OBJ": ,
+    "NESTED_OBJ": , 
+    "OBJ_END":    ,
+    "FINAL":      
+}
+class Mutator:
+        def __init__(self, grammar_map):
+                self.grammar = grammar_map
+                self.start_state = "START"
+                self.end_state = "FINAL"
+                
+        def mutate(self, original_walk):
+                if not original_walk:
+                        return self.generate_walk(self.start_state)
+                
+                random_idx = random.randrange(len(original_walk))
+                divergent_state = original_walk[random_idx]
+                
+                new_walk = original_walk[:random_idx]
+                new_suffix = self.generate_walk(divergent_state)
+                return new_walk + new_suffix
+
+
+        def generate_walk(self, current_state):
+                walk = []
+                while current_state!= self.end_state:
+                # Pick a random arrow from the current circle
+                        terminal, next_state = random.choice(self.grammar[current_state])
+                        walk.append((current_state, terminal))
+                        current_state = next_state
+                return walk
+
+
+        def unparse(self, walk):
+                return "".join([step[1] for step in walk])
 
         #BASIC BIT MUTATES
         def bit_flip(self, data):
