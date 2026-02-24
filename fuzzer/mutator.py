@@ -1,19 +1,44 @@
 import random
 
-
 #'["foo", {"bar":["baz", null, 1.0, 2]}]'
 #'{"__complex__": true, "real": 1, "imag": 2}'
 #'{"json":"obj"}'
 #need to add json specific ones, and ipv4/ipv6 ones
 
 json_grammar_map = {
-    "START":      ,
-    "OBJ_BODY":   ,
-    "VAL_IN_OBJ": ,
-    "NESTED_OBJ": , 
-    "OBJ_END":    ,
-    "FINAL":      
-}
+            "VALUE": [
+                ('{', ["OBJ_BODY"]),
+                ('[', ["ARR_BODY"]),
+                ('"', ["STR_BODY"]),
+                ('1', []),
+                ('t', ['r', 'u', 'e'])
+            ],
+            "OBJ_BODY": [
+                ('"', ["STR_BODY", ":", "VALUE", "NEXT_OBJ"]),
+                ('}', [])
+            ],
+            "NEXT_OBJ": [
+                (',', ["VALUE_IN_OBJ"]),
+                ('}', [])
+            ],
+            "VALUE_IN_OBJ": [
+                ('"', ["STR_BODY", ":", "VALUE", "NEXT_OBJ"])
+            ],
+            "STR_BODY": [
+                ('x', ["\""]),
+                ('"', [])
+            ],
+            "ARR_BODY": [
+                (']', []),
+                ('1', ["NEXT_ARR"]) 
+            ],
+            "NEXT_ARR": [
+                (',', ["VALUE", "NEXT_ARR"]),
+                (']', [])
+            ]
+        }
+
+
 class Mutator:
         def __init__(self, grammar_map):
                 self.grammar = grammar_map
