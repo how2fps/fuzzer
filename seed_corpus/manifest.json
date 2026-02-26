@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "dataset_suite": "research-seeds-v1",
+  "notes": "Deterministic starter corpora for scheduler-focused fuzzing experiments.",
+  "targets": {
+    "json": "json-v1.seeds.json",
+    "ipv4": "ipv4-v1.seeds.json",
+    "ipv6": "ipv6-v1.seeds.json"
+  }
+}
+

@@ -1,0 +1,528 @@
+{
+  "schema_version": 1,
+  "dataset_id": "ipv6-v1",
+  "target_family": "ipv6",
+  "notes": "Starter IPv6 strings for coverage-poor binary targets: canonical + compressed + edge parse errors.",
+  "buckets": [
+    {
+      "name": "valid",
+      "description": "Canonical and compressed IPv6 addresses, including mapped/loopback forms."
+    },
+    {
+      "name": "string_stress",
+      "description": "Formatting stressors around valid-looking IPv6 strings."
+    },
+    {
+      "name": "near_valid",
+      "description": "Small syntax/range deviations around IPv6 forms to diversify error signals."
+    }
+  ],
+  "seeds": [
+    {
+      "id": "ipv6.valid.001",
+      "bucket": "valid",
+      "label": "loopback",
+      "expected": "accept",
+      "tags": [
+        "common"
+      ],
+      "content": "::1"
+    },
+    {
+      "id": "ipv6.valid.002",
+      "bucket": "valid",
+      "label": "unspecified",
+      "expected": "accept",
+      "tags": [
+        "edge"
+      ],
+      "content": "::"
+    },
+    {
+      "id": "ipv6.valid.003",
+      "bucket": "valid",
+      "label": "canonical-full",
+      "expected": "accept",
+      "tags": [
+        "canonical"
+      ],
+      "content": "2001:0db8:0000:0000:0000:ff00:0042:8329"
+    },
+    {
+      "id": "ipv6.valid.004",
+      "bucket": "valid",
+      "label": "compressed",
+      "expected": "accept",
+      "tags": [
+        "compressed"
+      ],
+      "content": "2001:db8::ff00:42:8329"
+    },
+    {
+      "id": "ipv6.valid.005",
+      "bucket": "valid",
+      "label": "link-local",
+      "expected": "accept",
+      "tags": [
+        "link-local"
+      ],
+      "content": "fe80::1"
+    },
+    {
+      "id": "ipv6.valid.006",
+      "bucket": "valid",
+      "label": "multicast",
+      "expected": "accept",
+      "tags": [
+        "multicast"
+      ],
+      "content": "ff02::1"
+    },
+    {
+      "id": "ipv6.valid.007",
+      "bucket": "valid",
+      "label": "ipv4-mapped",
+      "expected": "accept",
+      "tags": [
+        "mapped"
+      ],
+      "content": "::ffff:192.0.2.128"
+    },
+    {
+      "id": "ipv6.valid.008",
+      "bucket": "valid",
+      "label": "prefix-64",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "2001:db8::/64"
+    },
+    {
+      "id": "ipv6.valid.009",
+      "bucket": "valid",
+      "label": "prefix-128",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "2001:db8::1/128"
+    },
+    {
+      "id": "ipv6.valid.010",
+      "bucket": "valid",
+      "label": "uppercase",
+      "expected": "accept",
+      "tags": [
+        "case"
+      ],
+      "content": "2001:DB8::ABCD"
+    },
+    {
+      "id": "ipv6.valid.011",
+      "bucket": "valid",
+      "label": "embedded-leading-zeroes",
+      "expected": "accept",
+      "tags": [
+        "zeros"
+      ],
+      "content": "2001:db8:0:0:8:800:200c:417a"
+    },
+    {
+      "id": "ipv6.valid.012",
+      "bucket": "valid",
+      "label": "sixtofour",
+      "expected": "accept",
+      "tags": [
+        "special"
+      ],
+      "content": "2002:c000:0204::1"
+    },
+    {
+      "id": "ipv6.string_stress.001",
+      "bucket": "string_stress",
+      "label": "surrounding-spaces",
+      "expected": "parser-dependent",
+      "tags": [
+        "whitespace"
+      ],
+      "content": "   2001:db8::1   "
+    },
+    {
+      "id": "ipv6.string_stress.002",
+      "bucket": "string_stress",
+      "label": "tab-newline",
+      "expected": "parser-dependent",
+      "tags": [
+        "whitespace"
+      ],
+      "content": "\t::1\n"
+    },
+    {
+      "id": "ipv6.string_stress.003",
+      "bucket": "string_stress",
+      "label": "bracketed",
+      "expected": "parser-dependent",
+      "tags": [
+        "uri"
+      ],
+      "content": "[2001:db8::1]"
+    },
+    {
+      "id": "ipv6.string_stress.004",
+      "bucket": "string_stress",
+      "label": "zone-id",
+      "expected": "parser-dependent",
+      "tags": [
+        "zone"
+      ],
+      "content": "fe80::1%eth0"
+    },
+    {
+      "id": "ipv6.string_stress.005",
+      "bucket": "string_stress",
+      "label": "port-suffix",
+      "expected": "reject",
+      "tags": [
+        "suffix"
+      ],
+      "content": "::1:443"
+    },
+    {
+      "id": "ipv6.string_stress.006",
+      "bucket": "string_stress",
+      "label": "many-colons",
+      "expected": "reject",
+      "tags": [
+        "delimiter"
+      ],
+      "content": "::::::"
+    },
+    {
+      "id": "ipv6.string_stress.007",
+      "bucket": "string_stress",
+      "label": "long-hextet",
+      "expected": "reject",
+      "tags": [
+        "length"
+      ],
+      "content": "2001:db8:00000::1"
+    },
+    {
+      "id": "ipv6.string_stress.008",
+      "bucket": "string_stress",
+      "label": "comment-tail",
+      "expected": "reject",
+      "tags": [
+        "suffix"
+      ],
+      "content": "2001:db8::1 # host"
+    },
+    {
+      "id": "ipv6.string_stress.009",
+      "bucket": "string_stress",
+      "label": "nul-tail",
+      "expected": "reject",
+      "tags": [
+        "control"
+      ],
+      "content": "2001:db8::1\u0000x"
+    },
+    {
+      "id": "ipv6.string_stress.010",
+      "bucket": "string_stress",
+      "label": "mixed-case-long",
+      "expected": "accept",
+      "tags": [
+        "case"
+      ],
+      "content": "ABCD:ef01:2345:6789:ABCD:ef01:2345:6789"
+    },
+    {
+      "id": "ipv6.string_stress.011",
+      "bucket": "string_stress",
+      "label": "double-compression-lookalike",
+      "expected": "reject",
+      "tags": [
+        "compression"
+      ],
+      "content": "2001::db8::1"
+    },
+    {
+      "id": "ipv6.string_stress.012",
+      "bucket": "string_stress",
+      "label": "oversized-prefix",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "range"
+      ],
+      "content": "2001:db8::/9999"
+    },
+    {
+      "id": "ipv6.near_valid.001",
+      "bucket": "near_valid",
+      "label": "bad-hex-char",
+      "expected": "reject",
+      "tags": [
+        "hex"
+      ],
+      "content": "2001:db8::g"
+    },
+    {
+      "id": "ipv6.near_valid.002",
+      "bucket": "near_valid",
+      "label": "too-many-groups",
+      "expected": "reject",
+      "tags": [
+        "arity"
+      ],
+      "content": "1:2:3:4:5:6:7:8:9"
+    },
+    {
+      "id": "ipv6.near_valid.003",
+      "bucket": "near_valid",
+      "label": "trailing-colon",
+      "expected": "reject",
+      "tags": [
+        "delimiter"
+      ],
+      "content": "2001:db8::1:"
+    },
+    {
+      "id": "ipv6.near_valid.004",
+      "bucket": "near_valid",
+      "label": "leading-single-colon",
+      "expected": "reject",
+      "tags": [
+        "delimiter"
+      ],
+      "content": ":2001:db8::1"
+    },
+    {
+      "id": "ipv6.near_valid.005",
+      "bucket": "near_valid",
+      "label": "empty-hextet-middle",
+      "expected": "reject",
+      "tags": [
+        "token"
+      ],
+      "content": "2001:db8:1::2::3"
+    },
+    {
+      "id": "ipv6.near_valid.006",
+      "bucket": "near_valid",
+      "label": "prefix-overflow",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "range"
+      ],
+      "content": "2001:db8::1/129"
+    },
+    {
+      "id": "ipv6.near_valid.007",
+      "bucket": "near_valid",
+      "label": "prefix-negative",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "range"
+      ],
+      "content": "2001:db8::1/-1"
+    },
+    {
+      "id": "ipv6.near_valid.008",
+      "bucket": "near_valid",
+      "label": "ipv4-tail-overflow",
+      "expected": "reject",
+      "tags": [
+        "mapped",
+        "range"
+      ],
+      "content": "::ffff:256.1.1.1"
+    },
+    {
+      "id": "ipv6.near_valid.009",
+      "bucket": "near_valid",
+      "label": "hextet-too-long",
+      "expected": "reject",
+      "tags": [
+        "length"
+      ],
+      "content": "12345::1"
+    },
+    {
+      "id": "ipv6.near_valid.010",
+      "bucket": "near_valid",
+      "label": "missing-group-without-compression",
+      "expected": "reject",
+      "tags": [
+        "arity"
+      ],
+      "content": "2001:db8:1:2:3:4:5"
+    },
+    {
+      "id": "ipv6.near_valid.011",
+      "bucket": "near_valid",
+      "label": "space-inside",
+      "expected": "reject",
+      "tags": [
+        "whitespace"
+      ],
+      "content": "2001:db8:: 1"
+    },
+    {
+      "id": "ipv6.near_valid.012",
+      "bucket": "near_valid",
+      "label": "slash-no-prefix",
+      "expected": "reject",
+      "tags": [
+        "cidr"
+      ],
+      "content": "2001:db8::1/"
+    },
+    {
+      "id": "ipv6.valid.013",
+      "bucket": "valid",
+      "label": "doc-prefix-host",
+      "expected": "accept",
+      "tags": [
+        "documentation"
+      ],
+      "content": "2001:db8:1:2:3:4:5:6"
+    },
+    {
+      "id": "ipv6.valid.014",
+      "bucket": "valid",
+      "label": "compressed-tail",
+      "expected": "accept",
+      "tags": [
+        "compressed"
+      ],
+      "content": "2001:db8:1::6"
+    },
+    {
+      "id": "ipv6.valid.015",
+      "bucket": "valid",
+      "label": "ula",
+      "expected": "accept",
+      "tags": [
+        "ula"
+      ],
+      "content": "fd12:3456:789a::1"
+    },
+    {
+      "id": "ipv6.valid.016",
+      "bucket": "valid",
+      "label": "all-fs",
+      "expected": "accept",
+      "tags": [
+        "edge"
+      ],
+      "content": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+    },
+    {
+      "id": "ipv6.valid.017",
+      "bucket": "valid",
+      "label": "mixed-zeros",
+      "expected": "accept",
+      "tags": [
+        "zeros"
+      ],
+      "content": "2001:db8:0:1:0:0:0:1"
+    },
+    {
+      "id": "ipv6.valid.018",
+      "bucket": "valid",
+      "label": "mapped-loopback",
+      "expected": "accept",
+      "tags": [
+        "mapped"
+      ],
+      "content": "::ffff:127.0.0.1"
+    },
+    {
+      "id": "ipv6.valid.019",
+      "bucket": "valid",
+      "label": "prefix-0",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "::/0"
+    },
+    {
+      "id": "ipv6.valid.020",
+      "bucket": "valid",
+      "label": "prefix-32",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "2001:db8::/32"
+    },
+    {
+      "id": "ipv6.string_stress.013",
+      "bucket": "string_stress",
+      "label": "uppercase-bracketed",
+      "expected": "parser-dependent",
+      "tags": [
+        "uri",
+        "case"
+      ],
+      "content": "[ABCD:EF01::1]"
+    },
+    {
+      "id": "ipv6.string_stress.014",
+      "bucket": "string_stress",
+      "label": "zone-id-numeric",
+      "expected": "parser-dependent",
+      "tags": [
+        "zone"
+      ],
+      "content": "fe80::1%5"
+    },
+    {
+      "id": "ipv6.string_stress.015",
+      "bucket": "string_stress",
+      "label": "space-separated-context",
+      "expected": "reject",
+      "tags": [
+        "context"
+      ],
+      "content": "src 2001:db8::1 dst"
+    },
+    {
+      "id": "ipv6.near_valid.013",
+      "bucket": "near_valid",
+      "label": "triple-colon",
+      "expected": "reject",
+      "tags": [
+        "delimiter"
+      ],
+      "content": "2001:db8:::1"
+    },
+    {
+      "id": "ipv6.near_valid.014",
+      "bucket": "near_valid",
+      "label": "mapped-missing-octet",
+      "expected": "reject",
+      "tags": [
+        "mapped",
+        "arity"
+      ],
+      "content": "::ffff:192.168.1"
+    },
+    {
+      "id": "ipv6.near_valid.015",
+      "bucket": "near_valid",
+      "label": "hextet-sign",
+      "expected": "reject",
+      "tags": [
+        "sign"
+      ],
+      "content": "2001:db8:+1::1"
+    }
+  ]
+}

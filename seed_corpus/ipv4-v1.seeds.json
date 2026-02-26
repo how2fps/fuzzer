@@ -1,0 +1,527 @@
+{
+  "schema_version": 1,
+  "dataset_id": "ipv4-v1",
+  "target_family": "ipv4",
+  "notes": "Starter IPv4 strings spanning canonical, formatting stress, and near-valid parse boundaries.",
+  "buckets": [
+    {
+      "name": "valid",
+      "description": "Canonical and edge IPv4 addresses (and common CIDR forms where applicable)."
+    },
+    {
+      "name": "string_stress",
+      "description": "Whitespace, padding, and delimiter-heavy IPv4-like strings for parser robustness."
+    },
+    {
+      "name": "near_valid",
+      "description": "Off-by-one and tokenization mistakes close to valid IPv4 syntax."
+    }
+  ],
+  "seeds": [
+    {
+      "id": "ipv4.valid.001",
+      "bucket": "valid",
+      "label": "all-zero",
+      "expected": "accept",
+      "tags": [
+        "edge"
+      ],
+      "content": "0.0.0.0"
+    },
+    {
+      "id": "ipv4.valid.002",
+      "bucket": "valid",
+      "label": "all-ones",
+      "expected": "accept",
+      "tags": [
+        "edge"
+      ],
+      "content": "255.255.255.255"
+    },
+    {
+      "id": "ipv4.valid.003",
+      "bucket": "valid",
+      "label": "loopback",
+      "expected": "accept",
+      "tags": [
+        "common"
+      ],
+      "content": "127.0.0.1"
+    },
+    {
+      "id": "ipv4.valid.004",
+      "bucket": "valid",
+      "label": "private-a",
+      "expected": "accept",
+      "tags": [
+        "private"
+      ],
+      "content": "10.0.0.1"
+    },
+    {
+      "id": "ipv4.valid.005",
+      "bucket": "valid",
+      "label": "private-b",
+      "expected": "accept",
+      "tags": [
+        "private"
+      ],
+      "content": "172.16.0.1"
+    },
+    {
+      "id": "ipv4.valid.006",
+      "bucket": "valid",
+      "label": "private-c",
+      "expected": "accept",
+      "tags": [
+        "private"
+      ],
+      "content": "192.168.1.1"
+    },
+    {
+      "id": "ipv4.valid.007",
+      "bucket": "valid",
+      "label": "broadcast-ish",
+      "expected": "accept",
+      "tags": [
+        "broadcast"
+      ],
+      "content": "192.168.1.255"
+    },
+    {
+      "id": "ipv4.valid.008",
+      "bucket": "valid",
+      "label": "public-example",
+      "expected": "accept",
+      "tags": [
+        "public"
+      ],
+      "content": "8.8.8.8"
+    },
+    {
+      "id": "ipv4.valid.009",
+      "bucket": "valid",
+      "label": "test-net-1",
+      "expected": "accept",
+      "tags": [
+        "reserved"
+      ],
+      "content": "192.0.2.1"
+    },
+    {
+      "id": "ipv4.valid.010",
+      "bucket": "valid",
+      "label": "cidr-24",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "192.168.1.0/24"
+    },
+    {
+      "id": "ipv4.valid.011",
+      "bucket": "valid",
+      "label": "cidr-32",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "203.0.113.99/32"
+    },
+    {
+      "id": "ipv4.valid.012",
+      "bucket": "valid",
+      "label": "leading-zeroes",
+      "expected": "parser-dependent",
+      "tags": [
+        "padding"
+      ],
+      "content": "001.002.003.004"
+    },
+    {
+      "id": "ipv4.string_stress.001",
+      "bucket": "string_stress",
+      "label": "surrounding-spaces",
+      "expected": "parser-dependent",
+      "tags": [
+        "whitespace"
+      ],
+      "content": "   192.168.1.1   "
+    },
+    {
+      "id": "ipv4.string_stress.002",
+      "bucket": "string_stress",
+      "label": "tab-newline",
+      "expected": "parser-dependent",
+      "tags": [
+        "whitespace"
+      ],
+      "content": "\t10.0.0.1\n"
+    },
+    {
+      "id": "ipv4.string_stress.003",
+      "bucket": "string_stress",
+      "label": "zero-padded-all",
+      "expected": "parser-dependent",
+      "tags": [
+        "padding"
+      ],
+      "content": "000.000.000.000"
+    },
+    {
+      "id": "ipv4.string_stress.004",
+      "bucket": "string_stress",
+      "label": "long-octet-text",
+      "expected": "reject",
+      "tags": [
+        "length"
+      ],
+      "content": "1234567890.1.1.1"
+    },
+    {
+      "id": "ipv4.string_stress.005",
+      "bucket": "string_stress",
+      "label": "ipv4-with-port",
+      "expected": "parser-dependent",
+      "tags": [
+        "suffix"
+      ],
+      "content": "127.0.0.1:80"
+    },
+    {
+      "id": "ipv4.string_stress.006",
+      "bucket": "string_stress",
+      "label": "bracketed",
+      "expected": "reject",
+      "tags": [
+        "delimiters"
+      ],
+      "content": "[127.0.0.1]"
+    },
+    {
+      "id": "ipv4.string_stress.007",
+      "bucket": "string_stress",
+      "label": "slash-no-mask",
+      "expected": "reject",
+      "tags": [
+        "cidr"
+      ],
+      "content": "10.0.0.1/"
+    },
+    {
+      "id": "ipv4.string_stress.008",
+      "bucket": "string_stress",
+      "label": "many-dots",
+      "expected": "reject",
+      "tags": [
+        "delimiter"
+      ],
+      "content": "1..2...3....4"
+    },
+    {
+      "id": "ipv4.string_stress.009",
+      "bucket": "string_stress",
+      "label": "prefixed-text",
+      "expected": "reject",
+      "tags": [
+        "prefix"
+      ],
+      "content": "ip=192.168.1.1"
+    },
+    {
+      "id": "ipv4.string_stress.010",
+      "bucket": "string_stress",
+      "label": "trailing-comment",
+      "expected": "reject",
+      "tags": [
+        "suffix"
+      ],
+      "content": "8.8.8.8 # dns"
+    },
+    {
+      "id": "ipv4.string_stress.011",
+      "bucket": "string_stress",
+      "label": "embedded-nul-text",
+      "expected": "reject",
+      "tags": [
+        "control"
+      ],
+      "content": "1.2.3.4\u0000tail"
+    },
+    {
+      "id": "ipv4.string_stress.012",
+      "bucket": "string_stress",
+      "label": "very-long-cidr",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "length"
+      ],
+      "content": "111.111.111.111/999999"
+    },
+    {
+      "id": "ipv4.near_valid.001",
+      "bucket": "near_valid",
+      "label": "octet-overflow",
+      "expected": "reject",
+      "tags": [
+        "range"
+      ],
+      "content": "256.0.0.1"
+    },
+    {
+      "id": "ipv4.near_valid.002",
+      "bucket": "near_valid",
+      "label": "negative-octet",
+      "expected": "reject",
+      "tags": [
+        "range"
+      ],
+      "content": "-1.0.0.1"
+    },
+    {
+      "id": "ipv4.near_valid.003",
+      "bucket": "near_valid",
+      "label": "missing-octet",
+      "expected": "reject",
+      "tags": [
+        "arity"
+      ],
+      "content": "192.168.1"
+    },
+    {
+      "id": "ipv4.near_valid.004",
+      "bucket": "near_valid",
+      "label": "extra-octet",
+      "expected": "reject",
+      "tags": [
+        "arity"
+      ],
+      "content": "192.168.1.1.5"
+    },
+    {
+      "id": "ipv4.near_valid.005",
+      "bucket": "near_valid",
+      "label": "empty-octet",
+      "expected": "reject",
+      "tags": [
+        "token"
+      ],
+      "content": "192..1.1"
+    },
+    {
+      "id": "ipv4.near_valid.006",
+      "bucket": "near_valid",
+      "label": "space-inside",
+      "expected": "reject",
+      "tags": [
+        "whitespace"
+      ],
+      "content": "192.168. 1.1"
+    },
+    {
+      "id": "ipv4.near_valid.007",
+      "bucket": "near_valid",
+      "label": "hex-octet",
+      "expected": "reject",
+      "tags": [
+        "base"
+      ],
+      "content": "0x7f.0.0.1"
+    },
+    {
+      "id": "ipv4.near_valid.008",
+      "bucket": "near_valid",
+      "label": "cidr-mask-overflow",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "range"
+      ],
+      "content": "192.168.1.0/33"
+    },
+    {
+      "id": "ipv4.near_valid.009",
+      "bucket": "near_valid",
+      "label": "cidr-negative-mask",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "range"
+      ],
+      "content": "192.168.1.0/-1"
+    },
+    {
+      "id": "ipv4.near_valid.010",
+      "bucket": "near_valid",
+      "label": "dangling-dot",
+      "expected": "reject",
+      "tags": [
+        "delimiter"
+      ],
+      "content": "10.0.0.1."
+    },
+    {
+      "id": "ipv4.near_valid.011",
+      "bucket": "near_valid",
+      "label": "double-slash",
+      "expected": "reject",
+      "tags": [
+        "cidr"
+      ],
+      "content": "10.0.0.1//24"
+    },
+    {
+      "id": "ipv4.near_valid.012",
+      "bucket": "near_valid",
+      "label": "non-digit-octet",
+      "expected": "reject",
+      "tags": [
+        "token"
+      ],
+      "content": "1.2.a.4"
+    },
+    {
+      "id": "ipv4.valid.013",
+      "bucket": "valid",
+      "label": "test-net-2",
+      "expected": "accept",
+      "tags": [
+        "reserved"
+      ],
+      "content": "198.51.100.42"
+    },
+    {
+      "id": "ipv4.valid.014",
+      "bucket": "valid",
+      "label": "test-net-3",
+      "expected": "accept",
+      "tags": [
+        "reserved"
+      ],
+      "content": "203.0.113.7"
+    },
+    {
+      "id": "ipv4.valid.015",
+      "bucket": "valid",
+      "label": "multicast-base",
+      "expected": "accept",
+      "tags": [
+        "multicast"
+      ],
+      "content": "224.0.0.1"
+    },
+    {
+      "id": "ipv4.valid.016",
+      "bucket": "valid",
+      "label": "link-local",
+      "expected": "accept",
+      "tags": [
+        "link-local"
+      ],
+      "content": "169.254.10.20"
+    },
+    {
+      "id": "ipv4.valid.017",
+      "bucket": "valid",
+      "label": "cgnat",
+      "expected": "accept",
+      "tags": [
+        "reserved"
+      ],
+      "content": "100.64.0.1"
+    },
+    {
+      "id": "ipv4.valid.018",
+      "bucket": "valid",
+      "label": "cidr-zero",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "0.0.0.0/0"
+    },
+    {
+      "id": "ipv4.valid.019",
+      "bucket": "valid",
+      "label": "cidr-host",
+      "expected": "parser-dependent",
+      "tags": [
+        "cidr"
+      ],
+      "content": "127.0.0.1/8"
+    },
+    {
+      "id": "ipv4.valid.020",
+      "bucket": "valid",
+      "label": "nat-gateway-style",
+      "expected": "accept",
+      "tags": [
+        "private"
+      ],
+      "content": "192.168.0.254"
+    },
+    {
+      "id": "ipv4.string_stress.013",
+      "bucket": "string_stress",
+      "label": "leading-plus",
+      "expected": "reject",
+      "tags": [
+        "sign"
+      ],
+      "content": "+1.2.3.4"
+    },
+    {
+      "id": "ipv4.string_stress.014",
+      "bucket": "string_stress",
+      "label": "csv-context",
+      "expected": "reject",
+      "tags": [
+        "context"
+      ],
+      "content": "1.2.3.4,5.6.7.8"
+    },
+    {
+      "id": "ipv4.string_stress.015",
+      "bucket": "string_stress",
+      "label": "repeated-octet-run",
+      "expected": "reject",
+      "tags": [
+        "length"
+      ],
+      "content": "11111111111111111111.2.3.4"
+    },
+    {
+      "id": "ipv4.near_valid.013",
+      "bucket": "near_valid",
+      "label": "mask-nondigit",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "token"
+      ],
+      "content": "192.168.1.0/2a"
+    },
+    {
+      "id": "ipv4.near_valid.014",
+      "bucket": "near_valid",
+      "label": "octet-plus-sign",
+      "expected": "reject",
+      "tags": [
+        "sign"
+      ],
+      "content": "1.+2.3.4"
+    },
+    {
+      "id": "ipv4.near_valid.015",
+      "bucket": "near_valid",
+      "label": "space-before-slash",
+      "expected": "reject",
+      "tags": [
+        "cidr",
+        "whitespace"
+      ],
+      "content": "10.0.0.1 /24"
+    }
+  ]
+}
