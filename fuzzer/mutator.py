@@ -30,7 +30,7 @@ json_grammar_map = {
             ],
             "ARR_BODY": [
                 (']', []),
-                ('1', ["NEXT_ARR"]) 
+                ('1', ["NEXT_ARR"])
             ],
             "NEXT_ARR": [
                 (',', ["VALUE", "NEXT_ARR"]),
