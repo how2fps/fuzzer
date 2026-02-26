@@ -31,7 +31,8 @@ corpus = SeedCorpus.load()
 rng = random.Random(1337)
 seed = corpus.sample("json-decoder", rng=rng)
 
-data = seed.content   # bytes to send to target
+data = seed.text      # primary value (string input)
+# data_bytes = seed.to_bytes()  # only if you need bytes
 print(seed.seed_id, seed.bucket, seed.label)
 ```
 
@@ -65,8 +66,7 @@ Behavior:
 
 ```python
 for seed in corpus.sample_ratio_batch("json-decoder", 40, {"valid": 0.5, "string_stress": 0.25, "near_valid": 0.25}, rng=random.Random(1)):
-    input_bytes = seed.content
-    # mutate -> run target -> collect signals -> compute reward
-    # log seed.seed_id, seed.bucket, reward
+    input_text = seed.text
+    # mutate -> run target -> collect signals -> compute isinteresting_score
+    # log seed.seed_id, seed.bucket, isinteresting_score
 ```
-

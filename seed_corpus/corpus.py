@@ -29,15 +29,18 @@ class Seed:
     family: str
     bucket: str
     label: str
-    content: bytes
+    text: str
     tags: tuple[str, ...]
     expected: str
     ordinal: int
     fingerprint: str
 
     @property
-    def text(self) -> str:
-        return self.content.decode("utf-8", errors="replace")
+    def content_bytes(self) -> bytes:
+        return self.to_bytes()
+
+    def to_bytes(self, encoding: str = "utf-8") -> bytes:
+        return self.text.encode(encoding)
 
 
 @dataclass(frozen=True)
@@ -421,19 +424,20 @@ def _load_target_seed_set(file_path: Path, expected_family: str) -> TargetSeedSe
                 f"seed {seed_id!r} references unknown bucket {bucket_name!r} in {file_path}"
             )
 
-        content = seed_doc["content"].encode("utf-8")
+        text = seed_doc["content"]
+        text_bytes = text.encode("utf-8")
         bucket_members[bucket_name].append(
             Seed(
                 seed_id=seed_id,
                 family=family,
                 bucket=bucket_name,
                 label=seed_doc.get("label", seed_id),
-                content=content,
+                text=text,
                 tags=tuple(seed_doc.get("tags", [])),
                 expected=seed_doc.get("expected", "unknown"),
                 ordinal=ordinal,
                 fingerprint=seed_doc.get(
-                    "fingerprint", _fingerprint_bytes(content)),
+                    "fingerprint", _fingerprint_bytes(text_bytes)),
             )
         )
 
