@@ -1,6 +1,6 @@
 # Seed Scheduler (Usage)
 
-Swappable scheduler backends for fuzz loop (`queue`, `heap`).
+Swappable scheduler backends for fuzz loop (`queue`, `heap`, `ucb_tree`).
 
 ## Architecture (important)
 
@@ -28,6 +28,8 @@ from seed_scheduler import make_scheduler
 scheduler = make_scheduler("queue")  # FIFO baseline
 # or
 scheduler = make_scheduler("heap", priority_mode="avg_score")
+# or
+scheduler = make_scheduler("ucb_tree", ucb_c=1.0, max_seeds_per_leaf=8)
 ```
 
 ## Add a seed from seed corpus
@@ -44,9 +46,8 @@ batch = corpus.sample_ratio_batch(
     rng=random.Random(42),
     shuffle=True,
 )
-
-    seed = batch[0]
-    scheduler.add(seed)
+seed = batch[0]
+scheduler.add(seed)
 ```
 
 ## Main loop pattern (important)
@@ -89,11 +90,18 @@ for candidate_seed in interesting_candidate_seeds:
 
 - `queue`: FIFO cyclic baseline (score is recorded, order stays FIFO)
 - `heap`: priority-based (score updates item priority)
+- `ucb_tree`: tree buckets (`coverage -> bug/output -> seeds`) selected with UCB1
 
 `heap` `priority_mode` options:
 
 - `"avg_score"` (default): running average `isinteresting_score`
 - `"last_score"`: most recent `isinteresting_score`
+
+`ucb_tree` notes:
+
+- `update(...)` computes reward from `signals` (`new_coverage`, `new_bug`, `crash`/`timeout`)
+- `isinteresting_score` is accepted for API compatibility but UCB updates use signal-derived reward
+- for bucket placement on `add(...)`, pass hints via `metadata={"signals": ...}`
 
 ## Helpful methods
 
