@@ -38,3 +38,10 @@ class BaseSeedScheduler(ABC):
     @abstractmethod
     def stats(self) -> dict[str, Any]:
         raise NotImplementedError
+
+    def debug_dump(self, limit: int = 20) -> dict[str, Any]:
+        """
+        Optional human-readable snapshot for debugging.
+        Concrete schedulers can override with scheduler-specific structure.
+        """
+        return {"stats": self.stats(), "note": "debug_dump not implemented"}

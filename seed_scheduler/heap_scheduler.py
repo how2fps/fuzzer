@@ -90,6 +90,30 @@ class HeapScheduler(BaseSeedScheduler):
             "total_items": len(self._items),
         }
 
+    def debug_dump(self, limit: int = 20) -> dict[str, Any]:
+        # Show current items ordered by computed priority (highest first).
+        ordered = sorted(
+            self._items.values(),
+            key=lambda item: (-item.priority, item.item_id),
+        )[: max(limit, 0)]
+        items = [
+            {
+                "item_id": item.item_id,
+                "seed_id": item.seed.seed_id,
+                "bucket": item.seed.bucket,
+                "priority": item.priority,
+                "times_selected": item.times_selected,
+                "last_isinteresting_score": item.last_isinteresting_score,
+                "avg_isinteresting_score": item.avg_isinteresting_score,
+            }
+            for item in ordered
+        ]
+        return {
+            "stats": self.stats(),
+            "priority_order": items,
+            "truncated": len(self._items) > len(items),
+        }
+
     def _compute_priority(self, item: ScheduledSeed) -> float:
         base = float(self._bucket_prior.get(item.seed.bucket, 0.0))
         if self._priority_mode == "last_score":

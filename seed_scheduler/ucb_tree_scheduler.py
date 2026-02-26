@@ -142,6 +142,32 @@ class UCBTreeScheduler(BaseSeedScheduler):
             "max_seeds_per_leaf": self._max_seeds_per_leaf,
         }
 
+    def debug_dump(self, limit: int = 20) -> dict[str, Any]:
+        leaves: list[dict[str, Any]] = []
+        for cov_key, cov_node in self._root.children.items():
+            for bug_key, bug_node in cov_node.children.items():
+                if not bug_node.seeds:
+                    continue
+                leaves.append(
+                    {
+                        "coverage_key": cov_key,
+                        "bug_key": bug_key,
+                        "leaf_n_selected": bug_node.n_selected,
+                        "leaf_q_avg_reward": round(bug_node.q_avg_reward, 4),
+                        "seed_count": len(bug_node.seeds),
+                        "seed_ids": [s.seed.seed_id for s in bug_node.seeds[:5]],
+                    }
+                )
+        # Surface the leaves with highest current Q first for a useful snapshot.
+        leaves.sort(
+            key=lambda x: (-x["leaf_q_avg_reward"], -x["leaf_n_selected"], x["coverage_key"], x["bug_key"])
+        )
+        return {
+            "stats": self.stats(),
+            "leaves": leaves[: max(limit, 0)],
+            "truncated": len(leaves) > min(max(limit, 0), len(leaves)),
+        }
+
     def _ensure_leaf(self, cov_key: str, bug_key: str) -> _TreeNode:
         cov = self._root.children.get(cov_key)
         if cov is None:

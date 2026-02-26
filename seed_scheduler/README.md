@@ -110,6 +110,21 @@ for candidate_seed in interesting_candidate_seeds:
 - `scheduler.update(item, isinteresting_score=..., signals=...)`
 - `scheduler.empty()`
 - `scheduler.stats()`
+- `scheduler.debug_dump(limit=20)` (inspect current scheduler contents)
+
+## Inspect current scheduler contents (debug)
+
+Use `debug_dump()` to see what is currently inside the scheduler.
+
+```python
+print(scheduler.debug_dump(limit=10))
+```
+
+What it returns depends on the backend:
+
+- `queue`: current queue order (`item_id`, `seed_id`, bucket, stats)
+- `heap`: current priority order (priority + score stats)
+- `ucb_tree`: leaf buckets (`coverage_key`, `bug_key`, leaf `N/Q`, seed IDs)
 
 ## Demo
 

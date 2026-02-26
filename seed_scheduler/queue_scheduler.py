@@ -71,3 +71,23 @@ class QueueScheduler(BaseSeedScheduler):
             "ready": len(self._queue),
             "total_items": len(self._items),
         }
+
+    def debug_dump(self, limit: int = 20) -> dict[str, Any]:
+        ordered_ids = list(self._queue)[: max(limit, 0)]
+        items = []
+        for item_id in ordered_ids:
+            item = self._items[item_id]
+            items.append(
+                {
+                    "item_id": item.item_id,
+                    "seed_id": item.seed.seed_id,
+                    "bucket": item.seed.bucket,
+                    "times_selected": item.times_selected,
+                    "last_isinteresting_score": item.last_isinteresting_score,
+                }
+            )
+        return {
+            "stats": self.stats(),
+            "queue_order": items,
+            "truncated": len(self._queue) > len(items),
+        }
