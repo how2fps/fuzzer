@@ -48,7 +48,7 @@ def json_to_walk(data):
 def gen_quoted_str(rng):
     return '"' + gen_random_str(rng) + '"'
 
-json_grammar_map = {
+buggy_json_grammar_map = {
     "VALUE": [
         ('{', "OBJ_BODY"), ('{', "OBJ_BODY"),
         ('[', "ARR_BODY"), ('[', "ARR_BODY"),
@@ -72,12 +72,32 @@ json_grammar_map = {
     "VAL_IN_OBJ_NESTED": [(gen_int, "OBJ_CONTINUE")], 
     
     "OBJ_CONTINUE": [('}', "FINAL"), (',', "OBJ_BODY")],
-    
-    "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_NEXT")],
+    "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_CONTINUE")],
+    "ARR_CONTINUE": [(']', "FINAL"), (',', "ARR_BODY")],    
     "ARR_NEXT": [(',', "ARR_VAL"), (']', "FINAL")],
     "ARR_VAL": [(gen_int, "ARR_NEXT")]
 }
 
+correct_json_grammar_map = {
+    "VALUE": [('{', "OBJ_BODY"), ('[', "ARR_BODY"), (gen_int, "FINAL")],
+    
+    # --- OBJECTS ---
+    "OBJ_BODY": [('"', "STR_START")], 
+    "STR_START": [(gen_random_str, "STR_END")],
+    "STR_END": [('"', "COLON")],
+    "COLON": [(':', "VAL_IN_OBJ")],
+    
+    # The trick: Split the closing brace from the comma
+    "VAL_IN_OBJ": [(gen_int, "OBJ_POST_VAL")],
+    "OBJ_POST_VAL": [
+        ('}', "FINAL"),      # Path to end the object
+        (',', "OBJ_BODY")    # Path to add another key
+    ],
+    
+    # --- ARRAYS ---
+    "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_CONTINUE")],
+    "ARR_CONTINUE": [(']', "FINAL"), (',', "ARR_BODY")]
+}
 
 class Mutator:
         def __init__(self, grammar_map, seed=None):
@@ -172,7 +192,7 @@ class Mutator:
                 
         
         
-mutator = Mutator(json_grammar_map)
+mutator = Mutator(correct_json_grammar_map)
 
 seed_walk = mutator.generate_walk("VALUE")
 mutated_walk = mutator.mutate(seed_walk)
