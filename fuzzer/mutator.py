@@ -8,14 +8,14 @@ import string
 
 
 def print_pretty_json(raw_string):
-    try:
-        data = json.loads(raw_string)
-        print("--- PARSED OBJECT ---")
-        print(json.dumps(data, indent=4))
-    except json.JSONDecodeError as e:
-        print(f"--- INVALID JSON (Couldn't parse) ---")
-        print(f"Raw string: {raw_string}")
-        print(f"Error: {e}")
+        try:
+                data = json.loads(raw_string)
+                print("--- PARSED OBJECT ---")
+                print(json.dumps(data, indent=4))
+        except json.JSONDecodeError as e:
+                print(f"--- INVALID JSON (Couldn't parse) ---")
+                print(f"Raw string: {raw_string}")
+                print(f"Error: {e}")
         
 def gen_random_str(rng):
         length = rng.randint(1, 25)
@@ -44,7 +44,7 @@ def json_to_walk(data):
         return walk
 
 def gen_quoted_str(rng):
-    return '"' + gen_random_str(rng) + '"'
+        return '"' + gen_random_str(rng) + '"'
 
 buggy_json_grammar_map = {
         "VALUE": [
@@ -114,9 +114,10 @@ class Mutator:
                 
                 
         def havoc(self, walk, corpus):
-                if not walk: return self.generate_walk(self.start_state)
+                if not walk: 
+                        return self.generate_walk(self.start_state)
                 mutated = list(walk)
-                num_mutations = 1 << random.randint(1, 4)
+                num_mutations = 1 << random.randint(1, 4) #make this adjustable?
         
                 for _ in range(num_mutations):
                     strategies = [self.mutate_random]
@@ -147,6 +148,7 @@ class Mutator:
                 w1_idx = states1[shared_state]
                 return walk1[:w1_idx] + walk2[w2_idx:]                
         
+  
         def generate_walk(self, current_state, max_depth=50):
             walk = []
             stack = [] 
