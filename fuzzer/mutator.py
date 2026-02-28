@@ -78,25 +78,32 @@ buggy_json_grammar_map = {
     "ARR_VAL": [(gen_int, "ARR_NEXT")]
 }
 
-correct_json_grammar_map = {
-    "VALUE": [('{', "OBJ_BODY"), ('[', "ARR_BODY"), (gen_int, "FINAL")],
+more_correct_json_grammar_map = {
+    "VALUE": [('{', "OBJ_BODY"), ('[', "ARR_BODY")],
     
-    # --- OBJECTS ---
+    # OBJECTS
     "OBJ_BODY": [('"', "STR_START")], 
     "STR_START": [(gen_random_str, "STR_END")],
     "STR_END": [('"', "COLON")],
-    "COLON": [(':', "VAL_IN_OBJ")],
+    "COLON": [(':', "VAL")],
     
-    # The trick: Split the closing brace from the comma
-    "VAL_IN_OBJ": [(gen_int, "OBJ_POST_VAL")],
-    "OBJ_POST_VAL": [
-        ('}', "FINAL"),      # Path to end the object
-        (',', "OBJ_BODY")    # Path to add another key
+    "VAL": [
+        (gen_int, "OBJ_BRANCH"), 
+        ('true', "OBJ_BRANCH"), 
+        ('{', "OBJ_BODY_NESTED"), 
+        ('[', "ARR_BODY_NESTED")
     ],
+    "OBJ_BRANCH": [('}', "FINAL"), (',', "OBJ_BODY")],
     
-    # --- ARRAYS ---
-    "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_CONTINUE")],
-    "ARR_CONTINUE": [(']', "FINAL"), (',', "ARR_BODY")]
+    "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
+    "ARR_BRANCH": [(']', "FINAL"), (',', "VAL_IN_ARR")],
+    
+    "VAL_IN_ARR": [(gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
+
+    "OBJ_BODY_NESTED": [('"', "STR_START")], 
+    "ARR_BODY_NESTED": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
+
+    "FINAL": []
 }
 
 class Mutator:
@@ -111,9 +118,8 @@ class Mutator:
                 
         def havoc(self, walk, corpus):
                 if not walk: return self.generate_walk(self.start_state)
-        
                 mutated = list(walk)
-                num_mutations = 1 << random.randint(1, 4) # Reduced for testing
+                num_mutations = 1 << random.randint(1, 4)
         
                 for _ in range(num_mutations):
                     strategies = [self.mutate_random]
@@ -146,7 +152,7 @@ class Mutator:
         
         def generate_walk(self, current_state, max_depth=30):
                 walk = []
-                while current_state != self.end_state and current_state in self.grammar and max_depth > 0:
+                while current_state != self.end_state and current_state in self.grammar:
                         choices = self.grammar[current_state]
                         term_choice, next_state = random.choice(choices)
 
@@ -154,22 +160,27 @@ class Mutator:
                         walk.append((current_state, terminal))
 
                         current_state = next_state
-                        max_depth -= 1
 
                 if current_state != self.end_state:
                         if "OBJ" in current_state: walk.append(("FORCE_CLOSE", "}"))
                         elif "ARR" in current_state: walk.append(("FORCE_CLOSE", "]"))
 
                 return walk
-    
+
+        def finalize_structure(self, s):
+                braces = s.count('{') - s.count('}')
+                brackets = s.count('[') - s.count(']')
+                s = s.rstrip(',:')
+                s += '}' * max(0, braces)
+                s += ']' * max(0, brackets)
+                return s
+        
         def unparse(self, walk):
-            return "".join([str(step[1]) for step in walk])
+                return "".join([str(step[1]) for step in walk])
 
         def mutate(self, walk):
                 return self.havoc(walk, [])
         
-        
-                
         def bit_flip(self, data):
                 idx = random.randrange(len(data))
                 data[idx] ^= (1 << random.randrange(8))
@@ -181,22 +192,22 @@ class Mutator:
         def interesting_value(self, data):
                 idx = random.randrange(len(data))
                 
-
         def delete_block(self, data):
                 if len(data) < 2: return data
                 idx = random.randrange(len(data))
                
-
         def clone_block(self, data):
                 idx = random.randrange(len(data))
                 
         
         
-mutator = Mutator(correct_json_grammar_map)
+mutator = Mutator(more_correct_json_grammar_map)
 
 seed_walk = mutator.generate_walk("VALUE")
 mutated_walk = mutator.mutate(seed_walk)
 
 final_str = mutator.unparse(mutated_walk)
+
+final_str = mutator.finalize_structure(final_str)
 
 print_pretty_json(final_str)
