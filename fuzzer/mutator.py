@@ -9,9 +9,7 @@ import string
 
 def print_pretty_json(raw_string):
     try:
-        # 1. Try to load the string as a real JSON object
         data = json.loads(raw_string)
-        # 2. If it works, print the dictionary/list structure
         print("--- PARSED OBJECT ---")
         print(json.dumps(data, indent=4))
     except json.JSONDecodeError as e:
@@ -49,61 +47,60 @@ def gen_quoted_str(rng):
     return '"' + gen_random_str(rng) + '"'
 
 buggy_json_grammar_map = {
-    "VALUE": [
-        ('{', "OBJ_BODY"), ('{', "OBJ_BODY"),
-        ('[', "ARR_BODY"), ('[', "ARR_BODY"),
-        (gen_int, "FINAL"), ('true', "FINAL")
-    ],
-    "VAL_IN_OBJ": [
-        (gen_int, "OBJ_CONTINUE"),
-        ('true', "OBJ_CONTINUE"),
-        ('{', "OBJ_BODY"), ('{', "OBJ_BODY"),
-        ('[', "ARR_BODY"), ('[', "ARR_BODY") 
-    ],    
-    "OBJ_BODY": [('"', "STR_START")], 
-    "STR_START": [(gen_random_str, "STR_END")],
-    "STR_END": [('"', "COLON")],
-    "COLON": [(':', "VAL_IN_OBJ")],
-    
-    "OBJ_BODY_NESTED": [('"', "STR_START_NESTED")],
-    "STR_START_NESTED": [(gen_random_str, "STR_END_NESTED")],
-    "STR_END_NESTED": [('"', "COLON_NESTED")],
-    "COLON_NESTED": [(':', "VAL_IN_OBJ_NESTED")],
-    "VAL_IN_OBJ_NESTED": [(gen_int, "OBJ_CONTINUE")], 
-    
-    "OBJ_CONTINUE": [('}', "FINAL"), (',', "OBJ_BODY")],
-    "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_CONTINUE")],
-    "ARR_CONTINUE": [(']', "FINAL"), (',', "ARR_BODY")],    
-    "ARR_NEXT": [(',', "ARR_VAL"), (']', "FINAL")],
-    "ARR_VAL": [(gen_int, "ARR_NEXT")]
-}
+        "VALUE": [
+                ('{', "OBJ_BODY"), ('{', "OBJ_BODY"),
+                ('[', "ARR_BODY"), ('[', "ARR_BODY"),
+                (gen_int, "FINAL"), ('true', "FINAL")
+        ],
+        "VAL_IN_OBJ": [
+                (gen_int, "OBJ_CONTINUE"),
+                ('true', "OBJ_CONTINUE"),
+                ('{', "OBJ_BODY"), ('{', "OBJ_BODY"),
+                ('[', "ARR_BODY"), ('[', "ARR_BODY") 
+        ],    
+        "OBJ_BODY": [('"', "STR_START")], 
+        "STR_START": [(gen_random_str, "STR_END")],
+        "STR_END": [('"', "COLON")],
+        "COLON": [(':', "VAL_IN_OBJ")],
+        
+        "OBJ_BODY_NESTED": [('"', "STR_START_NESTED")],
+        "STR_START_NESTED": [(gen_random_str, "STR_END_NESTED")],
+        "STR_END_NESTED": [('"', "COLON_NESTED")],
+        "COLON_NESTED": [(':', "VAL_IN_OBJ_NESTED")],
+        "VAL_IN_OBJ_NESTED": [(gen_int, "OBJ_CONTINUE")], 
+        
+        "OBJ_CONTINUE": [('}', "FINAL"), (',', "OBJ_BODY")],
+        "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_CONTINUE")],
+        "ARR_CONTINUE": [(']', "FINAL"), (',', "ARR_BODY")],    
+        "ARR_NEXT": [(',', "ARR_VAL"), (']', "FINAL")],
+        "ARR_VAL": [(gen_int, "ARR_NEXT")]
+}       
 
 more_correct_json_grammar_map = {
-    "VALUE": [('{', "OBJ_BODY"), ('[', "ARR_BODY")],
-    
-    # OBJECTS
-    "OBJ_BODY": [('"', "STR_START")], 
-    "STR_START": [(gen_random_str, "STR_END")],
-    "STR_END": [('"', "COLON")],
-    "COLON": [(':', "VAL")],
-    
-    "VAL": [
-        (gen_int, "OBJ_BRANCH"), 
-        ('true', "OBJ_BRANCH"), 
-        ('{', "OBJ_BODY_NESTED"), 
-        ('[', "ARR_BODY_NESTED")
-    ],
-    "OBJ_BRANCH": [('}', "FINAL"), (',', "OBJ_BODY")],
-    
-    "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
-    "ARR_BRANCH": [(']', "FINAL"), (',', "VAL_IN_ARR")],
-    
-    "VAL_IN_ARR": [(gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
+        "VALUE": [('{', "OBJ_BODY"), ('[', "ARR_BODY")],
+        
+        "OBJ_BODY": [('"', "STR_START")], 
+        "STR_START": [(gen_random_str, "STR_END")],
+        "STR_END": [('"', "COLON")],
+        "COLON": [(':', "VAL")],
+        
+        "VAL": [
+                (gen_int, "OBJ_BRANCH"), 
+                ('true', "OBJ_BRANCH"), 
+                ('{', "OBJ_BODY_NESTED"), 
+                ('[', "ARR_BODY_NESTED")
+        ],
+        "OBJ_BRANCH": [('}', "FINAL"), (',', "OBJ_BODY")],
+        
+        "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
+        "ARR_BRANCH": [(']', "FINAL"), (',', "VAL_IN_ARR")],
+        
+        "VAL_IN_ARR": [(gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
 
-    "OBJ_BODY_NESTED": [('"', "STR_START")], 
-    "ARR_BODY_NESTED": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
+        "OBJ_BODY_NESTED": [('"', "STR_START")], 
+        "ARR_BODY_NESTED": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
 
-    "FINAL": []
+        "FINAL": []
 }
 
 class Mutator:
@@ -150,23 +147,36 @@ class Mutator:
                 w1_idx = states1[shared_state]
                 return walk1[:w1_idx] + walk2[w2_idx:]                
         
-        def generate_walk(self, current_state, max_depth=30):
-                walk = []
-                while current_state != self.end_state and current_state in self.grammar:
-                        choices = self.grammar[current_state]
-                        term_choice, next_state = random.choice(choices)
+        def generate_walk(self, current_state, max_depth=50):
+            walk = []
+            stack = [] 
+        
+            while current_state != self.end_state and current_state in self.grammar:
+                choices = self.grammar[current_state]
 
-                        terminal = term_choice(self.rng) if callable(term_choice) else term_choice
-                        walk.append((current_state, terminal))
+                if not stack:
+                    choices = [c for c in choices if c[0] not in ['}', ']']]
+                else:
+                    expected_closer = stack[-1]
+                    forbidden = {'}': ']', ']': '}'}[expected_closer]
+                    choices = [c for c in choices if c[0] != forbidden]
 
-                        current_state = next_state
+                term_choice, next_state = random.choice(choices)
+                terminal = term_choice(self.rng) if callable(term_choice) else term_choice
 
-                if current_state != self.end_state:
-                        if "OBJ" in current_state: walk.append(("FORCE_CLOSE", "}"))
-                        elif "ARR" in current_state: walk.append(("FORCE_CLOSE", "]"))
+                if terminal == '{': stack.append('}')
+                elif terminal == '[': stack.append(']')
+                elif terminal == '}' or terminal == ']':
+                    if stack: stack.pop()
 
-                return walk
+                walk.append((current_state, terminal))
+                current_state = next_state
 
+            while stack:
+                walk.append(("FORCE_CLOSE", stack.pop()))
+
+            return walk
+    
         def finalize_structure(self, s):
                 braces = s.count('{') - s.count('}')
                 brackets = s.count('[') - s.count(']')
