@@ -2,8 +2,7 @@
 Parser: run fuzzer input against a selected target and emit normalized JSON results.
 
 Target is a directory with a README describing how to run it. Results include
-status, output signatures, bug signature, semantic output, and coverage bitmap
-(for json_open target only).
+status and bug signature.
 """
 
 from __future__ import annotations
@@ -16,6 +15,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from json_decoder_parser import run_json_decoder_with_branches
+except ImportError:
+    from .json_decoder_parser import run_json_decoder_with_branches
+
 # Default timeout per target run (seconds)
 DEFAULT_TIMEOUT = 10.0
 
@@ -24,6 +28,9 @@ COVERAGE_TARGET_NAME = "json_open"
 
 # Base path for targets (project root / targets)
 _TARGETS_BASE = Path(__file__).resolve().parent.parent / "targets"
+
+# Absolute path to the json_open runner script that uses stdlib json
+JSON_OPEN_SCRIPT = Path(__file__).resolve().parent / "json_open_runner.py"
 
 # Target name -> path, run command, and optional open-equivalent.
 # cmd: argv list (relative paths resolved against target dir). Input is appended as final arg
@@ -58,8 +65,16 @@ TARGETS: dict[str, dict[str, Any]] = {
     },
     "json-decoder": {
         "path": "json-decoder",
-        "cmd": ["uv", "run", "json_decoder_stv.py", "--str-json"],
-        "input_via_stdin": False,
+        "handler": "json_decoder",
+        "open": "json_open",
+    },
+    "json_open": {
+        "path": "json-decoder",
+        "cmd": [
+            sys.executable,
+            str(JSON_OPEN_SCRIPT),
+        ],
+        "input_via_stdin": True,
     },
 }
 
@@ -135,46 +150,6 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
     return out
 
 
-def _semantic_output(stdout: str, stderr: str) -> str | None:
-    """Produce a normalized semantic representation of program output."""
-    combined = (stdout or "") + "\n" + (stderr or "")
-    if not combined.strip():
-        return None
-    normalized = _normalize_text(combined)
-    # Optional: try to parse as JSON and re-serialize for JSON targets
-    try:
-        obj = json.loads(stdout or "{}")
-        return json.dumps(obj, sort_keys=True, separators=(",", ":"))
-    except (json.JSONDecodeError, TypeError):
-        pass
-    return normalized[:2000]  # cap size
-
-
-def _read_coverage_bitmap(csv_path: Path) -> list[int] | None:
-    """Read coverage bitmap from a CSV (e.g. one column of 0/1 or edge counts)."""
-    if not csv_path.is_file():
-        return None
-    try:
-        text = csv_path.read_text(encoding="utf-8", errors="replace").strip()
-        if not text:
-            return None
-        lines = text.splitlines()
-        if not lines:
-            return None
-        # Assume last column or first column might be bitmap; support single column of ints
-        out: list[int] = []
-        for line in lines:
-            parts = [p.strip() for p in line.split(",")]
-            for p in parts:
-                try:
-                    out.append(int(p))
-                except ValueError:
-                    pass
-        return out if out else None
-    except OSError:
-        return None
-
-
 def _resolve_argv(cmd: list[str], target_dir: Path, input_str: str | None, input_via_stdin: bool) -> list[str]:
     """Build argv from hardcoded cmd; resolve relative paths; append input unless input_via_stdin."""
     argv: list[str] = []
@@ -195,8 +170,8 @@ def run_target(
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """
-    Run one target with the given input. Return result dict with status,
-    stdout/stderr, signatures, bug signature, semantic output, and optionally coverage.
+    Run one target with the given input. Return result dict with status and
+    bug signature.
     Uses hardcoded TARGETS[target_name]["cmd"]; no README parsing.
     """
     entry = TARGETS.get(target_name)
@@ -205,11 +180,7 @@ def run_target(
             "target": target_name,
             "status": "error",
             "error": f"no hardcoded cmd for target: {target_name}",
-            "stdout_signature": None,
-            "stderr_signature": None,
             "bug_signature": None,
-            "semantic_output": None,
-            "coverage_bitmap": None,
         }
 
     cmd = entry["cmd"]
@@ -222,11 +193,7 @@ def run_target(
     result: dict[str, Any] = {
         "target": target_name,
         "status": "ok",
-        "stdout_signature": None,
-        "stderr_signature": None,
         "bug_signature": None,
-        "semantic_output": None,
-        "coverage_bitmap": None,
     }
 
     try:
@@ -250,20 +217,39 @@ def run_target(
     else:
         if proc.returncode != 0:
             result["status"] = "crash"
-        result["exit_code"] = proc.returncode
 
-    result["stdout_signature"] = _signature(stdout)
-    result["stderr_signature"] = _signature(stderr)
-    result["bug_signature"] = _parse_bug_signature(stderr)
-    result["semantic_output"] = _semantic_output(stdout, stderr)
+    # Primary bug signature from stderr (usual case)
+    bug_sig = _parse_bug_signature(stderr)
 
-    # Coverage bitmap only for json_open target (CSV written by run into target_dir)
-    if COVERAGE_TARGET_NAME in target_name.lower():
-        for csv_name in ("coverage.csv", "coverage_bitmap.csv", "edges.csv", "output.csv"):
-            csv_path = target_dir / csv_name
-            if csv_path.is_file():
-                result["coverage_bitmap"] = _read_coverage_bitmap(csv_path)
-                break
+    # If stderr did not yield a bug signature, try to infer it from JSON stdout
+    # used by some open targets (e.g. json_open) that encode bug info and status in stdout.
+    if not bug_sig.get("type"):
+        try:
+            stdout_obj = json.loads(stdout)
+        except (json.JSONDecodeError, TypeError):
+            stdout_obj = None
+
+        if isinstance(stdout_obj, dict):
+            bug_info = stdout_obj.get("bug_signature")
+            if isinstance(bug_info, dict):
+                bug_sig = {
+                    "type": bug_info.get("type"),
+                    "exception": bug_info.get("exception"),
+                    "message": bug_info.get("message"),
+                    "file": bug_info.get("file"),
+                    "line": str(bug_info.get("line")) if bug_info.get("line") is not None else None,
+                }
+
+            # If the JSON stdout includes an explicit status field, trust it.
+            status_from_stdout = stdout_obj.get("status")
+            if isinstance(status_from_stdout, str):
+                result["status"] = status_from_stdout
+
+    result["bug_signature"] = bug_sig
+
+    # If we have a bug signature but status is still "ok", treat it as a bug.
+    if bug_sig.get("type") and result.get("status") == "ok":
+        result["status"] = "bug"
 
     return result
 
@@ -281,19 +267,22 @@ def run_parser(
 
     Provide exactly one of input_data or input_path. If neither is provided, stdin is read.
     target is the target name (key in TARGETS). For closed targets (cidrize-runner, IPv4-IPv6-parser),
-    the equivalent open target is also run and its output is in the "open_result" nested dict.
+    the equivalent open target is also run and its output is returned separately.
 
     Returns:
-        Result dict (status, signatures, bug_signature, semantic_output, coverage_bitmap).
-        If target has an open equivalent, includes "open_result" with the open target's output.
+        Dict with:
+          - "closed_result": the primary target's result dict (status, bug_signature, etc.).
+          - "open_result": (optional) the open target's result dict, for targets that
+            have an open equivalent.
     """
     if input_path is not None:
         path = Path(input_path)
         if not path.is_file():
             out = {"error": f"Input file not found: {input_path}"}
+            wrapped = {"closed_result": out}
             if print_json:
-                print(json.dumps(out), file=sys.stderr)
-            return out
+                print(json.dumps(wrapped), file=sys.stderr)
+            return wrapped
         data = path.read_bytes()
     elif input_data is not None:
         data = input_data
@@ -302,25 +291,42 @@ def run_parser(
 
     if target not in TARGETS:
         out = {"error": f"Unknown target: {target}", "known_targets": list(TARGETS)}
+        wrapped = {"closed_result": out}
         if print_json:
-            print(json.dumps(out), file=sys.stderr)
-        return out
+            print(json.dumps(wrapped), file=sys.stderr)
+        return wrapped
 
     entry = TARGETS[target]
-    target_dir = _TARGETS_BASE / entry["path"]
-    target_dir = target_dir.resolve()
-    if not target_dir.is_dir():
-        out = {"error": f"Target directory not found: {target_dir}"}
-        if print_json:
-            print(json.dumps(out), file=sys.stderr)
-        return out
 
-    result = run_target(target, target_dir, data, timeout=timeout)
+    # Special handling for json-decoder target using internal helper
+    handler = entry.get("handler")
+    if handler == "json_decoder":
+        input_str = data.decode("utf-8", errors="replace")
+        json_decoder_info = run_json_decoder_with_branches(json_string=input_str)
 
-    # For closed targets, also run the open equivalent and nest its output
+        base_result: dict[str, Any] = {
+            "target": target,
+            "bug_signature": None,
+        }
+        base_result.update(json_decoder_info)
+        result = base_result
+    else:
+        target_dir = _TARGETS_BASE / entry["path"]
+        target_dir = target_dir.resolve()
+        if not target_dir.is_dir():
+            out = {"error": f"Target directory not found: {target_dir}"}
+            wrapped = {"closed_result": out}
+            if print_json:
+                print(json.dumps(wrapped), file=sys.stderr)
+            return wrapped
+
+        result = run_target(target, target_dir, data, timeout=timeout)
+
+    # For closed targets, also run the open equivalent
     open_name = entry.get("open")
     if open_name is not None:
-        open_dir = _TARGETS_BASE / open_name
+        open_entry = TARGETS.get(open_name)
+        open_dir = _TARGETS_BASE / (open_entry["path"] if open_entry and "path" in open_entry else open_name)
         open_dir = open_dir.resolve()
         if open_dir.is_dir():
             result["open_result"] = run_target(open_name, open_dir, data, timeout=timeout)
@@ -329,16 +335,21 @@ def run_parser(
                 "target": open_name,
                 "status": "error",
                 "error": f"Open target directory not found: {open_dir}",
-                "stdout_signature": None,
-                "stderr_signature": None,
                 "bug_signature": None,
-                "semantic_output": None,
-                "coverage_bitmap": None,
             }
 
+    # Move any open_result out of the closed_result payload to top level.
+    open_result = None
+    if isinstance(result, dict) and "open_result" in result:
+        open_result = result.pop("open_result")
+
+    wrapped_result: dict[str, Any] = {"closed_result": result}
+    if open_result is not None:
+        wrapped_result["open_result"] = open_result
+
     if print_json:
-        print(json.dumps(result, indent=2))
-    return result
+        print(json.dumps(wrapped_result, indent=2))
+    return wrapped_result
 
 
 def example_from_bytes() -> None:
@@ -349,12 +360,11 @@ def example_from_bytes() -> None:
         timeout=5.0,
         print_json=True,
     )
-    print("Example 1 (bytes, cidrize-runner): status =", result.get("status"))
 
 def example_print_json() -> None:
     """Run parser and print the full result as JSON to stdout."""
     run_parser(
-        input_data=b'{"key": "value"}',
+        input_data=b'{"key": "value"',
         target="json-decoder",
         timeout=5.0,
         print_json=True,

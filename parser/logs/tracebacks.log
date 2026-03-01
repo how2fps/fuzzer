@@ -1,0 +1,588 @@
+================================================================================
+Timestamp : 2026-02-26 10:05:05.321740+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 193, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:07:40.739124+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 228, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:10:58.187529+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:12:49.362228+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:21:55.797023+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:23:55.343871+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:35:52.595662+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:37:07.947227+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:40:19.682619+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:43:49.265332+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 10:45:46.226776+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 297, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 11:00:34.908371+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 11:03:56.002243+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:12:02.028250+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:22:29.081563+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:24:30.344945+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:43:15.873943+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:45:26.276236+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:50:43.005070+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:53:16.292120+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+
+================================================================================
+Timestamp : 2026-02-26 12:54:12.736501+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 224, in JSONObject
+    raise JSONDecodeError("Expecting ',' delimiter", s, end - 1)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ',' delimiter: line 1 column 16 (char 15)
+
+

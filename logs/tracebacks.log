@@ -1,0 +1,353 @@
+================================================================================
+Timestamp : 2026-02-26 14:31:16.400125+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Extra data: line 1 column 6 (char 5)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 369, in decode
+    raise JSONDecodeError("Extra data", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Extra data: line 1 column 6 (char 5)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:16.602562+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 185, in JSONObject
+    raise JSONDecodeError(
+        "Expecting property name enclosed in double quotes", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:16.785162+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 185, in JSONObject
+    raise JSONDecodeError(
+        "Expecting property name enclosed in double quotes", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:17.175264+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 369, in decode
+    raise JSONDecodeError("Extra data", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:17.378227+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Extra data: line 1 column 6 (char 5)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 369, in decode
+    raise JSONDecodeError("Extra data", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Extra data: line 1 column 6 (char 5)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:50.815869+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 369, in decode
+    raise JSONDecodeError("Extra data", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:51.906746+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 384, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+buggy_json.decoder_stv.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:52.216432+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 185, in JSONObject
+    raise JSONDecodeError(
+        "Expecting property name enclosed in double quotes", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:52.463662+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 185, in JSONObject
+    raise JSONDecodeError(
+        "Expecting property name enclosed in double quotes", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:31:52.691674+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 185, in JSONObject
+    raise JSONDecodeError(
+        "Expecting property name enclosed in double quotes", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:37:41.815984+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 185, in JSONObject
+    raise JSONDecodeError(
+        "Expecting property name enclosed in double quotes", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:37:42.018610+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting ':' delimiter: line 1 column 5 (char 4)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 196, in JSONObject
+    raise JSONDecodeError("Expecting ':' delimiter", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting ':' delimiter: line 1 column 5 (char 4)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:37:42.643630+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 366, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 382, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 63, in scan_once
+    return _scan_once(string, idx)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\scanner_stv.py", line 33, in _scan_once
+    return parse_object((string, idx + 1), strict,
+        _scan_once, object_hook, object_pairs_hook, memo)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 185, in JSONObject
+    raise JSONDecodeError(
+        "Expecting property name enclosed in double quotes", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:37:42.840863+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 369, in decode
+    raise JSONDecodeError("Extra data", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+
+================================================================================
+Timestamp : 2026-02-26 14:37:43.044843+00:00
+Bug Type  : invalidity
+Exception: JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+Traceback:
+Traceback (most recent call last):
+  File "C:\Users\khooj\workdir\fuzzer\parser\json_decoder_parser.py", line 248, in run_json_decoder_with_branches
+    decoded = loads(json_string)
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\__init__.py", line 134, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\khooj\workdir\fuzzer\targets\json-decoder\buggy_json\decoder_stv.py", line 369, in decode
+    raise JSONDecodeError("Extra data", s, end)
+buggy_json.decoder_stv.JSONDecodeError: Extra data: line 1 column 5 (char 4)
+
+
