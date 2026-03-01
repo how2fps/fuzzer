@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import coverage
+from coverage.exceptions import NoSource
 import json
 import os
 import sys
@@ -67,6 +68,11 @@ def _collect_branch_counts(cov: coverage.Coverage) -> dict[str, int]:
             "covered_branches": covered_branches,
             "missing_branches": missing_branches,
         }
+    except NoSource:
+        # Coverage data can contain paths from another machine (e.g. after
+        # loading a .coverage file from elsewhere). When source files are
+        # not found, return zeros so the fuzzer can continue.
+        return {"covered_branches": 0, "missing_branches": 0}
     finally:
         try:
             os.remove(json_path)
@@ -200,12 +206,18 @@ def _bug_count_to_csv(
     new_df = pd.DataFrame(rows)
 
     if os.path.exists(output_path):
-        existing_df = pd.read_csv(output_path)
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-        combined_df = combined_df.groupby(
-            ["bug_type", "exc_type", "exc_message", "filename", "lineno"],
-            as_index=False,
-        )["count"].sum()
+        try:
+            existing_df = pd.read_csv(output_path)
+            if existing_df.empty:
+                combined_df = new_df
+            else:
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                combined_df = combined_df.groupby(
+                    ["bug_type", "exc_type", "exc_message", "filename", "lineno"],
+                    as_index=False,
+                )["count"].sum()
+        except (pd.errors.EmptyDataError, pd.errors.ParserError):
+            combined_df = new_df
     else:
         combined_df = new_df
 
@@ -306,11 +318,6 @@ def run_json_decoder_with_branches(
     finally:
         cov.stop()
         cov.save()
-
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
-    csv_path = os.path.join(logs_dir, "bug_counts.csv")
-    _bug_count_to_csv(bug_count, csv_path)
 
     branch_counts = _collect_branch_counts(cov)
     branch_details_by_file = _collect_branch_details_by_file(cov)

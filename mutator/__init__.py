@@ -21,6 +21,7 @@ from .mutator import (
     mutate_json_input,
     mutate_text_with_grammar,
 )
+from .versions import get_mutator, list_versions
 
 __all__ = [
     "JSON_GRAMMAR",
@@ -36,7 +37,9 @@ __all__ = [
     "generate_ipv4_input",
     "generate_ipv6_input",
     "generate_json_input",
+    "get_mutator",
     "interesting_value_mutation",
+    "list_versions",
     "mutate_ip_input",
     "mutate_ipv4_input",
     "mutate_ipv6_input",

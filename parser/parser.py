@@ -261,6 +261,7 @@ def run_parser(
     target: str,
     timeout: float = DEFAULT_TIMEOUT,
     print_json: bool = False,
+    coverage_file: str | None = None,
 ) -> dict[str, Any]:
     """
     Run fuzzer input against the selected target and return (and optionally print) JSON results.
@@ -302,7 +303,10 @@ def run_parser(
     handler = entry.get("handler")
     if handler == "json_decoder":
         input_str = data.decode("utf-8", errors="replace")
-        json_decoder_info = run_json_decoder_with_branches(json_string=input_str)
+        kwargs: dict[str, Any] = {"json_string": input_str}
+        if coverage_file is not None:
+            kwargs["coverage_file"] = coverage_file
+        json_decoder_info = run_json_decoder_with_branches(**kwargs)
 
         base_result: dict[str, Any] = {
             "target": target,
@@ -354,7 +358,7 @@ def run_parser(
 
 def example_from_bytes() -> None:
     """Run parser with input passed as bytes. No JSON printed; result returned."""
-    result = run_parser(
+    run_parser(
         input_data=b"192.168.1.0/24",
         target="cidrize-runner",
         timeout=5.0,

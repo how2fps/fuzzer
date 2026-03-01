@@ -76,10 +76,10 @@ def run_json_open(*, json_string: str) -> dict[str, Any]:
         )
         bug_count[bug_id] += 1
 
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
-    csv_path = os.path.join(logs_dir, "bug_counts_open.csv")
-    _bug_count_to_csv(bug_count, csv_path)
+    # logs_dir = "logs"
+    # os.makedirs(logs_dir, exist_ok=True)
+    # csv_path = os.path.join(logs_dir, "bug_counts_open.csv")
+    # _bug_count_to_csv(bug_count, csv_path)
 
     try:
         json.dumps(decoded)
