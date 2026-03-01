@@ -14,23 +14,19 @@ class HybridPowerScheduler:
         
         # List of available schedules to choose from
         self.modes = ["exploration", "fast"]
-        # Default schedule
-        self.mode = "exploration" 
 
         # Constants for FAST
         self.alpha_rho = 5 # Small constant energy alpha/rho
         self.M = 1000      # Maximum energy cap
 
-        # Variables for Plateau Tracking (ignore for now)
-        self.plateau_threshold = plateau_threshold
-        self.consecutive_no_gain = 0
-        self.total_paths_discovered = 1
+        # State Management
+        self.mode = "exploration"  # Default schedule 
+        self.plateau_threshold = plateau_threshold  # Cycles with no gain before FAST
+        self.breakthrough_limit = breakthrough_limit # Finds in FAST before Exploration
 
-    def update_metadata(self, seed_id, path_id, inputs_generated):
-        """Updates f(i) based on total inputs generated for a path"""
-        self.seed_to_path[seed_id] = path_id
-        # Increment f(i) by the amount of energy (mutations) spent
-        self.f_i[path_id] = self.f_i.get(path_id, 0) + inputs_generated
+        self.consecutive_no_gain = 0
+        self.finds_in_fast_mode = 0
+        self.total_paths_discovered = 1
 
     def schedule_exploration(self, seed_id):
         """Balanced schedule: constant energy to avoid early starvation"""
@@ -61,21 +57,34 @@ class HybridPowerScheduler:
         elif self.mode == "fast":
             return self.schedule_fast(seed_id)
 
-### Plateau Tracking (ignore)
     def on_new_path_discovered(self):
-            """Call this whenever a mutation finds a NEW path ID"""
+            """Call this whenever a mutation finds a NEW path"""
             self.total_paths_discovered += 1
-            self.consecutive_no_gain = 0 # Reset the 'stale' counter
+            self.consecutive_no_gain = 0 # Breakthrough resets the plateau counter
             
-            # If we were in FAST mode, maybe we found enough to try Exploration again?
-            # Or simply stay in FAST to keep pushing deep.
-            print(f"[*] New path found! Total: {self.total_paths_discovered}")
+            if self.mode == "fast":
+                self.finds_in_fast_mode += 1
+                # If find a 'gold mine' of new paths, go back to Exploration
+                if self.finds_in_fast_mode >= self.breakthrough_limit:
+                    print(f"[!] Breakthrough of {self.breakthrough_limit} paths! Resetting to Exploration.")
+                    self.swap_schedule("exploration")
+                    self.finds_in_fast_mode = 0
+                    
+            print(f"[*] New path found! Total unique paths: {self.total_paths_discovered}")
 
-    def on_loop_completed(self, found_new: bool):
-        """Call this function at the end of every ChooseNext -> Mutate cycle"""
-        if not found_new:
+    def on_loop_completed(self, found_new_this_cycle: bool):
+        """Call this function at the end of every ChooseNext -> Mutate cycle to track plateau progress"""
+        if not found_new_this_cycle:
             self.consecutive_no_gain += 1
         
-        # Check for plateau
+        # If we've hit the limit of boring cycles, get aggressive
         if self.mode == "exploration" and self.consecutive_no_gain >= self.plateau_threshold:
             self.swap_schedule("fast")
+
+    def add_new_seed(self, seed_data, path_id):
+        """Adds a newly discovered seed to the corpus."""
+        new_id = f"seed_{len(self.corpus)}"
+        self.corpus[new_id] = seed_data
+        self.seed_to_path[new_id] = path_id
+        self.s_i[new_id] = 0
+        return new_id
