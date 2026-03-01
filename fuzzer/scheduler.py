@@ -61,7 +61,7 @@ class HybridPowerScheduler:
         elif self.mode == "fast":
             return self.schedule_fast(seed_id)
 
-### Plateau Tracking
+### Plateau Tracking (ignore)
     def on_new_path_discovered(self):
             """Call this whenever a mutation finds a NEW path ID"""
             self.total_paths_discovered += 1
