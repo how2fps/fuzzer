@@ -19,6 +19,16 @@ if str(BUGGY_JSON_DIR) not in sys.path:
     sys.path.insert(0, str(BUGGY_JSON_DIR))
 
 from buggy_json import loads
+
+
+def _path_relative_to_root(path: str | None) -> str | None:
+    """Return path relative to ROOT_DIR so edge IDs are stable across machines."""
+    if path is None:
+        return None
+    try:
+        return str(Path(path).resolve().relative_to(ROOT_DIR))
+    except (ValueError, OSError):
+        return path
 from buggy_json.decoder_stv import InvalidityBug, JSONDecodeError, PerformanceBug
 
 
@@ -131,7 +141,7 @@ def _collect_branch_details_by_file(cov: coverage.Coverage) -> list[dict[str, An
 
         out.append(
             {
-                "file": filename,
+                "file": _path_relative_to_root(filename),
                 "total_lines": total_lines,
                 "covered_branches": covered_list,
                 "missing_branches": missing_list,
@@ -149,7 +159,7 @@ def _track_exception(exc: Exception) -> dict[str, Any]:
     return {
         "exception_type": type(exc).__name__,
         "message": str(exc),
-        "file": last_frame.filename if last_frame else None,
+        "file": _path_relative_to_root(last_frame.filename) if last_frame else None,
         "line": last_frame.lineno if last_frame else None,
     }
 
@@ -228,7 +238,7 @@ def _bug_count_to_csv(
 def run_json_decoder_with_branches(
     *,
     json_string: str,
-    coverage_file: str = ".coverage_buggy_json",
+    coverage_file: str | None = None,  # ignored: coverage is kept in memory
 ) -> dict[str, Any]:
     """
     Clone of json_decoder_stv main logic that:
@@ -242,13 +252,10 @@ def run_json_decoder_with_branches(
     bug_count: dict[tuple[Any, ...], int] = defaultdict(int)
 
     cov = coverage.Coverage(
-        data_file=coverage_file,
         source=["buggy_json"],
         branch=True,
+        data_file=None,
     )
-
-    if os.path.exists(coverage_file):
-        cov.load()
 
     cov.start()
 
@@ -317,7 +324,6 @@ def run_json_decoder_with_branches(
         bug_count[bug_id] += 1
     finally:
         cov.stop()
-        cov.save()
 
     branch_counts = _collect_branch_counts(cov)
     branch_details_by_file = _collect_branch_details_by_file(cov)

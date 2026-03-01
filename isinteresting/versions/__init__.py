@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from . import base
 
-# Signature: (*, result: Mapping[str, Any]) -> float
+# Signature: (*, result: Mapping[str, Any], db_path?: Path|str, target?: str) -> float
 ComputeInterestingnessFn = Callable[..., float]
 
 REGISTRY: dict[str, ComputeInterestingnessFn] = {

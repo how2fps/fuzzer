@@ -32,27 +32,30 @@ _TARGETS_BASE = Path(__file__).resolve().parent.parent / "targets"
 # Absolute path to the json_open runner script that uses stdlib json
 JSON_OPEN_SCRIPT = Path(__file__).resolve().parent / "json_open_runner.py"
 
-# Target name -> path, run command, and optional open-equivalent.
+# Target name -> path, run command, and optional oracle target.
 # cmd: argv list (relative paths resolved against target dir). Input is appended as final arg
 #      unless input_via_stdin is True (then input is passed via stdin).
 # From READMEs: cidrize-runner/README, IPv4-IPv6-parser/README, cidrize/README+CLAUDE, json-decoder/README, ipyparse (library).
 TARGETS: dict[str, dict[str, Any]] = {
     "cidrize-runner": {
         "path": "cidrize-runner",
-        "open": "cidrize",
+        "oracle": "cidrize",
         "cmd": ["bin/cidrize-runner", "--func", "cidrize", "--ipstr"],
         "input_via_stdin": False,
+        "open": False,
     },
     "IPv4-IPv6-parser": {
         "path": "IPv4-IPv6-parser",
-        "open": "ipyparse",
+        "oracle": "ipyparse",
         "cmd": ["bin/ipv4-parser", "--ipstr"],
         "input_via_stdin": False,
+        "open": False,
     },
     "cidrize": {
         "path": "cidrize",
         "cmd": ["uv", "run", "cidr"],
         "input_via_stdin": False,
+        "open": False,
     },
     "ipyparse": {
         "path": "ipyparse",
@@ -62,11 +65,13 @@ TARGETS: dict[str, dict[str, Any]] = {
             "import sys; sys.path.insert(0, 'src'); from ipyparse.ipv4 import parse; print(parse(sys.stdin.read().strip()))",
         ],
         "input_via_stdin": True,
+        "open": False,
     },
     "json-decoder": {
         "path": "json-decoder",
         "handler": "json_decoder",
-        "open": "json_open",
+        "oracle": "json_open",
+        "open": True,
     },
     "json_open": {
         "path": "json-decoder",
@@ -75,6 +80,7 @@ TARGETS: dict[str, dict[str, Any]] = {
             str(JSON_OPEN_SCRIPT),
         ],
         "input_via_stdin": True,
+        "open": False,
     },
 }
 
@@ -261,7 +267,6 @@ def run_parser(
     target: str,
     timeout: float = DEFAULT_TIMEOUT,
     print_json: bool = False,
-    coverage_file: str | None = None,
 ) -> dict[str, Any]:
     """
     Run fuzzer input against the selected target and return (and optionally print) JSON results.
@@ -304,8 +309,6 @@ def run_parser(
     if handler == "json_decoder":
         input_str = data.decode("utf-8", errors="replace")
         kwargs: dict[str, Any] = {"json_string": input_str}
-        if coverage_file is not None:
-            kwargs["coverage_file"] = coverage_file
         json_decoder_info = run_json_decoder_with_branches(**kwargs)
 
         base_result: dict[str, Any] = {
@@ -326,8 +329,8 @@ def run_parser(
 
         result = run_target(target, target_dir, data, timeout=timeout)
 
-    # For closed targets, also run the open equivalent
-    open_name = entry.get("open")
+    # For closed targets, also run the oracle target
+    open_name = entry.get("oracle")
     if open_name is not None:
         open_entry = TARGETS.get(open_name)
         open_dir = _TARGETS_BASE / (open_entry["path"] if open_entry and "path" in open_entry else open_name)

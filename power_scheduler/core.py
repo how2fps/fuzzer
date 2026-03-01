@@ -1,149 +1,74 @@
 """
-Core power schedule implementation (uniform AFL-style). Used by versions.
+Power scheduler: determines how many mutations to run per seed.
+
+Uses data from the fuzzer run DB (e.g. how often each seed has been used) and
+AFL-style / good fuzzing practice: give more energy (mutations) to seeds that
+have been fuzzed less and that are more "interesting."
 """
 from __future__ import annotations
 
-import random
+import math
 from typing import Mapping, MutableMapping, Sequence, TypedDict
 
 
-class SeedStats(TypedDict):
-    """
-    Minimal per-seed information needed for AFL-style power scheduling.
-
-    All numeric fields are expected to be non-negative.
-    """
+class SeedStats(TypedDict, total=False):
+    """Per-seed stats from the corpus and optionally from the runs DB."""
 
     id: int
-    exec_time_ms: float | None
-    coverage_bitmap: Sequence[int] | None
     fuzz_count: int
-
-
-class ScheduleConfig(TypedDict, total=False):
-    min_energy: int
-    max_energy: int
-
-
-class PowerScheduleResult(TypedDict):
-    seed_energies: Mapping[int, int]
-    edge_frequencies: Sequence[int]
-    config: ScheduleConfig
-    total_weight: float
-
-
-DEFAULT_CONFIG: ScheduleConfig = {
-    "min_energy": 1,
-    "max_energy": 128,
-}
-
-
-def compute_edge_frequencies(*, seeds: Sequence[SeedStats]) -> list[int]:
-    max_len = 0
-    for stats in seeds:
-        bitmap = stats.get("coverage_bitmap")
-        if bitmap is None:
-            continue
-        if len(bitmap) > max_len:
-            max_len = len(bitmap)
-
-    if max_len == 0:
-        return []
-
-    frequencies = [0] * max_len
-    for stats in seeds:
-        bitmap = stats.get("coverage_bitmap")
-        if bitmap is None:
-            continue
-        limit = min(len(bitmap), max_len)
-        for idx in range(limit):
-            if bitmap[idx]:
-                frequencies[idx] += 1
-
-    return frequencies
-
-
-def _compute_seed_weight(*, seed: SeedStats) -> float:
-    seed  # unused but kept for future extensions
-    return 1.0
+    avg_isinteresting_score: float
+    bug_count: int
 
 
 def compute_power_schedule(
     *,
     seeds: Sequence[SeedStats],
-    config: ScheduleConfig | None = None,
-) -> PowerScheduleResult:
+    min_energy: int = 1,
+    max_energy: int = 128,
+) -> dict[str, Mapping[int, int]]:
+    """
+    Compute how many mutations to run per seed using DB-derived stats.
+
+    AFL-style formula:
+    - Seeds that have been fuzzed less get more energy (inverse of fuzz_count).
+    - Optionally boost seeds with higher average interestingness or that found bugs.
+    Returns dict with key "seed_energies": ordinal -> mutation count.
+    """
     if not seeds:
-        effective_config: ScheduleConfig = DEFAULT_CONFIG.copy()
-        if config:
-            effective_config.update(config)
-        return {
-            "seed_energies": {},
-            "edge_frequencies": [],
-            "config": effective_config,
-            "total_weight": 0.0,
-        }
+        return {"seed_energies": {}}
 
-    effective_config = DEFAULT_CONFIG.copy()
-    if config:
-        effective_config.update(config)
-    min_energy = max(int(effective_config.get("min_energy", 1)), 1)
-    max_energy = max(int(effective_config.get("max_energy", 128)), min_energy)
+    min_e = max(1, min_energy)
+    max_e = max(min_e, max_energy)
 
-    edge_frequencies = compute_edge_frequencies(seeds=seeds)
-    weights = [max(_compute_seed_weight(seed=seed), 0.0) for seed in seeds]
+    # Weight: favor under-fuzzed seeds and favor interesting / bug-finding seeds.
+    # Base weight = 1 / (1 + fuzz_count) so never-fuzzed = 1.0, then decays.
+    weights: list[float] = []
+    for s in seeds:
+        fuzz_count = int(s.get("fuzz_count", 0))
+        base = 1.0 / (1.0 + fuzz_count)
+        # boost by average interestingness
+        avg_score = s.get("avg_isinteresting_score")
+        if avg_score is not None and avg_score > 0:
+            base *= (1.0 + math.log1p(float(avg_score)))
+        # boost seeds that have found bugs
+        bug_count = int(s.get("bug_count", 0))
+        if bug_count > 0:
+            base *= (1.0 + min(bug_count, 5))  # cap bonus
+        weights.append(max(base, 1e-6))
 
-    if not any(weight > 0.0 for weight in weights):
-        weights = [1.0] * len(seeds)
-
-    total_weight = float(sum(weights))
-    if total_weight <= 0.0:
-        total_weight = float(len(weights))
-
-    avg_energy = (min_energy + max_energy) / 2.0
-    current_mean_weight = total_weight / float(len(weights))
-    scale = 1.0 if current_mean_weight <= 0.0 else (avg_energy / current_mean_weight)
+    total_w = sum(weights)
+    if total_w <= 0:
+        total_w = 1.0
+    n = len(seeds)
+    # Scale weights so mean energy is in [min_e, max_e]; then clip per-seed to [min_e, max_e].
+    mean_energy = (min_e + max_e) / 2.0
+    scale = (mean_energy * n) / total_w if total_w > 0 else 1.0
 
     seed_energies: MutableMapping[int, int] = {}
-    for stats, weight in zip(seeds, weights):
-        raw_energy = weight * scale
-        energy = int(raw_energy)
-        if energy < min_energy:
-            energy = min_energy
-        if energy > max_energy:
-            energy = max_energy
-        seed_id = int(stats["id"])
-        seed_energies[seed_id] = energy
+    for s, w in zip(seeds, weights):
+        raw = w * scale
+        energy = int(round(raw))
+        energy = max(min_e, min(max_e, energy))
+        seed_energies[int(s["id"])] = energy
 
-    return {
-        "seed_energies": seed_energies,
-        "edge_frequencies": edge_frequencies,
-        "config": effective_config,
-        "total_weight": total_weight,
-    }
-
-
-def pick_seed_id(
-    *,
-    schedule: PowerScheduleResult,
-    rng: random.Random | None = None,
-) -> int | None:
-    seed_energies = schedule["seed_energies"]
-    if not seed_energies:
-        return None
-
-    rng_engine = rng or random.Random()
-    items = list(seed_energies.items())
-    ids, energies = zip(*items)
-    total = float(sum(energies))
-    if total <= 0.0:
-        return int(ids[rng_engine.randrange(len(ids))])
-
-    threshold = rng_engine.random() * total
-    cumulative = 0.0
-    for seed_id, energy in items:
-        cumulative += float(energy)
-        if cumulative >= threshold:
-            return int(seed_id)
-
-    return int(ids[-1])
+    return {"seed_energies": seed_energies}

@@ -1,5 +1,5 @@
 """
-Base power scheduler: uniform AFL-style energy allocation.
+Base power scheduler: uniform mutation count per seed.
 """
 from __future__ import annotations
 

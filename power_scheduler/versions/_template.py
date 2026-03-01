@@ -6,38 +6,24 @@ then in versions/__init__.py add:
 """
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Sequence
 
-from ..core import (
-    PowerScheduleResult,
-    ScheduleConfig,
-    SeedStats,
-)
+from ..core import SeedStats, compute_power_schedule as base_compute
 
 
 def compute_power_schedule(
     *,
     seeds: Sequence[SeedStats],
-    config: ScheduleConfig | None = None,
-) -> PowerScheduleResult:
+    min_energy: int = 1,
+    max_energy: int = 128,
+) -> dict[str, dict[int, int]]:
     """
-    Compute seed_energies (seed_id -> number of fuzzing attempts) and related fields.
-
-    Return dict with: seed_energies, edge_frequencies, config, total_weight.
+    Compute how many mutations to run per seed.
+    Return dict with key "seed_energies": ordinal -> mutation count.
     """
-    # TODO: implement your power schedule (e.g. non-uniform weights)
-    from ..core import DEFAULT_CONFIG, compute_edge_frequencies
-
-    effective_config = dict(DEFAULT_CONFIG)
-    if config:
-        effective_config.update(config)
-    edge_frequencies = compute_edge_frequencies(seeds=seeds)
-    # Example: uniform energy per seed
-    min_energy = max(int(effective_config.get("min_energy", 1)), 1)
-    seed_energies = {int(s["id"]): min_energy for s in seeds}
-    return {
-        "seed_energies": seed_energies,
-        "edge_frequencies": edge_frequencies,
-        "config": effective_config,
-        "total_weight": float(len(seeds)),
-    }
+    # TODO: implement your policy (e.g. non-uniform counts per seed)
+    return base_compute(
+        seeds=seeds,
+        min_energy=min_energy,
+        max_energy=max_energy,
+    )
