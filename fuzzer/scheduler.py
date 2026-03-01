@@ -1,7 +1,6 @@
 import math
 import random
 
-# A box of power schedules 
 class HybridPowerScheduler:
     def __init__(self, initial_seeds, plateau_threshold=500, breakthrough_limit=10):
         # Seed Queue 
@@ -22,7 +21,7 @@ class HybridPowerScheduler:
         self.alpha_rho = 5 # Small constant energy alpha/rho
         self.M = 1000      # Maximum energy cap
 
-        # Variables for Plateau Tracking
+        # Variables for Plateau Tracking (ignore for now)
         self.plateau_threshold = plateau_threshold
         self.consecutive_no_gain = 0
         self.total_paths_discovered = 1
