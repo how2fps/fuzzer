@@ -266,7 +266,17 @@ def init_scheduler(
     scheduler = get_scheduler_fn(scheduler_kind)
     target_set = corpus.target(target)
     for seed in target_set.seeds:
-        scheduler.add(seed, metadata={"bucket": seed.bucket})
+        metadata: dict[str, Any] = {
+            "bucket": seed.bucket,
+        }
+        # Richer per-seed metadata helps schedulers like UCBTreeScheduler that
+        # bucket seeds based on "signals". For static corpus seeds we approximate
+        # coverage buckets using the seed family/bucket and assume an initial ok status.
+        metadata["signals"] = {
+            "coverage_key": {"family": seed.family, "bucket": seed.bucket},
+            "status": "ok",
+        }
+        scheduler.add(seed, metadata=metadata)
     return scheduler
 
 
@@ -603,7 +613,12 @@ def _run_worker_process(
         )
         _insert_seen_branches(db_path, result)
         closed = result.get("closed_result", {})
+        open_result = result.get("open_result", {}) or {}
         signals: dict[str, Any] = {
+            # Preserve the parser result shape so schedulers that understand it
+            # (e.g. UCBTreeScheduler) can derive coverage/bug buckets and rewards.
+            "closed_result": closed or {},
+            "open_result": open_result,
             "iteration": iteration,
             "seed_id": seed_id,
             "bucket": bucket,
@@ -830,14 +845,21 @@ def _run_fuzzer_multi_worker(
         )
         with cond:
             if result["isinteresting_score"] > 0 and result["mutated_input"] not in added_seed_inputs_holder[0]:
-                parent_bucket = (result.get("signals") or {}).get("bucket", "discovered")
+                parent_signals = (result.get("signals") or {}).copy()
+                parent_bucket = parent_signals.get("bucket", "discovered")
                 candidate = _make_discovered_seed(
                     result["mutated_input"],
                     family,
                     parent_bucket,
                     next_discovered_ordinal_holder[0],
                 )
-                scheduler.add(candidate, metadata={"bucket": candidate.bucket})
+                candidate_metadata: dict[str, Any] = {
+                    "bucket": candidate.bucket,
+                    "parent_seed_id": result["seed_id"],
+                }
+                if parent_signals:
+                    candidate_metadata["signals"] = parent_signals
+                scheduler.add(candidate, metadata=candidate_metadata)
                 added_seed_inputs_holder[0].add(result["mutated_input"])
                 next_discovered_ordinal_holder[0] += 1
                 cond.notify()
@@ -845,6 +867,7 @@ def _run_fuzzer_multi_worker(
         with cond:
             results_received_count[0] = results_received
             cond.notify()
+        print(scheduler.debug_dump(limit=10))
         # if iteration % 100 == 0 or result.get("status") in ("bug", "crash", "timeout"):
         if iteration:
             print(
@@ -1000,15 +1023,18 @@ def run_fuzzer(config: FuzzConfig) -> None:
                 target=effective_target,
             )
             batch_scores.append(score)
+            closed = result.get("closed_result", {}) or {}
+            open_result = result.get("open_result", {}) or {}
             last_signals = {
+                "closed_result": closed,
+                "open_result": open_result,
                 "iteration": iteration,
                 "seed_id": seed.seed_id,
                 "bucket": seed.bucket,
-                "status": result.get("closed_result", {}).get("status"),
+                "status": closed.get("status"),
                 "isinteresting": score,
             }
 
-            closed = result.get("closed_result", {})
             _insert_run(
                 conn,
                 iteration=iteration,
@@ -1026,7 +1052,12 @@ def run_fuzzer(config: FuzzConfig) -> None:
                 candidate = _make_discovered_seed(
                     mutated_text, family, seed.bucket, next_discovered_ordinal
                 )
-                scheduler.add(candidate, metadata={"bucket": candidate.bucket})
+                candidate_metadata: dict[str, Any] = {
+                    "bucket": candidate.bucket,
+                    "parent_seed_id": seed.seed_id,
+                    "signals": last_signals,
+                }
+                scheduler.add(candidate, metadata=candidate_metadata)
                 added_seed_inputs.add(mutated_text)
                 next_discovered_ordinal += 1
 
