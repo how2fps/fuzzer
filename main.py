@@ -39,6 +39,7 @@ RESULTS_DIR = FUZZER_ROOT / "results"
 DISCOVERED_SEED_ORDINAL_BASE = 1_000_000
 JSON_DECODER_TARGET_DIR = FUZZER_ROOT / "targets" / "json-decoder"
 JSON_DECODER_STV_SCRIPT = JSON_DECODER_TARGET_DIR / "json_decoder_stv.py"
+UCB_DEBUG_EVERY = 10
 
 
 class FuzzConfig(TypedDict):
@@ -862,6 +863,8 @@ def _run_fuzzer_multi_worker(
                 f"[iter {iteration}] seed={result['seed_id']} "
                 f"score={result['isinteresting_score']:.3f} status={result['status']} input={result['seed_text']} mutated input={result['mutated_input']}"
             )
+        if scheduler_uses_feedback and (iteration + 1) % UCB_DEBUG_EVERY == 0:
+            print(scheduler.render_tree(limit=12))
         if total_jobs[0] > 0 and results_received >= total_jobs[0]:
             break
 
@@ -1048,6 +1051,8 @@ def run_fuzzer(config: FuzzConfig) -> None:
                     f"seed={seed.seed_id} bucket={seed.bucket} status={status} "
                     f"score={score:.3f}"
                 )
+            if scheduler_uses_feedback and (iteration + 1) % UCB_DEBUG_EVERY == 0:
+                print(scheduler.render_tree(limit=12))
             iteration += 1
             if remaining is not None:
                 remaining -= 1
