@@ -19,9 +19,11 @@ class MutateFn(Protocol):
 
 
 from . import base
+from . import json_walk
 
 REGISTRY: dict[str, Callable[..., str]] = {
     "base": base.mutate,
+    "json_walk": json_walk.mutate,
 }
 
 
