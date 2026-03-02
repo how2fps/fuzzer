@@ -16,26 +16,34 @@ With options:
 python main.py --target json-decoder --iterations 5000 --seed 42
 ```
 
+You can always see the authoritative list of options and defaults with:
+
+```bash
+python main.py --help
+```
+
 ### Command-line options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--target` | `json-decoder` | Target to fuzz. Choices: `cidrize`, `cidrize-runner`, `IPv4-IPv6-parser`, `ipyparse`, `json-decoder`, `json_open` |
-| `--scheduler` | `heap` | Seed scheduler. Use `python main.py` and check help for choices. |
-| `--mutator` | `auto` | Mutation mode: `auto` (from target), `json`, or `ip` |
-| `--iterations` | `1000` | Maximum fuzzing iterations |
-| `--timeout` | `10.0` | Per-run timeout in seconds |
-| `--seed` | (none) | RNG seed for reproducibility |
-| `--isinteresting-version` | `base` | Interestingness module version |
-| `--mutator-version` | `base` | Mutator module version |
-| `--parser-version` | `base` | Parser module version |
-| `--power-scheduler-version` | `base` | Power scheduler module version |
-| `--seed-corpus-version` | `base` | Seed corpus module version |
+| `--target` | `json-decoder` | Target name (must be a key in `parser.TARGETS`). Run `python main.py --help` to see available targets. |
+| `--scheduler` | `heap` | Seed scheduler implementation. Choices come from `seed_scheduler.list_versions()`. |
+| `--mutator` | `auto` | Mutation mode: `auto` (infer from target), `json`, or `ip`. |
+| `--iterations` | `10` | Maximum number of fuzzing iterations (mutually exclusive with `--hours`). Use either `--iterations` or `--hours`, not both. |
+| `--hours` | (none) | Maximum fuzzing time in hours (mutually exclusive with `--iterations`). |
+| `--timeout` | `10.0` | Per-run timeout in seconds. |
+| `--seed` | (none) | Optional RNG seed for reproducibility. |
+| `--workers` | `1` | Number of worker processes. All workers share a single scheduler. |
+| `--isinteresting-version` | `base` | Interestingness module version (for ablation). |
+| `--mutator-version` | `base` | Mutator module version (for ablation). |
+| `--parser-version` | `base` | Parser module version (for ablation). |
+| `--power-scheduler-version` | `base` | Power scheduler module version (for ablation). |
+| `--seed-corpus-version` | `base` | Seed corpus module version (for ablation). |
 
 ### Examples
 
 ```bash
-# Default: json-decoder, 1000 iterations
+# Default: json-decoder, 10 iterations
 python main.py
 
 # More iterations, reproducible run
@@ -44,8 +52,14 @@ python main.py --iterations 10000 --seed 12345
 # Fuzz another target
 python main.py --target cidrize-runner --iterations 2000
 
+# Run for a fixed amount of time instead of a fixed number of iterations
+python main.py --target json-decoder --hours 2.0
+
 # Shorter timeout
 python main.py --timeout 5.0
+
+# Multi-process fuzzing with 4 workers
+python main.py --workers 4 --iterations 50000
 ```
 
 ## Results

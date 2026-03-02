@@ -542,8 +542,7 @@ def _export_results(
                 [
                     sys.executable,
                     str(JSON_DECODER_STV_SCRIPT),
-                    "--str-json",
-                    input_text,
+                    f"--str-json={input_text}",
                     "--show-coverage",
                     "--coverage-file",
                     coverage_file,
@@ -1059,8 +1058,26 @@ def run_fuzzer(config: FuzzConfig) -> None:
     )
 
 
+def _print_config(config: FuzzConfig) -> None:
+    print("Fuzzer configuration:")
+    print(f"  target: {config['target']}")
+    print(f"  scheduler_kind: {config['scheduler_kind']}")
+    print(f"  mutator_kind: {config['mutator_kind']}")
+    print(f"  max_iterations: {config['max_iterations']}")
+    print(f"  max_hours: {config['max_hours']}")
+    print(f"  timeout: {config['timeout']}")
+    print(f"  rng_seed: {config['rng_seed']}")
+    print(f"  workers: {config['workers']}")
+    print(f"  isinteresting_version: {config['isinteresting_version']}")
+    print(f"  mutator_version: {config['mutator_version']}")
+    print(f"  parser_version: {config['parser_version']}")
+    print(f"  power_scheduler_version: {config['power_scheduler_version']}")
+    print(f"  seed_corpus_version: {config['seed_corpus_version']}")
+
+
 def main() -> None:
     config = build_config()
+    _print_config(config)
     run_fuzzer(config)
 
 
