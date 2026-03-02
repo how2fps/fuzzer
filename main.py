@@ -40,6 +40,7 @@ RESULTS_DIR = FUZZER_ROOT / "results"
 DISCOVERED_SEED_ORDINAL_BASE = 1_000_000
 JSON_DECODER_TARGET_DIR = FUZZER_ROOT / "targets" / "json-decoder"
 JSON_DECODER_STV_SCRIPT = JSON_DECODER_TARGET_DIR / "json_decoder_stv.py"
+UCB_DEBUG_EVERY = 0
 
 
 class FuzzConfig(TypedDict):
