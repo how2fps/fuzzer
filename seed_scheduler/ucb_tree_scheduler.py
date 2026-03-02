@@ -182,6 +182,50 @@ class UCBTreeScheduler(BaseSeedScheduler):
             "truncated": len(leaves) > min(max(limit, 0), len(leaves)),
         }
 
+    def render_tree(self, limit: int = 20) -> str:
+        """Render a readable tree snapshot for logging/debugging."""
+        lines = [
+            "ucb_tree",
+            (
+                f"root ready={len(self)} total_items={len(self._items)} "
+                f"coverage_buckets={len(self._root.children)} ucb_c={self._ucb_c}"
+            ),
+        ]
+        emitted = 0
+        coverage_nodes = sorted(
+            self._root.children.values(),
+            key=lambda node: (-node.q_avg_reward, -node.n_selected, node.key),
+        )
+        for cov_node in coverage_nodes:
+            if emitted >= limit:
+                break
+            lines.append(
+                f"|- cov {cov_node.key} N={cov_node.n_selected} Q={cov_node.q_avg_reward:.3f}"
+            )
+            bug_nodes = sorted(
+                cov_node.children.values(),
+                key=lambda node: (-node.q_avg_reward, -node.n_selected, node.key),
+            )
+            for bug_node in bug_nodes:
+                if emitted >= limit:
+                    break
+                seed_ids = ", ".join(seed.seed.seed_id for seed in bug_node.seeds[:4])
+                if len(bug_node.seeds) > 4:
+                    seed_ids += ", ..."
+                lines.append(
+                    (
+                        f"|  |- bug {bug_node.key} N={bug_node.n_selected} "
+                        f"Q={bug_node.q_avg_reward:.3f} seeds={len(bug_node.seeds)} "
+                        f"rr={bug_node.rr_index}"
+                    )
+                )
+                if seed_ids:
+                    lines.append(f"|  |  `- {seed_ids}")
+                emitted += 1
+        if emitted >= limit:
+            lines.append("`- ...")
+        return "\n".join(lines)
+
     def _ensure_leaf(self, cov_key: str, bug_key: str) -> _TreeNode:
         """Create or return the leaf node for a coverage/bug bucket pair."""
         cov = self._root.children.get(cov_key)
