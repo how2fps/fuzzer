@@ -9,34 +9,31 @@ from .types import ScheduledSeed
 
 
 class BaseSeedScheduler(ABC):
+    """Common interface for scheduler backends that manage `ScheduledSeed` items."""
+
     @abstractmethod
     def add(self, seed: Seed, *, metadata: dict[str, Any] | None = None) -> ScheduledSeed:
+        """Insert a new seed into the scheduler and return its wrapped scheduled item."""
         raise NotImplementedError
 
     @abstractmethod
     def next(self) -> ScheduledSeed:
-        raise NotImplementedError
-
-    @abstractmethod
-    def update(
-        self,
-        item: ScheduledSeed,
-        *,
-        isinteresting_score: float,
-        signals: dict[str, Any] | None = None,
-    ) -> ScheduledSeed:
+        """Lease the next available scheduled item for mutation/execution."""
         raise NotImplementedError
 
     @abstractmethod
     def empty(self) -> bool:
+        """Return True when the scheduler has no ready items to hand out."""
         raise NotImplementedError
 
     @abstractmethod
     def __len__(self) -> int:
+        """Return the number of ready items currently available for selection."""
         raise NotImplementedError
 
     @abstractmethod
     def stats(self) -> dict[str, Any]:
+        """Return a lightweight snapshot of scheduler state for logging/debugging."""
         raise NotImplementedError
 
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:

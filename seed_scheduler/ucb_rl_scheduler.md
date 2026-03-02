@@ -55,15 +55,15 @@ The scheduler normalizes that internally.
 - `+2` if `new_bug`
 - `+3` if crash/timeout
 
-This reward updates `N` and `Q` on the selected path.
+This reward updates `N` and `Q` on the selected path after one mutation result.
 
 ## Owner loop usage
 
 ```python
 item = scheduler.next()
 
-# worker runs a lease and returns summary + interesting candidates
-lease_summary = {
+# run exactly one mutation from the selected parent
+mutation_result = {
     "new_coverage": True,
     "new_bug": False,
     "crash": False,
@@ -73,7 +73,7 @@ lease_summary = {
     "bug_signature": None,
 }
 
-scheduler.update(item, isinteresting_score=0.0, signals=lease_summary)
+scheduler.update(item, isinteresting_score=0.0, signals=mutation_result)
 ```
 
 Add new interesting candidates:
@@ -91,4 +91,3 @@ Keep the same owner-facing API:
 - `update(item, isinteresting_score=..., signals=...)`
 
 RL can ignore `isinteresting_score` and learn from `signals`, or use both.
-

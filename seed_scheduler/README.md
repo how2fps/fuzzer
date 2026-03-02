@@ -9,9 +9,10 @@ This scheduler is intended to be owned by a single coordinator/owner process.
 - Owner process/thread:
   - calls `next()`
   - sends parent seed to a worker
-  - receives worker result
-  - calls `update(...)`
   - calls `add(...)` for newly interesting seeds
+- Owner process/thread with `ucb_tree`:
+  - receives one mutation result
+  - calls `update(...)` for that mutation
 - Worker process:
   - owns the mutator
   - owns the target runner
@@ -59,58 +60,51 @@ while not scheduler.empty():
     # Your fuzzer logic:
     input_text = item.seed.text
     # mutate -> run target -> parse result
-    # drop in examples till run result is finalized
-    run_result = {"exit_code": 0}
-    isinteresting_score = 0.73
-
-    scheduler.update(
-        item,
-        isinteresting_score=isinteresting_score,
-        signals=run_result,
-    )
+    # add newly interesting mutated children back with scheduler.add(...)
 ```
 
-In your multi-worker design, `update(...)` should use a **worker lease summary** (not every mutation event).
-For example, a worker can run many mutations locally, then return:
-
-- parent summary `isinteresting_score` (e.g. max score seen during the lease)
-- summary signals (`crash_count`, unique outputs, etc.)
-- list of interesting mutated candidates
-
+For `ucb_tree`, one `next()` call is one bandit pull and one mutation attempt.
+After that single mutation finishes, call `update(...)` immediately with that mutation result.
 Then the owner does:
 
 ```python
-scheduler.update(item, isinteresting_score=lease_max_score, signals=lease_summary)
+item = scheduler.next()
+mutated_text = mutate(item.seed.text)
+result = run_target(mutated_text)
+score = compute_isinteresting(result)
 
-for candidate_seed in interesting_candidate_seeds:
-    scheduler.add(candidate_seed)
+scheduler.update(item, isinteresting_score=score, signals=result)
+
+if score > 0:
+    scheduler.add(candidate_seed, metadata={"signals": result})
 ```
 
 ## What each scheduler does
 
-- `queue`: FIFO cyclic baseline (score is recorded, order stays FIFO)
-- `heap`: priority-based (score updates item priority)
-- `ucb_tree`: tree buckets (`coverage -> bug/output -> seeds`) selected with UCB1
+- `queue`: FIFO one-shot baseline
+- `heap`: priority-based ordering at insertion time
+- `ucb_tree`: tree buckets (`coverage -> bug/output -> seeds`) selected with UCB1 and updated once per mutation result
 
 `heap` `priority_mode` options:
 
-- `"avg_score"` (default): running average `isinteresting_score`
-- `"last_score"`: most recent `isinteresting_score`
+- `"avg_score"` (default)
+- `"last_score"`
 
 `ucb_tree` notes:
 
 - `update(...)` computes reward from `signals` (`new_coverage`, `new_bug`, `crash`/`timeout`)
-- `isinteresting_score` is accepted for API compatibility but UCB updates use signal-derived reward
+- `next()` selects one parent for one mutation attempt
+- `isinteresting_score` is accepted but UCB updates use signal-derived reward
 - for bucket placement on `add(...)`, pass hints via `metadata={"signals": ...}`
 
 ## Helpful methods
 
 - `scheduler.add(seed)`
 - `scheduler.next()`
-- `scheduler.update(item, isinteresting_score=..., signals=...)`
 - `scheduler.empty()`
 - `scheduler.stats()`
 - `scheduler.debug_dump(limit=20)` (inspect current scheduler contents)
+- `ucb_tree.update(item, isinteresting_score=..., signals=...)`
 
 ## Inspect current scheduler contents (debug)
 
@@ -123,7 +117,7 @@ print(scheduler.debug_dump(limit=10))
 What it returns depends on the backend:
 
 - `queue`: current queue order (`item_id`, `seed_id`, bucket, stats)
-- `heap`: current priority order (priority + score stats)
+- `heap`: current priority order
 - `ucb_tree`: leaf buckets (`coverage_key`, `bug_key`, leaf `N/Q`, seed IDs)
 
 ## Demo

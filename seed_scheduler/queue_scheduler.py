@@ -18,11 +18,13 @@ class QueueScheduler(BaseSeedScheduler):
     """
 
     def __init__(self) -> None:
+        """Initialize FIFO storage for scheduled items."""
         self._queue: deque[str] = deque()
         self._items: dict[str, ScheduledSeed] = {}
         self._seq = 0
 
     def add(self, seed: Seed, *, metadata: dict[str, Any] | None = None) -> ScheduledSeed:
+        """Append a new seed to the tail of the queue."""
         self._seq += 1
         item_id = f"q{self._seq:06d}"
         item = ScheduledSeed(
@@ -36,6 +38,7 @@ class QueueScheduler(BaseSeedScheduler):
         return item
 
     def next(self) -> ScheduledSeed:
+        """Pop and return the next scheduled item from the head of the queue."""
         if not self._queue:
             raise IndexError("scheduler is empty")
         item_id = self._queue.popleft()
@@ -43,29 +46,16 @@ class QueueScheduler(BaseSeedScheduler):
         item.times_selected += 1
         return item
 
-    def update(
-        self,
-        item: ScheduledSeed,
-        *,
-        isinteresting_score: float,
-        signals: dict[str, Any] | None = None,
-    ) -> ScheduledSeed:
-        stored = self._items[item.item_id]
-        stored.last_isinteresting_score = float(isinteresting_score)
-        stored.total_isinteresting_score += float(isinteresting_score)
-        stored.updates += 1
-        if signals:
-            stored.metadata["last_signals"] = signals
-        self._queue.append(stored.item_id)
-        return stored
-
     def empty(self) -> bool:
+        """Return True when no queued items remain."""
         return len(self._queue) == 0
 
     def __len__(self) -> int:
+        """Return the number of queued items ready to be selected."""
         return len(self._queue)
 
     def stats(self) -> dict[str, Any]:
+        """Return queue-oriented scheduler metrics."""
         return {
             "kind": "queue",
             "ready": len(self._queue),
@@ -73,6 +63,7 @@ class QueueScheduler(BaseSeedScheduler):
         }
 
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
+        """Return the current queue order with lightweight per-item metadata."""
         ordered_ids = list(self._queue)[: max(limit, 0)]
         items = []
         for item_id in ordered_ids:
