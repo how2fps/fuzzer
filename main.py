@@ -46,6 +46,7 @@ class FuzzConfig(TypedDict):
     target: str
     scheduler_kind: str
     mutator_kind: str
+    ucb_trace: bool
     max_iterations: int | None
     max_hours: float | None
     timeout: float
@@ -82,6 +83,11 @@ def build_config() -> FuzzConfig:
         default="auto",
         choices=["auto", "json", "ip"],
         help="Mutation mode: auto-detect from target, or force json/ip.",
+    )
+    parser.add_argument(
+        "--ucb-trace",
+        action="store_true",
+        help="Print UCB raw signals, normalized signals, and computed rewards on update.",
     )
     parser.add_argument(
         "--iterations",
@@ -165,6 +171,7 @@ def build_config() -> FuzzConfig:
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
         "mutator_kind": args.mutator_kind,
+        "ucb_trace": args.ucb_trace,
         "max_iterations": max_iterations,
         "max_hours": args.max_hours,
         "timeout": args.timeout,
@@ -269,11 +276,15 @@ def init_scheduler(
     target: str,
     scheduler_kind: str,
     get_scheduler_fn: Any,
+    ucb_trace: bool = False,
 ) -> BaseSeedScheduler:
     scheduler = get_scheduler_fn(scheduler_kind)
     target_set = corpus.target(target)
     for seed in target_set.seeds:
-        scheduler.add(seed, metadata={"bucket": seed.bucket})
+        metadata = {"bucket": seed.bucket}
+        if ucb_trace and isinstance(scheduler, UCBTreeScheduler):
+            metadata["_ucb_trace"] = True
+        scheduler.add(seed, metadata=metadata)
     return scheduler
 
 
@@ -849,7 +860,10 @@ def _run_fuzzer_multi_worker(
                     parent_bucket,
                     next_discovered_ordinal_holder[0],
                 )
-                scheduler.add(candidate, metadata={"bucket": candidate.bucket})
+                metadata = {"bucket": candidate.bucket}
+                if scheduler_uses_feedback and config["ucb_trace"]:
+                    metadata["_ucb_trace"] = True
+                scheduler.add(candidate, metadata=metadata)
                 added_seed_inputs_holder[0].add(result["mutated_input"])
                 next_discovered_ordinal_holder[0] += 1
                 cond.notify()
@@ -895,6 +909,7 @@ def run_fuzzer(config: FuzzConfig) -> None:
         target=effective_target,
         scheduler_kind=config["scheduler_kind"],
         get_scheduler_fn=get_scheduler,
+        ucb_trace=config["ucb_trace"],
     )
 
     if not scheduler or scheduler.empty():
@@ -1039,7 +1054,10 @@ def run_fuzzer(config: FuzzConfig) -> None:
                 candidate = _make_discovered_seed(
                     mutated_text, family, seed.bucket, next_discovered_ordinal
                 )
-                scheduler.add(candidate, metadata={"bucket": candidate.bucket})
+                metadata = {"bucket": candidate.bucket}
+                if scheduler_uses_feedback and config["ucb_trace"]:
+                    metadata["_ucb_trace"] = True
+                scheduler.add(candidate, metadata=metadata)
                 added_seed_inputs.add(mutated_text)
                 next_discovered_ordinal += 1
 
@@ -1070,6 +1088,7 @@ def _print_config(config: FuzzConfig) -> None:
     print(f"  target: {config['target']}")
     print(f"  scheduler_kind: {config['scheduler_kind']}")
     print(f"  mutator_kind: {config['mutator_kind']}")
+    print(f"  ucb_trace: {config['ucb_trace']}")
     print(f"  max_iterations: {config['max_iterations']}")
     print(f"  max_hours: {config['max_hours']}")
     print(f"  timeout: {config['timeout']}")

@@ -20,6 +20,88 @@ def _short_hash(obj: Any) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
+def _merge_line_ranges(values: list[int]) -> list[str]:
+    """Merge sorted line numbers into compact inclusive ranges."""
+    if not values:
+        return []
+    ordered = sorted(set(v for v in values if isinstance(v, int) and v > 0))
+    if not ordered:
+        return []
+    ranges: list[str] = []
+    start = ordered[0]
+    end = ordered[0]
+    for value in ordered[1:]:
+        if value <= end + 1:
+            end = value
+            continue
+        ranges.append(f"{start}-{end}" if start != end else str(start))
+        start = value
+        end = value
+    ranges.append(f"{start}-{end}" if start != end else str(start))
+    return ranges
+
+
+def _summarize_branch_ranges(branch_details_by_file: Any) -> dict[str, dict[str, list[str]]]:
+    """Summarize branch details as merged line ranges per file."""
+    if not isinstance(branch_details_by_file, list):
+        return {}
+    summary: dict[str, dict[str, list[str]]] = {}
+    for file_entry in branch_details_by_file:
+        if not isinstance(file_entry, dict):
+            continue
+        file_name = file_entry.get("file")
+        if not isinstance(file_name, str) or not file_name:
+            continue
+        covered_lines: list[int] = []
+        missing_lines: list[int] = []
+        for arc in file_entry.get("covered_branches", []):
+            if isinstance(arc, dict):
+                for key in ("from_line", "to_line"):
+                    value = arc.get(key)
+                    if isinstance(value, int) and value > 0:
+                        covered_lines.append(value)
+        for arc in file_entry.get("missing_branches", []):
+            if isinstance(arc, dict):
+                for key in ("from_line", "to_line"):
+                    value = arc.get(key)
+                    if isinstance(value, int) and value > 0:
+                        missing_lines.append(value)
+        summary[file_name] = {
+            "covered": _merge_line_ranges(covered_lines),
+            "missing": _merge_line_ranges(missing_lines),
+        }
+    return summary
+
+
+def _summarize_trace_payload(
+    *,
+    raw_signals: dict[str, Any] | None,
+    normalized_signals: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build a compact, human-readable summary of one UCB update payload."""
+    closed = raw_signals.get("closed_result", {}) if isinstance(raw_signals, dict) else {}
+    bug_signature = normalized_signals.get("bug_signature") if normalized_signals else None
+    covered = closed.get("covered_branches")
+    missing = closed.get("missing_branches")
+    total = None
+    if isinstance(covered, int) and isinstance(missing, int):
+        total = covered + missing
+    branch_ranges = _summarize_branch_ranges(closed.get("branch_details_by_file"))
+    summary: dict[str, Any] = {
+        "status": normalized_signals.get("status") if normalized_signals else None,
+        "bug_type": bug_signature.get("type") if isinstance(bug_signature, dict) else None,
+        "new_coverage": normalized_signals.get("new_coverage") if normalized_signals else None,
+        "new_bug": normalized_signals.get("new_bug") if normalized_signals else None,
+        "crash": normalized_signals.get("crash") if normalized_signals else None,
+        "timeout": normalized_signals.get("timeout") if normalized_signals else None,
+        "covered_branches": covered,
+        "missing_branches": missing,
+        "total_branches": total,
+        "branch_ranges": branch_ranges,
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
 @dataclass
 class _TreeNode:
     """Tree node used to group scheduled items by coverage and bug buckets."""
@@ -129,6 +211,18 @@ class UCBTreeScheduler(BaseSeedScheduler):
         cov_key, bug_key = stored.metadata.get("_ucb_last_leaf") or stored.metadata.get(
             "_ucb_home", ("NO_COVERAGE", "NO_BUG")
         )
+        trace = stored.metadata.get("_ucb_trace")
+        if trace:
+            trace_summary = _summarize_trace_payload(
+                raw_signals=signals,
+                normalized_signals=normalized_signals,
+            )
+            print(
+                "[ucb.update] "
+                f"item={stored.item_id} seed={stored.seed.seed_id} "
+                f"score={isinteresting_score:.3f} reward={reward:.3f} "
+                f"leaf=({cov_key}, {bug_key}) summary={trace_summary!r}"
+            )
         leaf = self._ensure_leaf(cov_key, bug_key)
         self._insert_into_leaf(leaf, stored)
         return stored
