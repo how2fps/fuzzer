@@ -1,0 +1,7 @@
+{
+       "__complex__": true,
+       "real": 1,
+       "imag": 2,
+       "list": [null, false, true, 0, -1, 2147483647],
+       "string": "Testing 123 !@#$%^&*()"
+}

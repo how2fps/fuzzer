@@ -29,6 +29,7 @@ from seed_corpus import Seed, get_corpus_loader, list_versions as seed_corpus_ve
 from seed_scheduler import (
     BaseSeedScheduler,
     UCBTreeScheduler,
+    build_ucb_update_signals,
     get_scheduler,
     list_versions as scheduler_versions,
     ScheduledSeed,
@@ -39,7 +40,6 @@ RESULTS_DIR = FUZZER_ROOT / "results"
 DISCOVERED_SEED_ORDINAL_BASE = 1_000_000
 JSON_DECODER_TARGET_DIR = FUZZER_ROOT / "targets" / "json-decoder"
 JSON_DECODER_STV_SCRIPT = JSON_DECODER_TARGET_DIR / "json_decoder_stv.py"
-UCB_DEBUG_EVERY = 10
 
 
 class FuzzConfig(TypedDict):
@@ -47,6 +47,7 @@ class FuzzConfig(TypedDict):
     scheduler_kind: str
     mutator_kind: str
     ucb_trace: bool
+    ucb_debug_tree: bool
     max_iterations: int | None
     max_hours: float | None
     timeout: float
@@ -88,6 +89,11 @@ def build_config() -> FuzzConfig:
         "--ucb-trace",
         action="store_true",
         help="Print UCB raw signals, normalized signals, and computed rewards on update.",
+    )
+    parser.add_argument(
+        "--ucb-debug-tree",
+        action="store_true",
+        help="Print the UCB tree snapshot after each iteration when using ucb_tree.",
     )
     parser.add_argument(
         "--iterations",
@@ -161,7 +167,8 @@ def build_config() -> FuzzConfig:
     args = parser.parse_args()
 
     if args.max_hours is not None and "--iterations" in sys.argv:
-        parser.error("Cannot specify both --iterations and --hours; use exactly one.")
+        parser.error(
+            "Cannot specify both --iterations and --hours; use exactly one.")
     if args.max_hours is not None:
         if args.max_hours <= 0:
             parser.error("--hours must be positive.")
@@ -172,6 +179,7 @@ def build_config() -> FuzzConfig:
         "scheduler_kind": args.scheduler_kind,
         "mutator_kind": args.mutator_kind,
         "ucb_trace": args.ucb_trace,
+        "ucb_debug_tree": args.ucb_debug_tree,
         "max_iterations": max_iterations,
         "max_hours": args.max_hours,
         "timeout": args.timeout,
@@ -263,7 +271,8 @@ def warmup_power_schedule(
     power_scheduler_module: Any,
     conn: sqlite3.Connection | None = None,
 ) -> dict[int, int]:
-    stats = seed_stats_for_power_schedule(corpus=corpus, target=target, conn=conn)
+    stats = seed_stats_for_power_schedule(
+        corpus=corpus, target=target, conn=conn)
     if not stats:
         return {}
     schedule = power_scheduler_module.compute_power_schedule(seeds=stats)
@@ -281,7 +290,16 @@ def init_scheduler(
     scheduler = get_scheduler_fn(scheduler_kind)
     target_set = corpus.target(target)
     for seed in target_set.seeds:
-        metadata = {"bucket": seed.bucket}
+        metadata: dict[str, Any] = {
+            "bucket": seed.bucket,
+        }
+        # Richer per-seed metadata helps schedulers like UCBTreeScheduler that
+        # bucket seeds based on "signals". For static corpus seeds we approximate
+        # coverage buckets using the seed family/bucket and assume an initial ok status.
+        metadata["signals"] = {
+            "coverage_key": {"family": seed.family, "bucket": seed.bucket},
+            "status": "ok",
+        }
         if ucb_trace and isinstance(scheduler, UCBTreeScheduler):
             metadata["_ucb_trace"] = True
         scheduler.add(seed, metadata=metadata)
@@ -358,7 +376,8 @@ def _insert_run(
     msg = (bug_signature or {}).get("message")
     file_ = (bug_signature or {}).get("file")
     line_raw = (bug_signature or {}).get("line")
-    line = int(line_raw) if line_raw is not None and str(line_raw).isdigit() else None
+    line = int(line_raw) if line_raw is not None and str(
+        line_raw).isdigit() else None
     conn.execute(
         """INSERT INTO runs (
             iteration, seed_id, seed_text, mutated_input, status, bug_type,
@@ -454,7 +473,6 @@ def _insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
     except (sqlite3.Error, OSError):
         pass
 
-
 def get_inputs_for_unique_error_line_pairs(
     conn: sqlite3.Connection,
 ) -> list[dict[str, Any]]:
@@ -518,7 +536,8 @@ def _export_results(
                 w.writerows(pairs)
         else:
             with open(pairs_path, "w", newline="", encoding="utf-8") as f:
-                f.write("exception,line,file,bug_type,seed_id,seed_text,mutated_input,status,iteration,isinteresting_score\n")
+                f.write(
+                    "exception,line,file,bug_type,seed_id,seed_text,mutated_input,status,iteration,isinteresting_score\n")
 
         # 2. Full runs as CSV
         runs_path = results_folder / "runs.csv"
@@ -544,10 +563,12 @@ def _export_results(
         # Start fresh so the copied CSV only contains this export run's STV results
         if stv_csv.is_file():
             stv_csv.unlink()
-        coverage_file = str((results_folder / ".coverage_buggy_json").resolve())
+        coverage_file = str(
+            (results_folder / ".coverage_buggy_json").resolve())
         print(f"Coverage file: {coverage_file}")
         for rec in pairs:
-            print(f"Running json_decoder_stv.py with input: {rec.get('mutated_input')}")
+            print(
+                f"Running json_decoder_stv.py with input: {rec.get('mutated_input')}")
             input_text = rec.get("mutated_input") or ""
             if not input_text:
                 continue
@@ -590,7 +611,8 @@ def _run_worker_process(
     Mutated input is pre-generated by the coordinator so workers only run the parser.
     """
     parser_api = get_parser(config["parser_version"])
-    compute_interestingness_fn = get_compute_interestingness(config["isinteresting_version"])
+    compute_interestingness_fn = get_compute_interestingness(
+        config["isinteresting_version"])
     effective_target = config["target"]
     results_folder = Path(results_folder_str)
 
@@ -619,17 +641,17 @@ def _run_worker_process(
             db_path=db_path,
             target=work.get("target", ""),
         )
-        _insert_seen_branches(db_path, result)
         closed = result.get("closed_result", {})
-        signals: dict[str, Any] = {
-            "iteration": iteration,
-            "seed_id": seed_id,
-            "bucket": bucket,
-            "status": closed.get("status"),
-            "isinteresting": score,
-            "closed_result": result.get("closed_result", {}),
-            "open_result": result.get("open_result", {}),
-        }
+        signals = build_ucb_update_signals(
+            result=result,
+            db_path=db_path,
+            target=work.get("target", ""),
+            bucket=bucket,
+            iteration=iteration,
+            seed_id=seed_id,
+            score=score,
+        )
+        _insert_seen_branches(db_path, result)
         result_queue.put({
             "job_id": job_id,
             "item_id": item_id,
@@ -853,17 +875,23 @@ def _run_fuzzer_multi_worker(
         )
         with cond:
             if result["isinteresting_score"] > 0 and result["mutated_input"] not in added_seed_inputs_holder[0]:
-                parent_bucket = (result.get("signals") or {}).get("bucket", "discovered")
+                parent_signals = (result.get("signals") or {}).copy()
+                parent_bucket = parent_signals.get("bucket", "discovered")
                 candidate = _make_discovered_seed(
                     result["mutated_input"],
                     family,
                     parent_bucket,
                     next_discovered_ordinal_holder[0],
                 )
-                metadata = {"bucket": candidate.bucket}
+                candidate_metadata: dict[str, Any] = {
+                    "bucket": candidate.bucket,
+                    "parent_seed_id": result["seed_id"],
+                }
+                if parent_signals:
+                    candidate_metadata["signals"] = parent_signals
                 if scheduler_uses_feedback and config["ucb_trace"]:
-                    metadata["_ucb_trace"] = True
-                scheduler.add(candidate, metadata=metadata)
+                    candidate_metadata["_ucb_trace"] = True
+                scheduler.add(candidate, metadata=candidate_metadata)
                 added_seed_inputs_holder[0].add(result["mutated_input"])
                 next_discovered_ordinal_holder[0] += 1
                 cond.notify()
@@ -871,13 +899,14 @@ def _run_fuzzer_multi_worker(
         with cond:
             results_received_count[0] = results_received
             cond.notify()
+        print(scheduler.debug_dump(limit=10))
         # if iteration % 100 == 0 or result.get("status") in ("bug", "crash", "timeout"):
         if iteration:
             print(
                 f"[iter {iteration}] seed={result['seed_id']} "
                 f"score={result['isinteresting_score']:.3f} status={result['status']} input={result['seed_text']} mutated input={result['mutated_input']}"
             )
-        if scheduler_uses_feedback and (iteration + 1) % UCB_DEBUG_EVERY == 0:
+        if scheduler_uses_feedback and config["ucb_debug_tree"]:
             print(scheduler.render_tree(limit=12))
         if total_jobs[0] > 0 and results_received >= total_jobs[0]:
             break
@@ -893,8 +922,10 @@ def run_fuzzer(config: FuzzConfig) -> None:
 
     parser_api = get_parser(config["parser_version"])
     mutate_fn = get_mutator(config["mutator_version"])
-    compute_interestingness_fn = get_compute_interestingness(config["isinteresting_version"])
-    power_scheduler_module = get_power_scheduler(config["power_scheduler_version"])
+    compute_interestingness_fn = get_compute_interestingness(
+        config["isinteresting_version"])
+    power_scheduler_module = get_power_scheduler(
+        config["power_scheduler_version"])
 
     effective_target = config["target"]
     effective_mutator = infer_mutator_kind(
@@ -902,7 +933,8 @@ def run_fuzzer(config: FuzzConfig) -> None:
         target=effective_target,
     )
 
-    rng = random.Random(config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
+    rng = random.Random(
+        config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
 
     scheduler = init_scheduler(
         corpus=corpus,
@@ -991,11 +1023,13 @@ def run_fuzzer(config: FuzzConfig) -> None:
             corpus=corpus, target=effective_target, conn=conn
         )
         if stats:
-            schedule = power_scheduler_module.compute_power_schedule(seeds=stats)
+            schedule = power_scheduler_module.compute_power_schedule(
+                seeds=stats)
             seed_energies = dict(schedule["seed_energies"])
         scheduled = scheduler.next()
         seed = scheduled.seed
-        energy = 1 if scheduler_uses_feedback else seed_energies.get(seed.ordinal, 1)
+        energy = 1 if scheduler_uses_feedback else seed_energies.get(
+            seed.ordinal, 1)
         n = (
             min(max(1, energy), remaining)
             if remaining is not None
@@ -1028,8 +1062,27 @@ def run_fuzzer(config: FuzzConfig) -> None:
                 db_path=db_path,
                 target=effective_target,
             )
+            closed = result.get("closed_result", {}) or {}
+            open_result = result.get("open_result", {}) or {}
+            last_signals = {
+                "closed_result": closed,
+                "open_result": open_result,
+                "iteration": iteration,
+                "seed_id": seed.seed_id,
+                "bucket": seed.bucket,
+                "status": closed.get("status"),
+                "isinteresting": score,
+            }
+            ucb_signals = build_ucb_update_signals(
+                result=result,
+                db_path=db_path,
+                target=effective_target,
+                bucket=seed.bucket,
+                iteration=iteration,
+                seed_id=seed.seed_id,
+                score=score,
+            )
 
-            closed = result.get("closed_result", {})
             _insert_run(
                 conn,
                 iteration=iteration,
@@ -1047,17 +1100,21 @@ def run_fuzzer(config: FuzzConfig) -> None:
                 scheduler.update(
                     scheduled,
                     isinteresting_score=score,
-                    signals=result,
+                    signals=ucb_signals,
                 )
 
             if score > 0.5 and mutated_text not in added_seed_inputs:
                 candidate = _make_discovered_seed(
                     mutated_text, family, seed.bucket, next_discovered_ordinal
                 )
-                metadata = {"bucket": candidate.bucket}
+                candidate_metadata: dict[str, Any] = {
+                    "bucket": candidate.bucket,
+                    "parent_seed_id": seed.seed_id,
+                    "signals": last_signals,
+                }
                 if scheduler_uses_feedback and config["ucb_trace"]:
-                    metadata["_ucb_trace"] = True
-                scheduler.add(candidate, metadata=metadata)
+                    candidate_metadata["_ucb_trace"] = True
+                scheduler.add(candidate, metadata=candidate_metadata)
                 added_seed_inputs.add(mutated_text)
                 next_discovered_ordinal += 1
 
@@ -1069,7 +1126,7 @@ def run_fuzzer(config: FuzzConfig) -> None:
                     f"seed={seed.seed_id} bucket={seed.bucket} status={status} "
                     f"score={score:.3f}"
                 )
-            if scheduler_uses_feedback and (iteration + 1) % UCB_DEBUG_EVERY == 0:
+            if scheduler_uses_feedback and config["ucb_debug_tree"]:
                 print(scheduler.render_tree(limit=12))
             iteration += 1
             if remaining is not None:
@@ -1089,6 +1146,7 @@ def _print_config(config: FuzzConfig) -> None:
     print(f"  scheduler_kind: {config['scheduler_kind']}")
     print(f"  mutator_kind: {config['mutator_kind']}")
     print(f"  ucb_trace: {config['ucb_trace']}")
+    print(f"  ucb_debug_tree: {config['ucb_debug_tree']}")
     print(f"  max_iterations: {config['max_iterations']}")
     print(f"  max_hours: {config['max_hours']}")
     print(f"  timeout: {config['timeout']}")

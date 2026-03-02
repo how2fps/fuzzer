@@ -4,7 +4,7 @@ from .base import BaseSeedScheduler
 from .heap_scheduler import HeapScheduler
 from .queue_scheduler import QueueScheduler
 from .types import ScheduledSeed
-from .ucb_tree_scheduler import UCBTreeScheduler
+from .ucb_tree_scheduler import UCBTreeScheduler, build_ucb_update_signals
 
 
 SCHEDULER_KINDS = ("queue", "heap", "ucb_tree")
@@ -38,6 +38,7 @@ __all__ = [
     "SCHEDULER_KINDS",
     "ScheduledSeed",
     "UCBTreeScheduler",
+    "build_ucb_update_signals",
     "get_scheduler",
     "list_versions",
     "make_scheduler",

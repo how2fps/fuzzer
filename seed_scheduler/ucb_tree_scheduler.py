@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from isinteresting import get_covered_edges_from_result
 from seed_corpus import Seed
 
 from .base import BaseSeedScheduler
@@ -100,6 +103,125 @@ def _summarize_trace_payload(
         "branch_ranges": branch_ranges,
     }
     return {key: value for key, value in summary.items() if value is not None}
+
+
+def _compact_coverage_key(key: Any) -> str:
+    """Render coverage bucket keys in a readable one-line form."""
+    if isinstance(key, dict):
+        if "family" in key or "bucket" in key:
+            family = key.get("family", "?")
+            bucket = key.get("bucket", "?")
+            return f"family={family} bucket={bucket}"
+        if "branch_details_by_file" in key:
+            branch_ranges = _summarize_branch_ranges(key.get("branch_details_by_file"))
+            parts: list[str] = []
+            for file_name, ranges in list(branch_ranges.items())[:2]:
+                short_file = file_name.rsplit("/", 1)[-1]
+                covered = ", ".join(ranges.get("covered", [])[:2]) or "-"
+                parts.append(f"{short_file}:{covered}")
+            if len(branch_ranges) > 2:
+                parts.append("...")
+            return "ranges=" + " | ".join(parts)
+        return json.dumps(key, sort_keys=True, default=str)[:120]
+    return str(key)
+
+
+def _closed_status(result: dict[str, Any]) -> str:
+    """Return normalized closed_result status."""
+    closed = result.get("closed_result", {})
+    status = closed.get("status")
+    return str(status).strip().lower() if isinstance(status, str) else ""
+
+
+def _has_new_coverage(db_path: Path | str, result: dict[str, Any]) -> bool:
+    """Return True if the current result covers any edge not yet in seen_branches."""
+    edges = get_covered_edges_from_result(result)
+    if not edges:
+        return False
+    path = Path(db_path) if isinstance(db_path, str) else db_path
+    if not path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            seen: set[tuple[str, int, int]] = set()
+            cur = conn.execute("SELECT file, from_line, to_line FROM seen_branches")
+            for row in cur:
+                seen.add((str(row[0]), int(row[1]), int(row[2])))
+            return bool(edges - seen)
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def _has_new_bug(db_path: Path | str, result: dict[str, Any], target: str) -> bool:
+    """Return True if the current bug/crash signature has not appeared before for this target."""
+    closed = result.get("closed_result", {})
+    status = _closed_status(result)
+    if status not in {"bug", "crash", "timeout", "error"}:
+        return False
+    bug_signature = closed.get("bug_signature") or {}
+    if not isinstance(bug_signature, dict):
+        return False
+    exc = bug_signature.get("exception") or ""
+    file_ = bug_signature.get("file") or ""
+    line_raw = bug_signature.get("line")
+    line = None
+    if line_raw is not None:
+        try:
+            line = int(line_raw)
+        except (TypeError, ValueError):
+            line = None
+    path = Path(db_path) if isinstance(db_path, str) else db_path
+    if not path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            cur = conn.execute(
+                """
+                SELECT COUNT(*) FROM runs
+                WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+                  AND COALESCE(exception, '') = COALESCE(?, '')
+                  AND COALESCE(file, '') = COALESCE(?, '')
+                  AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
+                """,
+                (target, exc, file_, line, line),
+            )
+            row = cur.fetchone()
+            return int(row[0]) == 0 if row else False
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def build_ucb_update_signals(
+    *,
+    result: dict[str, Any],
+    db_path: Path | str,
+    target: str,
+    bucket: str,
+    iteration: int,
+    seed_id: str,
+    score: float,
+) -> dict[str, Any]:
+    """Build the per-mutation feedback payload consumed by the UCB scheduler."""
+    status = _closed_status(result)
+    return {
+        "iteration": iteration,
+        "seed_id": seed_id,
+        "bucket": bucket,
+        "status": status,
+        "isinteresting": score,
+        "new_coverage": _has_new_coverage(db_path, result),
+        "new_bug": _has_new_bug(db_path, result, target),
+        "crash": status == "crash",
+        "timeout": status == "timeout",
+        "closed_result": result.get("closed_result", {}),
+        "open_result": result.get("open_result", {}),
+    }
 
 
 @dataclass
@@ -294,7 +416,7 @@ class UCBTreeScheduler(BaseSeedScheduler):
             if emitted >= limit:
                 break
             lines.append(
-                f"|- cov {cov_node.key} N={cov_node.n_selected} Q={cov_node.q_avg_reward:.3f}"
+                f"|- cov {_compact_coverage_key(cov_node.key)} N={cov_node.n_selected} Q={cov_node.q_avg_reward:.3f}"
             )
             bug_nodes = sorted(
                 cov_node.children.values(),
