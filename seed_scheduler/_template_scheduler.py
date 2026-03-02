@@ -18,7 +18,7 @@ from .types import ScheduledSeed
 
 class TemplateScheduler(BaseSeedScheduler):
     """
-    Implement: add, next, update, empty, __len__, stats.
+    Implement: add, next, empty, __len__, stats.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -31,16 +31,6 @@ class TemplateScheduler(BaseSeedScheduler):
 
     def next(self) -> ScheduledSeed:
         # TODO: return next item to fuzz
-        raise NotImplementedError
-
-    def update(
-        self,
-        item: ScheduledSeed,
-        *,
-        isinteresting_score: float,
-        signals: dict[str, Any] | None = None,
-    ) -> ScheduledSeed:
-        # TODO: update item with score/signals, return the stored item
         raise NotImplementedError
 
     def empty(self) -> bool:

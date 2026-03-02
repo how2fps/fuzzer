@@ -29,6 +29,7 @@ def _demo_signals(step: int, item) -> dict:
 
 
 def run_demo(kind: str) -> None:
+    """Run a small backend-specific scheduler demo."""
     print(f"\nScheduler: {kind}")
     corpus = SeedCorpus.load()
     rng = random.Random(42)
@@ -69,15 +70,23 @@ def run_demo(kind: str) -> None:
         item = scheduler.next()
         score = _fake_isinteresting_score(item.seed.bucket, rng)
         signals = _demo_signals(step, item)
-        scheduler.update(
-            item,
-            isinteresting_score=score,
-            signals=signals,
-        )
-        print(
-            f"step={step} item={item.item_id} seed={item.seed.seed_id} "
-            f"bucket={item.seed.bucket} score={score} prio={item.priority:.3f}"
-        )
+        if kind == "ucb_tree":
+            scheduler.update(
+                item,
+                isinteresting_score=score,
+                signals=signals,
+            )
+            print(
+                f"step={step} item={item.item_id} seed={item.seed.seed_id} "
+                f"bucket={item.seed.bucket} score={score} prio={item.priority:.3f}"
+            )
+        else:
+            print(
+                f"step={step} item={item.item_id} seed={item.seed.seed_id} "
+                f"bucket={item.seed.bucket} score={score}"
+            )
+            if scheduler.empty():
+                break
     print("final", scheduler.stats())
 
 

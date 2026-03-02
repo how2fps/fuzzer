@@ -26,7 +26,13 @@ from mutator import get_mutator, list_versions as mutator_versions
 from parser import DEFAULT_TIMEOUT, TARGETS, get_parser, list_versions as parser_versions
 from power_scheduler import SeedStats, get_power_scheduler, list_versions as power_scheduler_versions
 from seed_corpus import Seed, get_corpus_loader, list_versions as seed_corpus_versions
-from seed_scheduler import BaseSeedScheduler, get_scheduler, list_versions as scheduler_versions, ScheduledSeed
+from seed_scheduler import (
+    BaseSeedScheduler,
+    UCBTreeScheduler,
+    get_scheduler,
+    list_versions as scheduler_versions,
+    ScheduledSeed,
+)
 
 FUZZER_ROOT = Path(__file__).resolve().parent
 RESULTS_DIR = FUZZER_ROOT / "results"
@@ -624,6 +630,8 @@ def _run_worker_process(
             "bucket": bucket,
             "status": closed.get("status"),
             "isinteresting": score,
+            "closed_result": result.get("closed_result", {}),
+            "open_result": result.get("open_result", {}),
         }
         result_queue.put({
             "job_id": job_id,
@@ -660,6 +668,7 @@ def _run_fuzzer_multi_worker(
     Power schedule is recomputed from the DB every time we assign energy to a new seed.
     Mutations are pre-generated in the coordinator so each work item has a unique mutated_input.
     """
+    scheduler_uses_feedback = isinstance(scheduler, UCBTreeScheduler)
     request_queue: Queue = Queue()
     reply_queue: Queue = Queue()
     result_queue: Queue = Queue()
@@ -725,8 +734,12 @@ def _run_fuzzer_multi_worker(
                                         schedule["seed_energies"]
                                     )
                                 current_scheduled[0] = scheduler.next()
-                                energy = seed_energies_holder[0].get(
-                                    current_scheduled[0].seed.ordinal, 1
+                                energy = (
+                                    1
+                                    if scheduler_uses_feedback
+                                    else seed_energies_holder[0].get(
+                                        current_scheduled[0].seed.ordinal, 1
+                                    )
                                 )
                                 n = (
                                     min(max(1, energy), remaining_budget[0])
@@ -749,8 +762,9 @@ def _run_fuzzer_multi_worker(
                                 batch_expected[current_scheduled[0].item_id] = len(
                                     current_batch
                                 )
+                                mode = "single-mutation bandit" if scheduler_uses_feedback else "batch"
                                 print(
-                                    f"Scheduled seed {current_scheduled[0].seed.seed_id} with energy {energy} ({len(current_batch)} unique mutations)"
+                                    f"Scheduled seed {current_scheduled[0].seed.seed_id} with energy {energy} ({len(current_batch)} unique mutations, mode={mode})"
                                 )
                             finally:
                                 conn_thread.close()
@@ -810,7 +824,6 @@ def _run_fuzzer_multi_worker(
 
     results_received = 0
     batch_scores_by_item: dict[str, list[float]] = {}
-    batch_last_signals_by_item: dict[str, dict[str, Any]] = {}
     while True:
         result = result_queue.get()
         with cond:
@@ -818,20 +831,18 @@ def _run_fuzzer_multi_worker(
             scheduled, iteration = pending.pop(job_id)
             item_id = scheduled.item_id
             score = result["isinteresting_score"]
-            batch_scores_by_item.setdefault(item_id, []).append(score)
-            batch_last_signals_by_item[item_id] = result["signals"]
-            expected = batch_expected.get(item_id, 1)
-            if len(batch_scores_by_item[item_id]) >= expected:
-                scores = batch_scores_by_item.pop(item_id, [])
-                signals = batch_last_signals_by_item.pop(item_id, {})
-                batch_expected.pop(item_id, None)
-                if scores:
-                    avg_score = sum(scores) / len(scores)
-                    scheduler.update(
-                        scheduled,
-                        isinteresting_score=avg_score,
-                        signals=signals,
-                    )
+            if scheduler_uses_feedback:
+                scheduler.update(
+                    scheduled,
+                    isinteresting_score=score,
+                    signals=result["signals"],
+                )
+            else:
+                batch_scores_by_item.setdefault(item_id, []).append(score)
+                expected = batch_expected.get(item_id, 1)
+                if len(batch_scores_by_item[item_id]) >= expected:
+                    batch_scores_by_item.pop(item_id, [])
+                    batch_expected.pop(item_id, None)
         _insert_run(
             conn,
             iteration=iteration,
@@ -966,6 +977,7 @@ def run_fuzzer(config: FuzzConfig) -> None:
     iteration = 0
     target_set = corpus.target(effective_target)
     family = target_set.family
+    scheduler_uses_feedback = isinstance(scheduler, UCBTreeScheduler)
     added_seed_inputs: set[str] = set()
     next_discovered_ordinal = DISCOVERED_SEED_ORDINAL_BASE
 
@@ -988,7 +1000,7 @@ def run_fuzzer(config: FuzzConfig) -> None:
             seed_energies = dict(schedule["seed_energies"])
         scheduled = scheduler.next()
         seed = scheduled.seed
-        energy = seed_energies.get(seed.ordinal, 1)
+        energy = 1 if scheduler_uses_feedback else seed_energies.get(seed.ordinal, 1)
         n = (
             min(max(1, energy), remaining)
             if remaining is not None
@@ -1003,12 +1015,11 @@ def run_fuzzer(config: FuzzConfig) -> None:
             conn,
             effective_target,
         )
+        mode = "single-mutation bandit" if scheduler_uses_feedback else "batch"
         print(
-            f"Running {len(mutation_batch)} mutations for seed {seed.seed_id} with energy {energy}"
+            f"Running {len(mutation_batch)} mutations for seed {seed.seed_id} with energy {energy} mode={mode}"
         )
 
-        batch_scores: list[float] = []
-        last_signals: dict[str, Any] = {}
         for mutated_text in mutation_batch:
             result = parser_api.run_parser(
                 input_data=mutated_text.encode("utf-8"),
@@ -1022,7 +1033,6 @@ def run_fuzzer(config: FuzzConfig) -> None:
                 db_path=db_path,
                 target=effective_target,
             )
-            batch_scores.append(score)
             closed = result.get("closed_result", {}) or {}
             open_result = result.get("open_result", {}) or {}
             last_signals = {
@@ -1048,6 +1058,13 @@ def run_fuzzer(config: FuzzConfig) -> None:
             )
             _insert_seen_branches(db_path, result)
 
+            if scheduler_uses_feedback:
+                scheduler.update(
+                    scheduled,
+                    isinteresting_score=score,
+                    signals=result,
+                )
+
             if score > 0.5 and mutated_text not in added_seed_inputs:
                 candidate = _make_discovered_seed(
                     mutated_text, family, seed.bucket, next_discovered_ordinal
@@ -1072,14 +1089,6 @@ def run_fuzzer(config: FuzzConfig) -> None:
             iteration += 1
             if remaining is not None:
                 remaining -= 1
-
-        if batch_scores:
-            avg_score = sum(batch_scores) / len(batch_scores)
-            scheduler.update(
-                scheduled,
-                isinteresting_score=avg_score,
-                signals=last_signals,
-            )
 
     conn.close()
     _export_results(
