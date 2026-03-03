@@ -284,6 +284,7 @@ def init_scheduler(
     corpus: Any,
     target: str,
     scheduler_kind: str,
+    # TODO: this function kinda redundant can just call make_scheduler() straight
     get_scheduler_fn: Any,
     ucb_trace: bool = False,
 ) -> BaseSeedScheduler:
@@ -451,6 +452,7 @@ def _generate_unique_mutations(
     return batch
 
 
+# TODO [branches? it should be seen statements right not branches or edge]
 def _insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
     """Insert covered branches from the parser result into seen_branches. Called by main after each run."""
     edges = get_covered_edges_from_result(result)
@@ -472,6 +474,7 @@ def _insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
             conn.close()
     except (sqlite3.Error, OSError):
         pass
+
 
 def get_inputs_for_unique_error_line_pairs(
     conn: sqlite3.Connection,
@@ -600,9 +603,9 @@ def _export_results(
 
 def _run_worker_process(
     config: FuzzConfig,
-    request_queue: Queue,
-    reply_queue: Queue,
-    result_queue: Queue,
+    request_queue: Queue,  # workers request for work
+    reply_queue: Queue,  # coordinator thread sends work item or none
+    result_queue: Queue,  # workers send completed execution results back
     worker_id: int,
     results_folder_str: str,
     effective_mutator: str,
@@ -619,6 +622,7 @@ def _run_worker_process(
     while True:
         request_queue.put(1)
         work = reply_queue.get()
+        # block waiting for a job
         if work is None:
             break
 
@@ -636,6 +640,7 @@ def _run_worker_process(
             print_json=False,
         )
         db_path = results_folder / "runs.db"
+
         score = compute_interestingness_fn(
             result=result,
             db_path=db_path,
@@ -740,19 +745,28 @@ def _run_fuzzer_multi_worker(
                         if current_mutations_left[0] <= 0:
                             conn_thread = sqlite3.connect(str(db_path))
                             try:
+                                # get a list of seedstats for all seeds:
+                                # seedstat: [[id, fuzz_count, avg_is_interesting_score, bug count],.., n]
+                                # stats = [seedstat_n1, .., seedstat_n]
                                 stats = seed_stats_for_power_schedule(
                                     corpus=corpus,
                                     target=effective_target,
                                     conn=conn_thread,
                                 )
                                 if stats:
+                                    # get a dict of {seed_energies: [seed_id: energy to fuzz for that seed_id], ...}
                                     schedule = power_scheduler_module.compute_power_schedule(
                                         seeds=stats
                                     )
+                                    # TODO: probably can unpack seed_energies already in compute power scheduler
                                     seed_energies_holder[0] = dict(
                                         schedule["seed_energies"]
                                     )
+                                # get the next ScheduledSeed from the scheduler
                                 current_scheduled[0] = scheduler.next()
+
+                                # set energy to 1 if using ucb-bandit scheduler
+                                # if not obtain the seeds' calculated power from the power-scheduler
                                 energy = (
                                     1
                                     if scheduler_uses_feedback
@@ -760,11 +774,14 @@ def _run_fuzzer_multi_worker(
                                         current_scheduled[0].seed.ordinal, 1
                                     )
                                 )
+
+                                # n is effective times to mutate after factoring max iteration budget
                                 n = (
                                     min(max(1, energy), remaining_budget[0])
                                     if remaining_budget is not None
                                     else max(1, energy)
                                 )
+                                # Initializing mutation jobs
                                 current_batch.clear()
                                 current_batch.extend(
                                     _generate_unique_mutations(
@@ -787,6 +804,7 @@ def _run_fuzzer_multi_worker(
                                 )
                             finally:
                                 conn_thread.close()
+                        # Accounting and clean up after getting ScheduledSeed
                         scheduled = current_scheduled[0]
                         current_mutations_left[0] -= 1
                         if remaining_budget is not None:
@@ -936,6 +954,10 @@ def run_fuzzer(config: FuzzConfig) -> None:
     rng = random.Random(
         config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
 
+    # TODO: might want to replace init scheduler with just
+    # make_scheduler()
+    # corpus = SeedCorpus.load() then us sample or sample batch function
+    # see seed_corpus.md
     scheduler = init_scheduler(
         corpus=corpus,
         target=effective_target,
@@ -953,6 +975,9 @@ def run_fuzzer(config: FuzzConfig) -> None:
     db_path = results_folder / "runs.db"
     conn = sqlite3.connect(str(db_path))
     _init_results_db(conn)
+
+    # TODO: Assigning initial seed energies to all the seeds when no seed stats is abit funky
+    # we should just assign all constant and use the compute power function per next() of seed scheduler
 
     seed_energies = warmup_power_schedule(
         corpus=corpus,
