@@ -30,8 +30,8 @@ from seed_scheduler import (
     BaseSeedScheduler,
     UCBTreeScheduler,
     build_ucb_update_signals,
-    get_scheduler,
     list_versions as scheduler_versions,
+    make_scheduler,
     ScheduledSeed,
 )
 
@@ -40,13 +40,19 @@ RESULTS_DIR = FUZZER_ROOT / "results"
 DISCOVERED_SEED_ORDINAL_BASE = 1_000_000
 JSON_DECODER_TARGET_DIR = FUZZER_ROOT / "targets" / "json-decoder"
 JSON_DECODER_STV_SCRIPT = JSON_DECODER_TARGET_DIR / "json_decoder_stv.py"
-UCB_DEBUG_EVERY = 0
+DEFAULT_PRELOAD_BUCKET_RATIOS: dict[str, float] = {
+    "valid": 0.7,
+    "string_stress": 0.2,
+    "near_valid": 0.1,
+}
 
 
 class FuzzConfig(TypedDict):
     target: str
     scheduler_kind: str
     mutator_kind: str
+    seed_preload_mode: str
+    seed_preload_total: int
     ucb_trace: bool
     ucb_debug_tree: bool
     max_iterations: int | None
@@ -85,6 +91,21 @@ def build_config() -> FuzzConfig:
         default="auto",
         choices=["auto", "json", "ip"],
         help="Mutation mode: auto-detect from target, or force json/ip.",
+    )
+    parser.add_argument(
+        "--seed-preload-mode",
+        default="full",
+        choices=["full", "ratio_batch", "sample"],
+        help=(
+            "How to preload seeds into the scheduler: all corpus seeds (`full`), "
+            "a ratio-balanced batch (`ratio_batch`), or repeated single-seed sampling (`sample`)."
+        ),
+    )
+    parser.add_argument(
+        "--seed-preload-total",
+        type=int,
+        default=50,
+        help="Number of startup seeds to preload when using `ratio_batch` or `sample` mode.",
     )
     parser.add_argument(
         "--ucb-trace",
@@ -173,12 +194,16 @@ def build_config() -> FuzzConfig:
     if args.max_hours is not None:
         if args.max_hours <= 0:
             parser.error("--hours must be positive.")
+    if args.seed_preload_total <= 0:
+        parser.error("--seed-preload-total must be positive.")
 
     max_iterations: int | None = None if args.max_hours is not None else args.max_iterations
     return {
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
         "mutator_kind": args.mutator_kind,
+        "seed_preload_mode": args.seed_preload_mode,
+        "seed_preload_total": args.seed_preload_total,
         "ucb_trace": args.ucb_trace,
         "ucb_debug_tree": args.ucb_debug_tree,
         "max_iterations": max_iterations,
@@ -280,32 +305,27 @@ def warmup_power_schedule(
     return dict(schedule["seed_energies"])
 
 
-def init_scheduler(
+def initial_scheduler_seeds(
     *,
     corpus: Any,
     target: str,
-    scheduler_kind: str,
-    # TODO: this function kinda redundant can just call make_scheduler() straight
-    get_scheduler_fn: Any,
-    ucb_trace: bool = False,
-) -> BaseSeedScheduler:
-    scheduler = get_scheduler_fn(scheduler_kind)
-    target_set = corpus.target(target)
-    for seed in target_set.seeds:
-        metadata: dict[str, Any] = {
-            "bucket": seed.bucket,
-        }
-        # Richer per-seed metadata helps schedulers like UCBTreeScheduler that
-        # bucket seeds based on "signals". For static corpus seeds we approximate
-        # coverage buckets using the seed family/bucket and assume an initial ok status.
-        metadata["signals"] = {
-            "coverage_key": {"family": seed.family, "bucket": seed.bucket},
-            "status": "ok",
-        }
-        if ucb_trace and isinstance(scheduler, UCBTreeScheduler):
-            metadata["_ucb_trace"] = True
-        scheduler.add(seed, metadata=metadata)
-    return scheduler
+    preload_mode: str,
+    preload_total: int,
+    rng: random.Random,
+) -> list[Seed]:
+    if preload_mode == "full":
+        return list(corpus.target(target).seeds)
+    if preload_mode == "ratio_batch":
+        return corpus.sample_ratio_batch(
+            target,
+            total=preload_total,
+            bucket_ratios=DEFAULT_PRELOAD_BUCKET_RATIOS,
+            rng=rng,
+            shuffle=True,
+        )
+    if preload_mode == "sample":
+        return [corpus.sample(target, rng=rng) for _ in range(preload_total)]
+    raise ValueError(f"unknown seed preload mode {preload_mode!r}")
 
 
 def _make_discovered_seed(
@@ -955,17 +975,25 @@ def run_fuzzer(config: FuzzConfig) -> None:
     rng = random.Random(
         config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
 
-    # TODO: might want to replace init scheduler with just
-    # make_scheduler()
-    # corpus = SeedCorpus.load() then us sample or sample batch function
-    # see seed_corpus.md
-    scheduler = init_scheduler(
+    scheduler = make_scheduler(config["scheduler_kind"])
+    initial_seeds = initial_scheduler_seeds(
         corpus=corpus,
         target=effective_target,
-        scheduler_kind=config["scheduler_kind"],
-        get_scheduler_fn=get_scheduler,
-        ucb_trace=config["ucb_trace"],
+        preload_mode=config["seed_preload_mode"],
+        preload_total=config["seed_preload_total"],
+        rng=rng,
     )
+    for seed in initial_seeds:
+        metadata: dict[str, Any] = {
+            "bucket": seed.bucket,
+            "signals": {
+                "coverage_key": {"family": seed.family, "bucket": seed.bucket},
+                "status": "ok",
+            },
+        }
+        if config["ucb_trace"] and isinstance(scheduler, UCBTreeScheduler):
+            metadata["_ucb_trace"] = True
+        scheduler.add(seed, metadata=metadata)
 
     if not scheduler or scheduler.empty():
         return
