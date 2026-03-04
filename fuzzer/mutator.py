@@ -7,10 +7,10 @@ import string
 def print_pretty_json(raw_string):
         try:
                 data = json.loads(raw_string)
-                print("--- PARSED OBJECT ---")
+                print("PARSED OBJECT: ")
                 print(json.dumps(data, indent=4))
         except json.JSONDecodeError as e:
-                print(f"--- INVALID JSON (Couldn't parse) ---")
+                print(f"INVALID JSON (Couldn't parse): ")
                 print(f"Raw string: {raw_string}")
                 print(f"Error: {e}")
         
@@ -20,84 +20,59 @@ def gen_random_str(rng):
         return body
 
 def gen_int(rng):
-        return str(rng.choice([0, -1, 2147483647, rng.randint(0, 1000)]))
-
+        edge_cases = [
+            0,
+            -1,
+            1,
+            2147483647,
+            -2147483648,
+            4294967295,
+            9223372036854775807,
+            -9223372036854775808,
+            rng.randint(-100000, 100000)
+        ]
+        return str(rng.choice(edge_cases))
+    
 def json_to_walk(data):
         walk = []
         if isinstance(data, dict):
-                walk.append(("VALUE", "{"))
+                walk.append(("OBJ", "{"))
                 items = list(data.items())
                 for i, (key, value) in enumerate(items):
-                        walk.append(("STR_BODY", key))
-                        walk.append(("OBJ_BODY", ":")) # Use a real state from your map
+                        walk.append(("KEY", key)) 
                         walk.extend(json_to_walk(value))
                         if i < len(items) - 1:
-                                walk.append(("NEXT_OBJ", ","))
-                walk.append(("FINAL", "}"))
+                                walk.append(("NEXT", ","))
+                walk.append(("END_OBJ", "}"))
+        
+        elif isinstance(data, list):
+                walk.append(("ARR", "["))
+                for i, value in enumerate(data):
+                        walk.extend(json_to_walk(value))
+                        if i < len(data) - 1:
+                                walk.append(("NEXT_ARR", ","))
+                walk.append(("END_ARR", "]"))
+        
         elif isinstance(data, str):
                 walk.append(("STR_BODY", data))
+        
+        elif isinstance(data, bool):
+                walk.append(("BOOL", "true" if data else "false"))  
         elif isinstance(data, (int, float)):
-                walk.append(("VALUE", str(data)))
+                walk.append(("VAL", str(data)))
+        
+        elif data is None:
+                walk.append(("VAL", "null"))
+        
         return walk
 
-def gen_quoted_str(rng):
-        return '"' + gen_random_str(rng) + '"'
 
-buggy_json_grammar_map = {
-        "VALUE": [
-                ('{', "OBJ_BODY"), ('{', "OBJ_BODY"),
-                ('[', "ARR_BODY"), ('[', "ARR_BODY"),
-                (gen_int, "FINAL"), ('true', "FINAL")
-        ],
-        "VAL_IN_OBJ": [
-                (gen_int, "OBJ_CONTINUE"),
-                ('true', "OBJ_CONTINUE"),
-                ('{', "OBJ_BODY"), ('{', "OBJ_BODY"),
-                ('[', "ARR_BODY"), ('[', "ARR_BODY") 
-        ],    
-        "OBJ_BODY": [('"', "STR_START")], 
-        "STR_START": [(gen_random_str, "STR_END")],
-        "STR_END": [('"', "COLON")],
-        "COLON": [(':', "VAL_IN_OBJ")],
-        
-        "OBJ_BODY_NESTED": [('"', "STR_START_NESTED")],
-        "STR_START_NESTED": [(gen_random_str, "STR_END_NESTED")],
-        "STR_END_NESTED": [('"', "COLON_NESTED")],
-        "COLON_NESTED": [(':', "VAL_IN_OBJ_NESTED")],
-        "VAL_IN_OBJ_NESTED": [(gen_int, "OBJ_CONTINUE")], 
-        
-        "OBJ_CONTINUE": [('}', "FINAL"), (',', "OBJ_BODY")],
-        "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_CONTINUE")],
-        "ARR_CONTINUE": [(']', "FINAL"), (',', "ARR_BODY")],    
-        "ARR_NEXT": [(',', "ARR_VAL"), (']', "FINAL")],
-        "ARR_VAL": [(gen_int, "ARR_NEXT")]
-}       
-
-more_correct_json_grammar_map = {
-        "VALUE": [('{', "OBJ_BODY"), ('[', "ARR_BODY")],
-        
-        "OBJ_BODY": [('"', "STR_START")], 
-        "STR_START": [(gen_random_str, "STR_END")],
-        "STR_END": [('"', "COLON")],
-        "COLON": [(':', "VAL")],
-        
-        "VAL": [
-                (gen_int, "OBJ_BRANCH"), 
-                ('true', "OBJ_BRANCH"), 
-                ('{', "OBJ_BODY_NESTED"), 
-                ('[', "ARR_BODY_NESTED")
-        ],
-        "OBJ_BRANCH": [('}', "FINAL"), (',', "OBJ_BODY")],
-        
-        "ARR_BODY": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
-        "ARR_BRANCH": [(']', "FINAL"), (',', "VAL_IN_ARR")],
-        
-        "VAL_IN_ARR": [(gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
-
-        "OBJ_BODY_NESTED": [('"', "STR_START")], 
-        "ARR_BODY_NESTED": [(']', "FINAL"), (gen_int, "ARR_BRANCH"), ('{', "OBJ_BODY"), ('[', "ARR_BODY")],
-
-        "FINAL": []
+grammar = {
+        "VALUE": [("OBJ", "END"), ("ARR", "END")],
+        "OBJ": [("KEY", "VAL"), ("KEY", "VAL_AND_NEXT")],
+        "VAL": [(gen_int, "END"), ("true", "END"), ("false", "END")],
+        "VAL_AND_NEXT": [(gen_int, "OBJ"), ("true", "OBJ"), ("false", "OBJ")],
+        "END": []
 }
 
 class Mutator:
@@ -108,52 +83,47 @@ class Mutator:
                 self.rng = random.Random()
                 if seed is not None:
                         self.rng.seed(seed)
-                
-                
-                
+
         def load_corpus_from_dir(self, directory_path):
                 corpus = []
                 if not os.path.exists(directory_path):
                         print(f"Directory not found: {directory_path}")
                         return corpus
-                    
+
                 for filename in os.listdir(directory_path):
                         if filename.endswith(".json"):
                                 file_path = os.path.join(directory_path, filename)
                                 try:
                                         with open(file_path, 'r') as f:
-                                                print("IT WOKRS**************@@@@@@@@@@@@@@: " + file_path)
                                                 data = json.load(f)
-                                                corpus.append(json_to_walk(data))
+                                                corpus.append((filename, json_to_walk(data)))
+                                                print(f"Loaded: {filename}")
                                 except (json.JSONDecodeError, IOError) as e:
                                         print(f"Skipping {filename}: {e}")
                 return corpus
-        
+
         def havoc(self, walk, corpus):
-                if not walk: 
-                        return self.generate_walk(self.start_state)
+                if not walk:
+                        return []
                 mutated = list(walk)
-                num_mutations = 1 << random.randint(1, 4) #make this adjustable?
-        
+                num_mutations = 1 << random.randint(0, 3)
+
                 for _ in range(num_mutations):
-                    strategies = [self.mutate_random]
-                    if len(corpus) > 1:
-                        strategies.append(self.mutate_splice)
-                    
-                    strategy = random.choice(strategies)
-                    
-                    if strategy == self.mutate_splice:
-                        other = random.choice(corpus)
-                        mutated = self.mutate_splice(mutated, other)
-                    else:
-                        mutated = self.mutate_random(mutated)
-                return mutated                
-        
-        def mutate_random(self, walk):
-                if not walk: return self.generate_walk(self.start_state)
-                split_idx = random.randrange(len(walk))
-                state_to_diverge_from = walk[split_idx][0] 
-                return walk[:split_idx] + self.generate_walk(state_to_diverge_from)
+                        strategies = [
+                                self.mutate_string_terminal,
+                                self.mutate_int_terminal,
+                                self.delete_block,
+                                self.clone_block,
+                        ]
+                        if len(corpus) > 1:
+                                strategies.append(lambda w: self.mutate_splice(w, random.choice(corpus)))
+
+                        strategy = random.choice(strategies)
+                        result = strategy(mutated)
+                        if result:
+                                mutated = result
+
+                return mutated
     
         def mutate_splice(self, walk1, walk2):
                 states1 = {step: i for i, step in enumerate(walk1) if step is not None}
@@ -162,7 +132,7 @@ class Mutator:
                 w2_idx = random.choice(common)
                 shared_state = walk2[w2_idx]
                 w1_idx = states1[shared_state]
-                return walk1[:w1_idx] + walk2[w2_idx:]                
+                return walk1[:w1_idx] + walk2[w2_idx:]
         
   
         def generate_walk(self, current_state, max_depth=50):
@@ -194,52 +164,114 @@ class Mutator:
                 walk.append(("FORCE_CLOSE", stack.pop()))
 
             return walk
-    
-        def finalize_structure(self, s):
-                braces = s.count('{') - s.count('}')
-                brackets = s.count('[') - s.count(']')
-                s = s.rstrip(',:')
-                s += '}' * max(0, braces)
-                s += ']' * max(0, brackets)
-                return s
         
         def unparse(self, walk):
-                return "".join([str(step[1]) for step in walk])
+            result = []
+            for state, val in walk:
+
+                if state == 'OBJ': result.append('{')
+                elif state == 'END_OBJ': result.append('}')
+                elif state == 'ARR': result.append('[')
+                elif state == 'END_ARR': result.append(']')
+                elif state == 'KEY': result.append(f'"{val}":')
+                elif state in ['NEXT', 'NEXT_ARR']: result.append(',')
+
+
+                elif state == 'BOOL': result.append(val)
+                elif state == 'STR_BODY': result.append(f'"{val}"')
+                elif state == 'VAL': result.append(str(val))
+                elif state == 'FORCE_CLOSE':
+                        result.append(val)
+
+                else: result.append(str(val))
+        
+            s = "".join(result)
+            s = s.replace(",}", "}").replace(",]", "]")
+            return s
 
         def mutate(self, walk):
                 return self.havoc(walk, [])
-        
-        def bit_flip(self, data):
-                idx = random.randrange(len(data))
-                data[idx] ^= (1 << random.randrange(8))
-                return data
 
-        def arithmetic(self, data):
-                idx = random.randrange(len(data))
+        _STR_STATES = {'KEY', 'STR_BODY'}
+        _INT_STATES = {'VAL'}
 
-        def interesting_value(self, data):
-                idx = random.randrange(len(data))
-                
-        def delete_block(self, data):
-                if len(data) < 2: return data
-                idx = random.randrange(len(data))
-               
-        def clone_block(self, data):
-                idx = random.randrange(len(data))
-                
+        def mutate_string_terminal(self, walk):
+                """Randomly mutate one string terminal: replace, flip a char, append, or empty it."""
+                idxs = [i for i, (s, _) in enumerate(walk) if s in self._STR_STATES]
+                if not idxs:
+                        return walk
+                idx = random.choice(idxs)
+                state, old_val = walk[idx]
+                op = random.randint(0, 3)
+                if op == 0:
+                        new_val = gen_random_str(self.rng)
+                elif op == 1 and old_val:
+                        i = self.rng.randrange(len(old_val))
+                        new_char = self.rng.choice(string.ascii_letters + string.digits)
+                        new_val = old_val[:i] + new_char + old_val[i+1:]
+                elif op == 2:
+                        new_val = old_val + gen_random_str(self.rng)
+                else:
+                        new_val = ""
+                mutated = list(walk)
+                mutated[idx] = (state, new_val)
+                return mutated
+
+        def mutate_int_terminal(self, walk):
+                """Swap one integer terminal with an interesting boundary value."""
+                idxs = [
+                        i for i, (s, t) in enumerate(walk)
+                        if s in self._INT_STATES and str(t) not in ('{', '[', 'true', 'false')
+                ]
+                if not idxs:
+                        return walk
+                idx = random.choice(idxs)
+                state = walk[idx][0]
+                mutated = list(walk)
+                mutated[idx] = (state, gen_int(self.rng))
+                return mutated
+
+        def delete_block(self, walk):
+                idxs = [i for i, (s, _) in enumerate(walk) if s in self._STR_STATES]
+                if not idxs:
+                        idxs = [
+                                i for i, (s, t) in enumerate(walk)
+                                if s in self._INT_STATES and str(t) not in ('{', '[', 'true', 'false')
+                        ]
+                if not idxs:
+                        return walk
+                idx = random.choice(idxs)
+                state, terminal = walk[idx]
+                mutated = list(walk)
+                mutated[idx] = (state, "" if state in self._STR_STATES else "0")
+                return mutated
+
+        def clone_block(self, walk):
+                str_idxs = [i for i, (s, _) in enumerate(walk) if s in self._STR_STATES]
+                int_idxs = [
+                        i for i, (s, t) in enumerate(walk)
+                        if s in self._INT_STATES and str(t) not in ('{', '[', 'true', 'false')
+                ]
+                mutated = list(walk)
+                for pool in (str_idxs, int_idxs):
+                        if len(pool) >= 2:
+                                src, dst = random.sample(pool, 2)
+                                mutated[dst] = (mutated[dst][0], mutated[src][1])
+                                return mutated
+                return walk
         
         
-mutator = Mutator(more_correct_json_grammar_map)
+mutator = Mutator(grammar)
 
-# 1. Load the entire folder
 corpus_dir = r"C:\Users\heart\TestingProject\corpus"
 my_corpus = mutator.load_corpus_from_dir(corpus_dir)
 
-# 2. Proceed with your fuzzing loop
 if my_corpus:
-    seed_walk = random.choice(my_corpus)
-    mutated_walk = mutator.havoc(seed_walk, my_corpus)
-    
-    # Generate and print
-    final_str = mutator.finalize_structure(mutator.unparse(mutated_walk))
-    print_pretty_json(final_str)
+        seed_name, seed_walk = random.choice(my_corpus)
+        print(f"\nSeed: {seed_name}")
+
+        walks_only = [w for _, w in my_corpus]
+        mutated_walk = mutator.havoc(seed_walk, walks_only)
+        
+
+        print_pretty_json(mutator.unparse(mutated_walk))
