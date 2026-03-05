@@ -18,6 +18,7 @@ def export_results(
     db_path: Path,
     target: str,
 ) -> None:
+    print(f"Exporting results to {results_folder}")
     conn = sqlite3.connect(str(db_path))
     try:
         pairs = get_inputs_for_unique_error_line_pairs(conn)
@@ -61,7 +62,6 @@ def export_results(
             stv_csv.unlink()
         coverage_file = str(
             (results_folder / ".coverage_buggy_json").resolve())
-        print(f"Coverage file: {coverage_file}")
         for rec in pairs:
             print(
                 f"Running json_decoder_stv.py with input: {rec.get('mutated_input')}")
