@@ -1,8 +1,5 @@
-#'["foo", {"bar":["baz", null, 1.0, 2]}]'
-#'{"__complex__": true, "real": 1, "imag": 2}'
-#'{"json":"obj"}'
-#need to add json specific ones, and ipv4/ipv6 ones
 import json
+import os
 import random
 import string
 
@@ -113,6 +110,25 @@ class Mutator:
                         self.rng.seed(seed)
                 
                 
+                
+        def load_corpus_from_dir(self, directory_path):
+                corpus = []
+                if not os.path.exists(directory_path):
+                        print(f"Directory not found: {directory_path}")
+                        return corpus
+                    
+                for filename in os.listdir(directory_path):
+                        if filename.endswith(".json"):
+                                file_path = os.path.join(directory_path, filename)
+                                try:
+                                        with open(file_path, 'r') as f:
+                                                print("IT WOKRS**************@@@@@@@@@@@@@@: " + file_path)
+                                                data = json.load(f)
+                                                corpus.append(json_to_walk(data))
+                                except (json.JSONDecodeError, IOError) as e:
+                                        print(f"Skipping {filename}: {e}")
+                return corpus
+        
         def havoc(self, walk, corpus):
                 if not walk: 
                         return self.generate_walk(self.start_state)
@@ -215,11 +231,15 @@ class Mutator:
         
 mutator = Mutator(more_correct_json_grammar_map)
 
-seed_walk = mutator.generate_walk("VALUE")
-mutated_walk = mutator.mutate(seed_walk)
+# 1. Load the entire folder
+corpus_dir = r"C:\Users\heart\TestingProject\corpus"
+my_corpus = mutator.load_corpus_from_dir(corpus_dir)
 
-final_str = mutator.unparse(mutated_walk)
-
-final_str = mutator.finalize_structure(final_str)
-
-print_pretty_json(final_str)
+# 2. Proceed with your fuzzing loop
+if my_corpus:
+    seed_walk = random.choice(my_corpus)
+    mutated_walk = mutator.havoc(seed_walk, my_corpus)
+    
+    # Generate and print
+    final_str = mutator.finalize_structure(mutator.unparse(mutated_walk))
+    print_pretty_json(final_str)

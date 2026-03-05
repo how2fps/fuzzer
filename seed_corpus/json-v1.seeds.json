@@ -1,0 +1,536 @@
+{
+  "schema_version": 1,
+  "dataset_id": "json-v1",
+  "target_family": "json",
+  "notes": "Balanced by bucket to shape early reward diversity for parser and decoder targets.",
+  "buckets": [
+    {
+      "name": "valid",
+      "description": "Syntactically valid JSON with varied structures and scalar types."
+    },
+    {
+      "name": "string_stress",
+      "description": "Inputs emphasizing escapes, unicode, and long strings (mostly valid)."
+    },
+    {
+      "name": "near_valid",
+      "description": "Small edits away from valid JSON to trigger parse-edge diagnostics."
+    }
+  ],
+  "seeds": [
+    {
+      "id": "json.valid.001",
+      "bucket": "valid",
+      "label": "empty-object",
+      "expected": "accept",
+      "tags": [
+        "minimal",
+        "object"
+      ],
+      "content": "{}"
+    },
+    {
+      "id": "json.valid.002",
+      "bucket": "valid",
+      "label": "empty-array",
+      "expected": "accept",
+      "tags": [
+        "minimal",
+        "array"
+      ],
+      "content": "[]"
+    },
+    {
+      "id": "json.valid.003",
+      "bucket": "valid",
+      "label": "scalars",
+      "expected": "accept",
+      "tags": [
+        "scalars"
+      ],
+      "content": "[null,true,false,0,-1,1.5,1e6]"
+    },
+    {
+      "id": "json.valid.004",
+      "bucket": "valid",
+      "label": "flat-object",
+      "expected": "accept",
+      "tags": [
+        "object",
+        "numbers"
+      ],
+      "content": "{\"a\":1,\"b\":2,\"c\":3}"
+    },
+    {
+      "id": "json.valid.005",
+      "bucket": "valid",
+      "label": "nested-obj-array",
+      "expected": "accept",
+      "tags": [
+        "nested"
+      ],
+      "content": "{\"outer\":{\"inner\":[1,2,{\"k\":\"v\"}]}}"
+    },
+    {
+      "id": "json.valid.006",
+      "bucket": "valid",
+      "label": "duplicate-keys",
+      "expected": "accept",
+      "tags": [
+        "duplicate-key"
+      ],
+      "content": "{\"dup\":1,\"dup\":2}"
+    },
+    {
+      "id": "json.valid.007",
+      "bucket": "valid",
+      "label": "deep-array",
+      "expected": "accept",
+      "tags": [
+        "depth"
+      ],
+      "content": "[[[[{\"d\":4}]]]]"
+    },
+    {
+      "id": "json.valid.008",
+      "bucket": "valid",
+      "label": "mixed-types",
+      "expected": "accept",
+      "tags": [
+        "heterogeneous"
+      ],
+      "content": "{\"mix\":[0,\"two\",false,null,{\"x\":[]}]}"
+    },
+    {
+      "id": "json.valid.009",
+      "bucket": "valid",
+      "label": "whitespace",
+      "expected": "accept",
+      "tags": [
+        "whitespace"
+      ],
+      "content": " { \"k\" : [ 1 , 2 ] } "
+    },
+    {
+      "id": "json.valid.010",
+      "bucket": "valid",
+      "label": "escaped-solidus",
+      "expected": "accept",
+      "tags": [
+        "escapes"
+      ],
+      "content": "{\"url\":\"https:\\/\\/example.com\\/a\"}"
+    },
+    {
+      "id": "json.valid.011",
+      "bucket": "valid",
+      "label": "negative-zero",
+      "expected": "accept",
+      "tags": [
+        "numbers"
+      ],
+      "content": "{\"n\":-0}"
+    },
+    {
+      "id": "json.valid.012",
+      "bucket": "valid",
+      "label": "unicode-escape",
+      "expected": "accept",
+      "tags": [
+        "unicode"
+      ],
+      "content": "{\"u\":\"\\u0041\\u03A9\"}"
+    },
+    {
+      "id": "json.string_stress.001",
+      "bucket": "string_stress",
+      "label": "long-ascii",
+      "expected": "accept",
+      "tags": [
+        "long-string"
+      ],
+      "content": "{\"s\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+    },
+    {
+      "id": "json.string_stress.002",
+      "bucket": "string_stress",
+      "label": "escapes",
+      "expected": "accept",
+      "tags": [
+        "escapes"
+      ],
+      "content": "{\"s\":\"\\\\\\\"\\\\/\\\\b\\\\f\\\\n\\\\r\\\\t\"}"
+    },
+    {
+      "id": "json.string_stress.003",
+      "bucket": "string_stress",
+      "label": "control-escapes",
+      "expected": "accept",
+      "tags": [
+        "unicode",
+        "control"
+      ],
+      "content": "{\"s\":\"\\u0000\\u0001\\u001f\"}"
+    },
+    {
+      "id": "json.string_stress.004",
+      "bucket": "string_stress",
+      "label": "surrogate-pair",
+      "expected": "accept",
+      "tags": [
+        "unicode",
+        "surrogate"
+      ],
+      "content": "{\"emoji\":\"\\uD83D\\uDE00\"}"
+    },
+    {
+      "id": "json.string_stress.005",
+      "bucket": "string_stress",
+      "label": "lone-high-surrogate",
+      "expected": "parser-dependent",
+      "tags": [
+        "unicode",
+        "surrogate"
+      ],
+      "content": "{\"broken\":\"\\uD800\"}"
+    },
+    {
+      "id": "json.string_stress.006",
+      "bucket": "string_stress",
+      "label": "backslash-run",
+      "expected": "accept",
+      "tags": [
+        "backslash"
+      ],
+      "content": "{\"s\":\"\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"}"
+    },
+    {
+      "id": "json.string_stress.007",
+      "bucket": "string_stress",
+      "label": "embedded-json-string",
+      "expected": "accept",
+      "tags": [
+        "nested-text"
+      ],
+      "content": "{\"payload\":\"{\\\"inner\\\":true,\\\"arr\\\":[1,2]}\"}"
+    },
+    {
+      "id": "json.string_stress.008",
+      "bucket": "string_stress",
+      "label": "multilingual",
+      "expected": "accept",
+      "tags": [
+        "unicode"
+      ],
+      "content": "{\"txt\":\"\\u6f22\\u5b57\\u03A9\\u20AC\"}"
+    },
+    {
+      "id": "json.string_stress.009",
+      "bucket": "string_stress",
+      "label": "quote-dense",
+      "expected": "accept",
+      "tags": [
+        "quotes"
+      ],
+      "content": "{\"q\":\"\\\"\\\"\\\"\\\"\\\"\"}"
+    },
+    {
+      "id": "json.string_stress.010",
+      "bucket": "string_stress",
+      "label": "path-like",
+      "expected": "accept",
+      "tags": [
+        "slashes"
+      ],
+      "content": "{\"path\":\"C:\\\\\\\\Windows\\\\\\\\System32\\\\\\\\drivers\"}"
+    },
+    {
+      "id": "json.string_stress.011",
+      "bucket": "string_stress",
+      "label": "space-heavy",
+      "expected": "accept",
+      "tags": [
+        "whitespace"
+      ],
+      "content": "{\"s\":\"                                \"}"
+    },
+    {
+      "id": "json.string_stress.012",
+      "bucket": "string_stress",
+      "label": "mixed-delimiters",
+      "expected": "accept",
+      "tags": [
+        "mixed"
+      ],
+      "content": "{\"s\":\"a\\\\nb\\\\tc\\\\\\\"d\\\\\\\\e\"}"
+    },
+    {
+      "id": "json.near_valid.001",
+      "bucket": "near_valid",
+      "label": "missing-close-brace",
+      "expected": "reject",
+      "tags": [
+        "truncation"
+      ],
+      "content": "{\"a\":1"
+    },
+    {
+      "id": "json.near_valid.002",
+      "bucket": "near_valid",
+      "label": "trailing-comma-object",
+      "expected": "reject",
+      "tags": [
+        "comma"
+      ],
+      "content": "{\"a\":1,}"
+    },
+    {
+      "id": "json.near_valid.003",
+      "bucket": "near_valid",
+      "label": "trailing-comma-array",
+      "expected": "reject",
+      "tags": [
+        "comma"
+      ],
+      "content": "[1,2,3,]"
+    },
+    {
+      "id": "json.near_valid.004",
+      "bucket": "near_valid",
+      "label": "unquoted-key",
+      "expected": "reject",
+      "tags": [
+        "key"
+      ],
+      "content": "{a:1}"
+    },
+    {
+      "id": "json.near_valid.005",
+      "bucket": "near_valid",
+      "label": "missing-colon",
+      "expected": "reject",
+      "tags": [
+        "separator"
+      ],
+      "content": "{\"a\" 1}"
+    },
+    {
+      "id": "json.near_valid.006",
+      "bucket": "near_valid",
+      "label": "missing-value",
+      "expected": "reject",
+      "tags": [
+        "value"
+      ],
+      "content": "{\"a\":}"
+    },
+    {
+      "id": "json.near_valid.007",
+      "bucket": "near_valid",
+      "label": "unterminated-string",
+      "expected": "reject",
+      "tags": [
+        "string"
+      ],
+      "content": "{\"s\":\"abc}"
+    },
+    {
+      "id": "json.near_valid.008",
+      "bucket": "near_valid",
+      "label": "double-comma",
+      "expected": "reject",
+      "tags": [
+        "comma"
+      ],
+      "content": "{\"a\":1,,\"b\":2}"
+    },
+    {
+      "id": "json.near_valid.009",
+      "bucket": "near_valid",
+      "label": "extra-token",
+      "expected": "reject",
+      "tags": [
+        "suffix"
+      ],
+      "content": "{\"a\":1} true"
+    },
+    {
+      "id": "json.near_valid.010",
+      "bucket": "near_valid",
+      "label": "bad-number-leading-zero",
+      "expected": "reject",
+      "tags": [
+        "numbers"
+      ],
+      "content": "{\"n\":01}"
+    },
+    {
+      "id": "json.near_valid.011",
+      "bucket": "near_valid",
+      "label": "bad-literal",
+      "expected": "reject",
+      "tags": [
+        "literal"
+      ],
+      "content": "{\"b\":tru}"
+    },
+    {
+      "id": "json.near_valid.012",
+      "bucket": "near_valid",
+      "label": "incomplete-unicode-escape",
+      "expected": "reject",
+      "tags": [
+        "unicode"
+      ],
+      "content": "{\"u\":\"\\u12\"}"
+    },
+    {
+      "id": "json.valid.013",
+      "bucket": "valid",
+      "label": "array-of-empty",
+      "expected": "accept",
+      "tags": [
+        "array",
+        "objects"
+      ],
+      "content": "[{},{},{}]"
+    },
+    {
+      "id": "json.valid.014",
+      "bucket": "valid",
+      "label": "nested-empty",
+      "expected": "accept",
+      "tags": [
+        "nested",
+        "empty"
+      ],
+      "content": "{\"a\":[],\"b\":{}}"
+    },
+    {
+      "id": "json.valid.015",
+      "bucket": "valid",
+      "label": "long-key",
+      "expected": "accept",
+      "tags": [
+        "keys"
+      ],
+      "content": "{\"long_key_name_here\":123}"
+    },
+    {
+      "id": "json.valid.016",
+      "bucket": "valid",
+      "label": "matrix",
+      "expected": "accept",
+      "tags": [
+        "array",
+        "numbers"
+      ],
+      "content": "{\"m\":[[1,2],[3,4],[5,6]]}"
+    },
+    {
+      "id": "json.valid.017",
+      "bucket": "valid",
+      "label": "scientific-small",
+      "expected": "accept",
+      "tags": [
+        "numbers"
+      ],
+      "content": "{\"small\":1e-10}"
+    },
+    {
+      "id": "json.valid.018",
+      "bucket": "valid",
+      "label": "scientific-negexp",
+      "expected": "accept",
+      "tags": [
+        "numbers"
+      ],
+      "content": "{\"n\":-2.5e+03}"
+    },
+    {
+      "id": "json.valid.019",
+      "bucket": "valid",
+      "label": "bool-map",
+      "expected": "accept",
+      "tags": [
+        "object",
+        "bool"
+      ],
+      "content": "{\"enabled\":true,\"debug\":false,\"dry_run\":null}"
+    },
+    {
+      "id": "json.valid.020",
+      "bucket": "valid",
+      "label": "deep-mixed",
+      "expected": "accept",
+      "tags": [
+        "depth",
+        "mixed"
+      ],
+      "content": "[{\"a\":{\"b\":[{\"c\":0}]}}]"
+    },
+    {
+      "id": "json.string_stress.013",
+      "bucket": "string_stress",
+      "label": "repeated-unicode-escapes",
+      "expected": "accept",
+      "tags": [
+        "unicode"
+      ],
+      "content": "{\"s\":\"\\u0041\\u0042\\u0043\\u03A9\\u20AC\"}"
+    },
+    {
+      "id": "json.string_stress.014",
+      "bucket": "string_stress",
+      "label": "long-mixed-escape-run",
+      "expected": "accept",
+      "tags": [
+        "escapes",
+        "long-string"
+      ],
+      "content": "{\"s\":\"aaaa\\\\bbbb\\\\cccc\\\\dddd\\\\eeee\\\\ffff\"}"
+    },
+    {
+      "id": "json.string_stress.015",
+      "bucket": "string_stress",
+      "label": "dense-brackets-in-string",
+      "expected": "accept",
+      "tags": [
+        "delimiters"
+      ],
+      "content": "{\"s\":\"[{()}]::{[]}::<<>>\"}"
+    },
+    {
+      "id": "json.near_valid.013",
+      "bucket": "near_valid",
+      "label": "double-colon",
+      "expected": "reject",
+      "tags": [
+        "separator"
+      ],
+      "content": "{\"a\"::1}"
+    },
+    {
+      "id": "json.near_valid.014",
+      "bucket": "near_valid",
+      "label": "bad-escape",
+      "expected": "reject",
+      "tags": [
+        "string",
+        "escape"
+      ],
+      "content": "{\"s\":\"\\x41\"}"
+    },
+    {
+      "id": "json.near_valid.015",
+      "bucket": "near_valid",
+      "label": "array-missing-comma",
+      "expected": "reject",
+      "tags": [
+        "comma",
+        "array"
+      ],
+      "content": "[1 2,3]"
+    }
+  ]
+}
