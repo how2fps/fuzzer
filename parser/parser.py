@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 import re
 import subprocess
 import sys
@@ -40,14 +42,16 @@ TARGETS: dict[str, dict[str, Any]] = {
     "cidrize-runner": {
         "path": "cidrize-runner",
         "oracle": "cidrize",
-        "cmd": ["bin/cidrize-runner", "--func", "cidrize", "--ipstr"],
+        "cmd_resolver": "_cmd_cidrize_runner",
         "input_via_stdin": False,
         "open": False,
+        # Windows binary startup is slow; give it extra headroom.
+        "timeout": 25.0,
     },
     "IPv4-IPv6-parser": {
         "path": "IPv4-IPv6-parser",
         "oracle": "ipyparse",
-        "cmd": ["bin/ipv4-parser", "--ipstr"],
+        "cmd_resolver": "_cmd_ipv4_ipv6_parser",
         "input_via_stdin": False,
         "open": False,
     },
@@ -95,20 +99,63 @@ NORMALIZE_PATTERNS = [
 ]
 
 
-def _normalize_text(text: str) -> str:
-    """Normalize text for stable hashing by replacing variable parts."""
-    if not text:
-        return ""
-    out = text.strip()
-    for pat, repl in NORMALIZE_PATTERNS:
-        out = pat.sub(repl, out)
-    return out
+def _platform_slug() -> str:
+    """
+    Return a stable slug for selecting target binaries.
+
+    - Windows -> "win"
+    - macOS -> "mac"
+    - Linux/other -> "linux"
+    """
+    if sys.platform.startswith("win"):
+        return "win"
+    if sys.platform == "darwin":
+        return "mac"
+    # Many CI envs report 'linux' but keep a safe fallback for other POSIX.
+    system = platform.system().lower()
+    if "linux" in system:
+        return "linux"
+    return "linux"
 
 
-def _signature(text: str) -> str:
-    """Return a normalized hash (hex) of text."""
-    normalized = _normalize_text(text)
-    return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()[:16]
+def _infer_ip_version(*, input_data: bytes) -> str:
+    """
+    Best-effort input classification for choosing ipv4 vs ipv6 parser binary.
+    """
+    try:
+        input_str = input_data.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return "ipv4"
+    return "ipv6" if ":" in input_str else "ipv4"
+
+
+def _cmd_cidrize_runner(*, input_data: bytes, seed_family: str | None = None) -> list[str]:
+    slug = _platform_slug()
+    exe = f"{slug}-cidrize-runner.exe" if slug == "win" else f"{slug}-cidrize-runner"
+    return [f"bin/{exe}", "--func", "cidrize", "--ipstr"]
+
+
+def _cmd_ipv4_ipv6_parser(*, input_data: bytes, seed_family: str | None = None) -> list[str]:
+    slug = _platform_slug()
+    if seed_family in {"ipv4", "ipv6"}:
+        ip_version = seed_family
+    else:
+        ip_version = _infer_ip_version(input_data=input_data)
+    exe_name = f"{slug}-{ip_version}-parser.exe" if slug == "win" else f"{slug}-{ip_version}-parser"
+    return [f"bin/{exe_name}", "--ipstr"]
+
+
+def _print_run_target_debug(*, target_name: str, argv: list[str], returncode: int | None, stdout: str, stderr: str) -> None:
+    print("\n=== run_target debug ===", file=sys.stderr)
+    print(f"target={target_name}", file=sys.stderr)
+    print(f"argv={argv}", file=sys.stderr)
+    if returncode is not None:
+        print(f"returncode={returncode}", file=sys.stderr)
+    print("--- stdout ---", file=sys.stderr)
+    print(stdout.rstrip("\n"), file=sys.stderr)
+    print("--- stderr ---", file=sys.stderr)
+    print(stderr.rstrip("\n"), file=sys.stderr)
+    print("=== /run_target debug ===\n", file=sys.stderr)
 
 
 def _parse_bug_signature(stderr: str) -> dict[str, Any]:
@@ -122,6 +169,14 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
     }
     if not stderr:
         return out
+
+    # Tooling warnings (e.g. `uv`/venv mismatch) are not target bugs. They often
+    # appear as a single "warning: ..." line with no traceback frames.
+    stripped_lines = [ln.strip() for ln in stderr.strip().splitlines() if ln.strip()]
+    if stripped_lines and not any("Traceback" in ln for ln in stripped_lines):
+        last = stripped_lines[-1]
+        if last.lower().startswith("warning:"):
+            return out
 
     # Traceback file/line: use last frame (where exception was raised)
     file_line_matches = list(
@@ -146,6 +201,8 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
     if last_line:
         exc_match = re.match(r"^(\w+(?:\.\w+)*)\s*:\s*(.*)$", last_line)
         if exc_match:
+            if exc_match.group(1).lower() == "warning":
+                return out
             out["type"] = "exception"
             out["exception"] = exc_match.group(1)
             out["message"] = exc_match.group(2).strip() or None
@@ -174,6 +231,8 @@ def run_target(
     target_dir: Path,
     input_data: bytes,
     timeout: float = DEFAULT_TIMEOUT,
+    *,
+    seed_family: str | None = None,
 ) -> dict[str, Any]:
     """
     Run one target with the given input. Return result dict with status and
@@ -181,7 +240,7 @@ def run_target(
     Uses hardcoded TARGETS[target_name]["cmd"]; no README parsing.
     """
     entry = TARGETS.get(target_name)
-    if not entry or "cmd" not in entry:
+    if not entry:
         return {
             "target": target_name,
             "status": "error",
@@ -189,7 +248,22 @@ def run_target(
             "bug_signature": None,
         }
 
-    cmd = entry["cmd"]
+    cmd: list[str] | None = None
+    cmd_resolver_name = entry.get("cmd_resolver")
+    if isinstance(cmd_resolver_name, str):
+        resolver = globals().get(cmd_resolver_name)
+        if callable(resolver):
+            cmd = resolver(input_data=input_data, seed_family=seed_family)
+    if cmd is None:
+        cmd = entry.get("cmd")
+    if not isinstance(cmd, list):
+        return {
+            "target": target_name,
+            "status": "error",
+            "error": f"no hardcoded cmd for target: {target_name}",
+            "bug_signature": None,
+        }
+
     input_via_stdin = entry.get("input_via_stdin", False)
     input_str = input_data.decode("utf-8", errors="replace") if not input_via_stdin else None
     argv = _resolve_argv(cmd, target_dir, input_str, input_via_stdin)
@@ -202,14 +276,20 @@ def run_target(
         "bug_signature": None,
     }
 
+    returncode: int | None = None
+    # Some targets specify a default timeout (e.g. slow Windows process startup).
+    # Treat that as a *minimum* timeout rather than overriding the user-configured value.
+    entry_timeout = entry.get("timeout")
+    effective_timeout = max(float(timeout), float(entry_timeout)) if entry_timeout is not None else float(timeout)
     try:
         proc = subprocess.run(
             argv,
             cwd=str(target_dir),
             input=input_data if input_via_stdin else None,
             capture_output=True,
-            timeout=timeout,
+            timeout=effective_timeout,
         )
+        returncode = proc.returncode
         stdout = proc.stdout.decode("utf-8", errors="replace")
         stderr = proc.stderr.decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired as e:
@@ -267,6 +347,7 @@ def run_parser(
     target: str,
     timeout: float = DEFAULT_TIMEOUT,
     print_json: bool = False,
+    seed_family: str | None = None,
 ) -> dict[str, Any]:
     """
     Run fuzzer input against the selected target and return (and optionally print) JSON results.
@@ -327,7 +408,7 @@ def run_parser(
                 print(json.dumps(wrapped), file=sys.stderr)
             return wrapped
 
-        result = run_target(target, target_dir, data, timeout=timeout)
+        result = run_target(target, target_dir, data, timeout=timeout, seed_family=seed_family)
 
     # For closed targets, also run the oracle target
     open_name = entry.get("oracle")
@@ -336,7 +417,13 @@ def run_parser(
         open_dir = _TARGETS_BASE / (open_entry["path"] if open_entry and "path" in open_entry else open_name)
         open_dir = open_dir.resolve()
         if open_dir.is_dir():
-            result["open_result"] = run_target(open_name, open_dir, data, timeout=timeout)
+            result["open_result"] = run_target(
+                open_name,
+                open_dir,
+                data,
+                timeout=timeout,
+                seed_family=seed_family,
+            )
         else:
             result["open_result"] = {
                 "target": open_name,

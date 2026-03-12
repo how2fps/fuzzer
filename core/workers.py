@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import random
 import sqlite3
 import threading
@@ -33,13 +34,22 @@ def run_worker_process(
 ) -> None:
     parser_api = get_parser(config["parser_version"])
     compute_interestingness_fn = get_compute_interestingness(
-        config["isinteresting_version"])
+        config["isinteresting_version"]
+    )
     effective_target = config["target"]
     results_folder = Path(results_folder_str)
 
     while True:
-        request_queue.put(1)
-        work = reply_queue.get()
+        # Ask for work from the coordinator. This call can be interrupted by
+        # signals on some platforms, so let the parent decide when to stop
+        # by sending a None work item.
+        try:
+            request_queue.put(1)
+            work = reply_queue.get()
+        except InterruptedError:
+            # Allow the main process to handle shutdown; just retry.
+            continue
+
         if work is None:
             break
 
@@ -48,14 +58,25 @@ def run_worker_process(
         iteration = work["iteration"]
         seed_id = work["seed_id"]
         seed_text = work["seed_text"]
+        seed_family = work.get("seed_family")
         bucket = work["bucket"]
         mutated_text = work["mutated_text"]
-        result = parser_api.run_parser(
-            input_data=mutated_text.encode("utf-8"),
-            target=effective_target,
-            timeout=config["timeout"],
-            print_json=False,
-        )
+
+        try:
+            result = parser_api.run_parser(
+                input_data=mutated_text.encode("utf-8"),
+                target=effective_target,
+                timeout=config["timeout"],
+                print_json=False,
+                seed_family=seed_family,
+            )
+        except KeyboardInterrupt:
+            # Treat a KeyboardInterrupt inside a worker as a request to stop
+            # processing further work; break out of the loop so the process can
+            # be joined or terminated by the parent.
+            break
+
+        print(result)
         db_path = results_folder / "runs.db"
 
         score = compute_interestingness_fn(
@@ -74,18 +95,20 @@ def run_worker_process(
             score=score,
         )
         insert_seen_branches(db_path, result)
-        result_queue.put({
-            "job_id": job_id,
-            "item_id": item_id,
-            "iteration": iteration,
-            "seed_id": seed_id,
-            "seed_text": seed_text,
-            "mutated_input": mutated_text,
-            "status": closed.get("status"),
-            "bug_signature": closed.get("bug_signature"),
-            "isinteresting_score": score,
-            "signals": signals,
-        })
+        result_queue.put(
+            {
+                "job_id": job_id,
+                "item_id": item_id,
+                "iteration": iteration,
+                "seed_id": seed_id,
+                "seed_text": seed_text,
+                "mutated_input": mutated_text,
+                "status": closed.get("status"),
+                "bug_signature": closed.get("bug_signature"),
+                "isinteresting_score": score,
+                "signals": signals,
+            }
+        )
 
 
 def run_fuzzer_multi_worker(
@@ -133,7 +156,22 @@ def run_fuzzer_multi_worker(
     def request_handler() -> None:
         nones_sent = 0
         while nones_sent < workers:
-            request_queue.get()
+            try:
+                request_queue.get()
+            except InterruptedError:
+                # System call interrupted by signal; re-check shutdown flag.
+                if shutdown_requested[0]:
+                    with cond:
+                        if total_jobs[0] == 0:
+                            total_jobs[0] = iteration_counter[0]
+                        # Send termination sentinels to any remaining workers.
+                        remaining = workers - nones_sent
+                        for _ in range(remaining):
+                            reply_queue.put(None)
+                        nones_sent = workers
+                    break
+                continue
+
             with cond:
                 while True:
                     if shutdown_requested[0]:
@@ -164,8 +202,10 @@ def run_fuzzer_multi_worker(
                                     conn=conn_thread,
                                 )
                                 if stats:
-                                    schedule = power_scheduler_module.compute_power_schedule(
-                                        seeds=stats
+                                    schedule = (
+                                        power_scheduler_module.compute_power_schedule(
+                                            seeds=stats
+                                        )
                                     )
                                     seed_energies_holder[0] = dict(
                                         schedule["seed_energies"]
@@ -201,9 +241,13 @@ def run_fuzzer_multi_worker(
                                 batch_expected[current_scheduled[0].item_id] = len(
                                     current_batch
                                 )
-                                mode = "single-mutation bandit" if scheduler_uses_feedback else "batch"
+                                mode = (
+                                    "single-mutation bandit"
+                                    if scheduler_uses_feedback
+                                    else "batch"
+                                )
                                 print(
-                                    f"Scheduled seed {current_scheduled[0].seed.seed_id} with energy {energy} ({len(current_batch)} unique mutations, mode={mode})"
+                                  f"Scheduled seed {current_scheduled[0].seed.seed_id} with energy {energy} ({len(current_batch)} unique mutations, mode={mode})"
                                 )
                             finally:
                                 conn_thread.close()
@@ -222,6 +266,7 @@ def run_fuzzer_multi_worker(
                             "iteration": iteration,
                             "seed_id": scheduled.seed.seed_id,
                             "seed_text": scheduled.seed.text,
+                            "seed_family": scheduled.seed.family,
                             "bucket": scheduled.seed.bucket,
                             "target": effective_target,
                             "mutated_text": mutated_text,
@@ -229,7 +274,10 @@ def run_fuzzer_multi_worker(
                         pending[job_id] = (scheduled, iteration)
                         reply_queue.put(work)
                         break
-                    while scheduler.empty() and results_received_count[0] < iteration_counter[0]:
+                    while (
+                        scheduler.empty()
+                        and results_received_count[0] < iteration_counter[0]
+                    ):
                         cond.wait()
                     if not scheduler.empty():
                         continue
@@ -262,73 +310,100 @@ def run_fuzzer_multi_worker(
 
     results_received = 0
     batch_scores_by_item: dict[str, list[float]] = {}
-    while True:
-        result = result_queue.get()
-        with cond:
-            job_id = result["job_id"]
-            scheduled, iteration = pending.pop(job_id)
-            item_id = scheduled.item_id
-            score = result["isinteresting_score"]
-            if scheduler_uses_feedback:
-                scheduler.update(
-                    scheduled,
-                    isinteresting_score=score,
-                    signals=result["signals"],
-                )
-            else:
-                batch_scores_by_item.setdefault(item_id, []).append(score)
-                expected = batch_expected.get(item_id, 1)
-                if len(batch_scores_by_item[item_id]) >= expected:
-                    batch_scores_by_item.pop(item_id, [])
-                    batch_expected.pop(item_id, None)
-        insert_run(
-            conn,
-            iteration=iteration,
-            seed_id=result["seed_id"],
-            seed_text=result["seed_text"],
-            mutated_input=result["mutated_input"],
-            status=result["status"],
-            bug_signature=result["bug_signature"],
-            isinteresting_score=result["isinteresting_score"],
-            target=effective_target,
-        )
-        with cond:
-            if result["isinteresting_score"] > 0 and result["mutated_input"] not in added_seed_inputs_holder[0]:
-                parent_signals = (result.get("signals") or {}).copy()
-                parent_bucket = parent_signals.get("bucket", "discovered")
-                candidate = make_discovered_seed(
-                    result["mutated_input"],
-                    family,
-                    parent_bucket,
-                    next_discovered_ordinal_holder[0],
-                )
-                candidate_metadata: dict[str, Any] = {
-                    "bucket": candidate.bucket,
-                    "parent_seed_id": result["seed_id"],
-                }
-                if parent_signals:
-                    candidate_metadata["signals"] = parent_signals
-                if scheduler_uses_feedback and config["ucb_trace"]:
-                    candidate_metadata["_ucb_trace"] = True
-                scheduler.add(candidate, metadata=candidate_metadata)
-                added_seed_inputs_holder[0].add(result["mutated_input"])
-                next_discovered_ordinal_holder[0] += 1
-                cond.notify()
-        results_received += 1
-        with cond:
-            results_received_count[0] = results_received
-            cond.notify()
-        if iteration:
-            print(
-                f"[iter {iteration}] seed={result['seed_id']} "
-                f"score={result['isinteresting_score']:.3f} status={result['status']} input={result['seed_text']} mutated input={result['mutated_input']}"
+    try:
+        while True:
+            try:
+                # Use a timeout so we can periodically check for shutdown
+                # requests even when no new results are arriving.
+                result = result_queue.get(timeout=0.5)
+            except queue.Empty:
+                if shutdown_requested[0]:
+                    break
+                continue
+            except InterruptedError:
+                # System call interrupted by signal; if a shutdown has been
+                # requested, stop waiting for more results.
+                if shutdown_requested[0]:
+                    break
+                continue
+
+            with cond:
+                job_id = result["job_id"]
+                scheduled, iteration = pending.pop(job_id, (None, None))
+                if scheduled is None:
+                    # Should not happen, but avoid crashing on shutdown races.
+                    continue
+                item_id = scheduled.item_id
+                score = result["isinteresting_score"]
+                if scheduler_uses_feedback:
+                    scheduler.update(
+                        scheduled,
+                        isinteresting_score=score,
+                        signals=result["signals"],
+                    )
+                else:
+                    batch_scores_by_item.setdefault(item_id, []).append(score)
+                    expected = batch_expected.get(item_id, 1)
+                    if len(batch_scores_by_item[item_id]) >= expected:
+                        batch_scores_by_item.pop(item_id, [])
+                        batch_expected.pop(item_id, None)
+            insert_run(
+                conn,
+                iteration=iteration,
+                seed_id=result["seed_id"],
+                seed_text=result["seed_text"],
+                mutated_input=result["mutated_input"],
+                status=result["status"],
+                bug_signature=result["bug_signature"],
+                isinteresting_score=result["isinteresting_score"],
+                target=effective_target,
             )
-        if scheduler_uses_feedback and config["ucb_debug_tree"]:
-            print(scheduler.render_tree(limit=12))
-        if total_jobs[0] > 0 and results_received >= total_jobs[0]:
-            break
-
-    request_thread.join()
-    for p in procs:
-        p.join()
-
+            with cond:
+                if (
+                    result["isinteresting_score"] > 0
+                    and result["mutated_input"] not in added_seed_inputs_holder[0]
+                ):
+                    parent_signals = (result.get("signals") or {}).copy()
+                    parent_bucket = parent_signals.get("bucket", "discovered")
+                    candidate = make_discovered_seed(
+                        result["mutated_input"],
+                        family,
+                        parent_bucket,
+                        next_discovered_ordinal_holder[0],
+                    )
+                    candidate_metadata: dict[str, Any] = {
+                        "bucket": candidate.bucket,
+                        "parent_seed_id": result["seed_id"],
+                    }
+                    if parent_signals:
+                        candidate_metadata["signals"] = parent_signals
+                    if scheduler_uses_feedback and config["ucb_trace"]:
+                        candidate_metadata["_ucb_trace"] = True
+                    scheduler.add(candidate, metadata=candidate_metadata)
+                    added_seed_inputs_holder[0].add(result["mutated_input"])
+                    next_discovered_ordinal_holder[0] += 1
+                    cond.notify()
+            results_received += 1
+            with cond:
+                results_received_count[0] = results_received
+                cond.notify()
+            if iteration:
+                print(
+                    f"[iter {iteration}] seed={result['seed_id']} "
+                    f"score={result['isinteresting_score']:.3f} status={result['status']} input={result['seed_text']} mutated input={result['mutated_input']}"
+                )
+            if scheduler_uses_feedback and config["ucb_debug_tree"]:
+                print(scheduler.render_tree(limit=12))
+            if total_jobs[0] > 0 and results_received >= total_jobs[0]:
+                break
+            if shutdown_requested[0]:
+                # On explicit shutdown (Ctrl+C), stop waiting for any
+                # remaining in-flight work; we'll tear down workers below.
+                break
+    finally:
+        request_thread.join(timeout=1.0)
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+        for p in procs:
+            p.join()

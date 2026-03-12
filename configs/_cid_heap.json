@@ -1,0 +1,19 @@
+{
+  "target": "cidrize-runner",
+  "scheduler_kind": "heap",
+  "mutator_kind": "auto",
+  "seed_preload_mode": "full",
+  "seed_preload_total": 50,
+  "ucb_trace": false,
+  "ucb_debug_tree": false,
+  "max_iterations": 10000,
+  "max_hours": null,
+  "timeout": 600.0,
+  "rng_seed": 42,
+  "workers": 8,
+  "isinteresting_version": "base",
+  "mutator_version": "base",
+  "parser_version": "base",
+  "power_scheduler_version": "base",
+  "seed_corpus_version": "base"
+}

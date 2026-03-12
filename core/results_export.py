@@ -10,6 +10,7 @@ from pathlib import Path
 
 from core.db_utils import get_inputs_for_unique_error_line_pairs
 from core.paths import JSON_DECODER_STV_SCRIPT, JSON_DECODER_TARGET_DIR
+from core.target_artifacts import copy_bug_counts_csv_if_present
 
 
 def export_results(
@@ -88,7 +89,6 @@ def export_results(
             )
             if proc.returncode != 0 and proc.stderr:
                 print(f"STV script stderr: {proc.stderr}", file=sys.stderr)
-        if stv_csv.is_file():
-            dest = results_folder / "bug_counts.csv"
-            shutil.copy2(stv_csv, dest)
+
+    copy_bug_counts_csv_if_present(target=target, results_folder=results_folder)
 

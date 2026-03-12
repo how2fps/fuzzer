@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 from typing import TypedDict
 
 from isinteresting import list_versions as isinteresting_versions
@@ -10,6 +12,8 @@ from parser import DEFAULT_TIMEOUT, TARGETS, list_versions as parser_versions
 from power_scheduler import list_versions as power_scheduler_versions
 from seed_corpus import list_versions as seed_corpus_versions
 from seed_scheduler import list_versions as scheduler_versions
+
+from core.paths import CONFIGS_DIR
 
 
 class FuzzConfig(TypedDict):
@@ -32,7 +36,115 @@ class FuzzConfig(TypedDict):
     seed_corpus_version: str
 
 
+def get_default_config() -> FuzzConfig:
+    """Return a FuzzConfig with all default values (for merging with file config)."""
+    return {
+        "target": "json-decoder",
+        "scheduler_kind": "heap",
+        "mutator_kind": "auto",
+        "seed_preload_mode": "full",
+        "seed_preload_total": 50,
+        "ucb_trace": False,
+        "ucb_debug_tree": False,
+        "max_iterations": 10,
+        "max_hours": None,
+        "timeout": DEFAULT_TIMEOUT,
+        "rng_seed": None,
+        "workers": 1,
+        "isinteresting_version": "base",
+        "mutator_version": "base",
+        "parser_version": "base",
+        "power_scheduler_version": "base",
+        "seed_corpus_version": "base",
+    }
+
+
+def _validate_config(config: FuzzConfig) -> None:
+    """Validate config values against allowed choices; raise ValueError on invalid."""
+    if config["target"] not in TARGETS:
+        raise ValueError(
+            f"Invalid target: {config['target']}. Must be one of: {sorted(TARGETS.keys())}"
+        )
+    scheduler_choices = list(scheduler_versions())
+    if config["scheduler_kind"] not in scheduler_choices:
+        raise ValueError(
+            f"Invalid scheduler_kind: {config['scheduler_kind']}. Must be one of: {scheduler_choices}"
+        )
+    if config["mutator_kind"] not in ("auto", "json", "ip"):
+        raise ValueError(
+            f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto, json, or ip."
+        )
+    if config["seed_preload_mode"] not in ("full", "ratio_batch", "sample"):
+        raise ValueError(
+            f"Invalid seed_preload_mode: {config['seed_preload_mode']}. "
+            "Must be full, ratio_batch, or sample."
+        )
+    if config["seed_preload_total"] <= 0:
+        raise ValueError("seed_preload_total must be positive.")
+    if config["max_hours"] is not None and config["max_iterations"] is not None:
+        raise ValueError("Cannot set both max_iterations and max_hours.")
+    if config["max_hours"] is not None and config["max_hours"] <= 0:
+        raise ValueError("max_hours must be positive.")
+    if config["isinteresting_version"] not in list(isinteresting_versions()):
+        raise ValueError(
+            f"Invalid isinteresting_version: {config['isinteresting_version']}"
+        )
+    if config["mutator_version"] not in list(mutator_versions()):
+        raise ValueError(f"Invalid mutator_version: {config['mutator_version']}")
+    if config["parser_version"] not in list(parser_versions()):
+        raise ValueError(f"Invalid parser_version: {config['parser_version']}")
+    if config["power_scheduler_version"] not in list(power_scheduler_versions()):
+        raise ValueError(
+            f"Invalid power_scheduler_version: {config['power_scheduler_version']}"
+        )
+    if config["seed_corpus_version"] not in list(seed_corpus_versions()):
+        raise ValueError(
+            f"Invalid seed_corpus_version: {config['seed_corpus_version']}"
+        )
+
+
+def load_config_from_file(path: Path) -> FuzzConfig:
+    """Load and validate FuzzConfig from a JSON file. Missing keys use defaults."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    defaults = get_default_config()
+    merged: FuzzConfig = {**defaults}
+    for key in merged:
+        if key in data and data[key] is not None:
+            merged[key] = data[key]  # type: ignore[literal-required]
+    # Normalize: if max_hours is set, clear max_iterations
+    if merged.get("max_hours"):
+        merged["max_iterations"] = None
+    _validate_config(merged)
+    return merged
+
+
+def list_config_files(configs_dir: Path) -> list[Path]:
+    """Return sorted paths to .json config files, excluding names starting with _."""
+    if not configs_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for p in configs_dir.iterdir():
+        if p.suffix.lower() == ".json" and not p.name.startswith("_"):
+            out.append(p)
+    return sorted(out)
+
+
 def build_config() -> FuzzConfig:
+    """Return a single config from CLI (for backward compatibility). Use get_run_plan() for config files."""
+    entries, _ = get_run_plan()
+    if len(entries) != 1:
+        raise RuntimeError(
+            "build_config() expects a single run; use get_run_plan() when using --config or --configs-dir."
+        )
+    return entries[0][1]
+
+
+def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
+    """
+    Parse CLI and return (list of (config_path_or_None, config), runs_per_config).
+    Use --config for one file, --configs-dir to run all configs in a folder, --runs for repeat count.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "AFL-style fuzzer harness wiring seed corpus, mutator, parser, "
@@ -152,6 +264,28 @@ def build_config() -> FuzzConfig:
         choices=list(seed_corpus_versions()),
         help="Seed corpus module version for ablation.",
     )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to a single JSON config file (from configs/ or any path).",
+    )
+    parser.add_argument(
+        "--configs-dir",
+        type=Path,
+        nargs="?",
+        default=None,
+        const=CONFIGS_DIR,
+        metavar="DIR",
+        help="Run all .json configs in DIR (default: configs/). Each is run --runs times.",
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="Number of times to run each config (when using --config or --configs-dir).",
+    )
 
     args = parser.parse_args()
 
@@ -163,9 +297,17 @@ def build_config() -> FuzzConfig:
             parser.error("--hours must be positive.")
     if args.seed_preload_total <= 0:
         parser.error("--seed-preload-total must be positive.")
+    if args.config is not None and args.configs_dir is not None:
+        parser.error("Cannot specify both --config and --configs-dir.")
+    if args.runs < 1:
+        parser.error("--runs must be at least 1.")
+    if args.config is not None and not args.config.is_file():
+        parser.error(f"--config path is not a file: {args.config}")
+    if args.configs_dir is not None and not args.configs_dir.is_dir():
+        parser.error(f"--configs-dir is not a directory: {args.configs_dir}")
 
     max_iterations: int | None = None if args.max_hours is not None else args.max_iterations
-    return {
+    from_args: FuzzConfig = {
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
         "mutator_kind": args.mutator_kind,
@@ -184,6 +326,17 @@ def build_config() -> FuzzConfig:
         "power_scheduler_version": args.power_scheduler_version,
         "seed_corpus_version": args.seed_corpus_version,
     }
+
+    if args.config is not None:
+        config = load_config_from_file(args.config)
+        return ([ (args.config, config) ], args.runs)
+    if args.configs_dir is not None:
+        paths = list_config_files(args.configs_dir)
+        if not paths:
+            parser.error(f"No .json config files found in {args.configs_dir} (skip names starting with _).")
+        entries = [ (p, load_config_from_file(p)) for p in paths ]
+        return (entries, args.runs)
+    return ([ (None, from_args) ], 1)
 
 
 def infer_mutator_kind(*, mutator_kind: str, target: str) -> str:

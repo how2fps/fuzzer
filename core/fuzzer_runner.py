@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import random
+import shutil
 import signal
 import sqlite3
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from core.config import FuzzConfig, infer_mutator_kind
@@ -12,15 +14,20 @@ from isinteresting import get_compute_interestingness
 from core.mutation_utils import initial_scheduler_seeds
 from mutator import get_mutator
 from parser import get_parser
-from core.paths import RESULTS_DIR
 from power_scheduler import get_power_scheduler
 from core.results_export import export_results
 from seed_corpus import get_corpus_loader
 from seed_scheduler import UCBTreeScheduler, make_scheduler
 from core.workers import run_fuzzer_multi_worker
+from core.target_artifacts import clear_bug_counts_csv
 
 
-def run_fuzzer(config: FuzzConfig) -> None:
+def run_fuzzer(
+    config: FuzzConfig,
+    *,
+    results_folder: Path,
+    config_path: Path | None = None,
+) -> None:
     corpus_loader = get_corpus_loader(config["seed_corpus_version"])
     corpus = corpus_loader.load()
 
@@ -36,6 +43,9 @@ def run_fuzzer(config: FuzzConfig) -> None:
         mutator_kind=config["mutator_kind"],
         target=effective_target,
     )
+
+    # Ensure per-run bug_counts.csv doesn't leak across repeated runs/configs
+    clear_bug_counts_csv(target=effective_target)
 
     rng = random.Random(
         config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
@@ -63,9 +73,16 @@ def run_fuzzer(config: FuzzConfig) -> None:
     if not scheduler or scheduler.empty():
         return
 
-    timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    results_folder = RESULTS_DIR / f"{effective_target}_{timestamp_str}"
     results_folder.mkdir(parents=True, exist_ok=True)
+
+    # Save the config used for this run into the results folder
+    config_dest = results_folder / "config.json"
+    if config_path is not None:
+        shutil.copy2(config_path, config_dest)
+    else:
+        with open(config_dest, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
     db_path = results_folder / "runs.db"
     conn = sqlite3.connect(str(db_path))
     init_results_db(conn)
@@ -81,34 +98,56 @@ def run_fuzzer(config: FuzzConfig) -> None:
 
     def _sigint_handler(_signum: int, _frame: object) -> None:
         shutdown_requested[0] = True
-        print("\nCtrl+C: shutting down gracefully (workers will finish current run and exit)...", flush=True)
+        print(
+            "\nCtrl+C: shutting down gracefully (workers will finish current run and exit)...",
+            flush=True,
+        )
 
+    original_sigint = None
     try:
-        signal.signal(signal.SIGINT, _sigint_handler)
-    except (ValueError, OSError):
-        pass
+        try:
+            original_sigint = signal.getsignal(signal.SIGINT)
+        except (ValueError, OSError):
+            original_sigint = None
+        try:
+            signal.signal(signal.SIGINT, _sigint_handler)
+        except (ValueError, OSError):
+            # Some environments (e.g. non-main threads, child processes) do not
+            # allow installing signal handlers; in that case we just skip the
+            # graceful shutdown behaviour and fall back to defaults.
+            pass
 
-    workers = max(1, config["workers"])
-    run_fuzzer_multi_worker(
-        config=config,
-        scheduler=scheduler,
-        seed_energies=seed_energies,
-        corpus=corpus,
-        power_scheduler_module=power_scheduler_module,
-        effective_target=effective_target,
-        effective_mutator=effective_mutator,
-        results_folder=results_folder,
-        db_path=db_path,
-        conn=conn,
-        workers=workers,
-        shutdown_requested=shutdown_requested,
-        mutate_fn=mutate_fn,
-        rng=rng,
-    )
-    conn.close()
-    export_results(
-        results_folder=results_folder,
-        db_path=db_path,
-        target=effective_target,
-    )
+        workers = max(1, config["workers"])
+        run_fuzzer_multi_worker(
+            config=config,
+            scheduler=scheduler,
+            seed_energies=seed_energies,
+            corpus=corpus,
+            power_scheduler_module=power_scheduler_module,
+            effective_target=effective_target,
+            effective_mutator=effective_mutator,
+            results_folder=results_folder,
+            db_path=db_path,
+            conn=conn,
+            workers=workers,
+            shutdown_requested=shutdown_requested,
+            mutate_fn=mutate_fn,
+            rng=rng,
+        )
+    finally:
+        try:
+            conn.close()
+        finally:
+            export_results(
+                results_folder=results_folder,
+                db_path=db_path,
+                target=effective_target,
+            )
+            if original_sigint is not None:
+                try:
+                    signal.signal(signal.SIGINT, original_sigint)
+                except (ValueError, OSError):
+                    # If we cannot restore the original handler, ignore; this is
+                    # best-effort and should not mask earlier exceptions.
+                    pass
 
