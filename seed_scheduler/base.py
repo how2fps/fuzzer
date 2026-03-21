@@ -42,3 +42,24 @@ class BaseSeedScheduler(ABC):
         Concrete schedulers can override with scheduler-specific structure.
         """
         return {"stats": self.stats(), "note": "debug_dump not implemented"}
+
+    def supports_feedback_updates(self) -> bool:
+        """Return True for schedulers that expect per-mutation `update(...)` calls."""
+        return False
+
+    def update(
+        self,
+        item: ScheduledSeed,
+        *,
+        isinteresting_score: float,
+        signals: dict[str, Any] | None = None,
+    ) -> ScheduledSeed:
+        """
+        Optional per-mutation feedback hook.
+
+        Feedback-driven schedulers should override this method and return the
+        updated scheduled item.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support feedback updates"
+        )

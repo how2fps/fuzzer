@@ -3,11 +3,12 @@ from __future__ import annotations
 from .base import BaseSeedScheduler
 from .heap_scheduler import HeapScheduler
 from .queue_scheduler import QueueScheduler
+from .thompson_scheduler import ThompsonFeatureScheduler
 from .types import ScheduledSeed
 from .ucb_tree_scheduler import UCBTreeScheduler, build_ucb_update_signals
 
 
-SCHEDULER_KINDS = ("queue", "heap", "ucb_tree")
+SCHEDULER_KINDS = ("queue", "heap", "ucb_tree", "thompson")
 
 
 def make_scheduler(kind: str, **kwargs) -> BaseSeedScheduler:
@@ -18,6 +19,8 @@ def make_scheduler(kind: str, **kwargs) -> BaseSeedScheduler:
         return HeapScheduler(**kwargs)
     if kind_normalized in {"ucb_tree", "ucb", "tree"}:
         return UCBTreeScheduler(**kwargs)
+    if kind_normalized in {"thompson", "ts", "thompson_feature"}:
+        return ThompsonFeatureScheduler(**kwargs)
     raise ValueError(f"unknown scheduler kind {kind!r}")
 
 
@@ -37,6 +40,7 @@ __all__ = [
     "QueueScheduler",
     "SCHEDULER_KINDS",
     "ScheduledSeed",
+    "ThompsonFeatureScheduler",
     "UCBTreeScheduler",
     "build_ucb_update_signals",
     "get_scheduler",

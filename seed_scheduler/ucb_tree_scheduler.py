@@ -274,6 +274,7 @@ class UCBTreeScheduler(BaseSeedScheduler):
             priority=0.0,
             metadata=metadata,
         )
+        item.metadata["_ucb_insert_seq"] = self._seq
         item.metadata["_ucb_home"] = (cov_key, bug_key)
         self._items[item.item_id] = item
         self._insert_into_leaf(leaf, item)
@@ -330,9 +331,16 @@ class UCBTreeScheduler(BaseSeedScheduler):
         for node in path:
             node.update_stats(reward)
 
-        cov_key, bug_key = stored.metadata.get("_ucb_last_leaf") or stored.metadata.get(
-            "_ucb_home", ("NO_COVERAGE", "NO_BUG")
-        )
+        if normalized_signals:
+            cov_key = self._coverage_bucket_key(normalized_signals)
+            bug_key = self._bug_bucket_key(normalized_signals)
+        else:
+            cov_key, bug_key = stored.metadata.get("_ucb_last_leaf") or stored.metadata.get(
+                "_ucb_home", ("NO_COVERAGE", "NO_BUG")
+            )
+        stored.metadata["_ucb_home"] = (cov_key, bug_key)
+        stored.metadata["_ucb_last_leaf"] = (cov_key, bug_key)
+        stored.metadata.pop("_ucb_last_path", None)
         trace = stored.metadata.get("_ucb_trace")
         if trace:
             trace_summary = _summarize_trace_payload(
@@ -398,6 +406,9 @@ class UCBTreeScheduler(BaseSeedScheduler):
             "truncated": len(leaves) > min(max(limit, 0), len(leaves)),
         }
 
+    def supports_feedback_updates(self) -> bool:
+        return True
+
     def render_tree(self, limit: int = 20) -> str:
         """Render a readable tree snapshot for logging/debugging."""
         lines = [
@@ -458,13 +469,28 @@ class UCBTreeScheduler(BaseSeedScheduler):
         """Insert an item into a leaf and evict overflow items beyond the leaf limit."""
         leaf.seeds.append(item)
         if len(leaf.seeds) > self._max_seeds_per_leaf:
-            evicted = leaf.seeds[self._max_seeds_per_leaf :]
+            leaf.seeds.sort(key=self._leaf_retention_key, reverse=True)
+            evicted = leaf.seeds[self._max_seeds_per_leaf:]
             leaf.seeds = leaf.seeds[: self._max_seeds_per_leaf]
             if leaf.rr_index > len(leaf.seeds):
                 leaf.rr_index = len(leaf.seeds)
             for old in evicted:
                 # If the just-added item gets evicted, also drop it from item registry.
                 self._items.pop(old.item_id, None)
+
+    def _leaf_retention_key(self, item: ScheduledSeed) -> tuple[float, float, float, float]:
+        """
+        Rank items to keep when a leaf overflows.
+
+        Prefer unseen seeds first so new additions get evaluated at least once,
+        then prefer historically higher-value seeds, then less-selected seeds,
+        and finally newer arrivals as a deterministic tiebreaker.
+        """
+        is_unseen = 1.0 if item.updates == 0 else 0.0
+        avg_score = item.avg_isinteresting_score
+        less_selected = -float(item.times_selected)
+        insert_seq = float(item.metadata.get("_ucb_insert_seq", 0))
+        return (is_unseen, avg_score, less_selected, insert_seq)
 
     def _select_ucb_child(self, parent: _TreeNode) -> _TreeNode | None:
         """Select the next child node to traverse using the UCB1 score."""

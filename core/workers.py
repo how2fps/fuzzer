@@ -18,7 +18,6 @@ from core.paths import DISCOVERED_SEED_ORDINAL_BASE
 from seed_scheduler import (
     BaseSeedScheduler,
     ScheduledSeed,
-    UCBTreeScheduler,
     build_ucb_update_signals,
 )
 
@@ -128,7 +127,7 @@ def run_fuzzer_multi_worker(
     mutate_fn: Callable[..., str],
     rng: random.Random,
 ) -> None:
-    scheduler_uses_feedback = isinstance(scheduler, UCBTreeScheduler)
+    scheduler_uses_feedback = scheduler.supports_feedback_updates()
     request_queue: Queue = Queue()
     reply_queue: Queue = Queue()
     result_queue: Queue = Queue()
