@@ -230,3 +230,91 @@ def get_inputs_for_unique_error_line_pairs(
         })
     return out
 
+
+def _dedupe_text_rows(rows: list[tuple[Any, ...]], *, limit: int) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not row:
+            continue
+        text = row[0]
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def get_seed_generation_context(
+    *,
+    conn: sqlite3.Connection,
+    corpus: Any,
+    target: str,
+    interesting_limit: int = 10,
+    not_interesting_limit: int = 10,
+    fuzzed_limit: int = 20,
+) -> dict[str, list[str]]:
+    target_set = corpus.target(target)
+    top_interesting_rows = conn.execute(
+        """
+        SELECT mutated_input
+        FROM runs
+        WHERE target = ? AND isinteresting_score > 0
+        ORDER BY isinteresting_score DESC, iteration DESC
+        LIMIT ?
+        """,
+        (target, interesting_limit * 5),
+    ).fetchall()
+    not_interesting_rows = conn.execute(
+        """
+        SELECT mutated_input
+        FROM runs
+        WHERE target = ? AND COALESCE(isinteresting_score, 0) <= 0
+        ORDER BY iteration DESC
+        LIMIT ?
+        """,
+        (target, not_interesting_limit * 5),
+    ).fetchall()
+    already_fuzzed_rows = conn.execute(
+        """
+        SELECT mutated_input
+        FROM runs
+        WHERE target = ?
+        ORDER BY iteration DESC
+        LIMIT ?
+        """,
+        (target, fuzzed_limit * 5),
+    ).fetchall()
+
+    top_interesting = _dedupe_text_rows(top_interesting_rows, limit=interesting_limit)
+    not_interesting = _dedupe_text_rows(
+        not_interesting_rows,
+        limit=not_interesting_limit,
+    )
+    already_fuzzed = _dedupe_text_rows(already_fuzzed_rows, limit=fuzzed_limit)
+
+    if len(already_fuzzed) < fuzzed_limit:
+        for seed in target_set.seeds:
+            if seed.text not in already_fuzzed:
+                already_fuzzed.append(seed.text)
+            if len(already_fuzzed) >= fuzzed_limit:
+                break
+
+    if not top_interesting:
+        for seed in target_set.seeds[:interesting_limit]:
+            top_interesting.append(seed.text)
+
+    if not not_interesting:
+        fallback = [text for text in already_fuzzed if text not in top_interesting]
+        not_interesting.extend(fallback[:not_interesting_limit])
+
+    return {
+        "top_interesting_seeds": top_interesting[:interesting_limit],
+        "not_interesting_seeds": not_interesting[:not_interesting_limit],
+        "already_fuzzed_seeds": already_fuzzed[:fuzzed_limit],
+    }

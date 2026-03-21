@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from core.config import FuzzConfig
 from core.db_utils import insert_run, insert_seen_branches, seed_stats_for_power_schedule
+from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
 from isinteresting import get_compute_interestingness
 from core.mutation_utils import generate_unique_mutations, make_discovered_seed
 from parser import get_parser
@@ -151,6 +152,53 @@ def run_fuzzer_multi_worker(
     added_seed_inputs_holder: list[set[str]] = [set()]
     next_discovered_ordinal_holder: list[int] = [DISCOVERED_SEED_ORDINAL_BASE]
     results_received_count: list[int] = [0]
+    consecutive_non_novel_results: list[int] = [0]
+    llm_refill_attempts: list[int] = [0]
+
+    def _try_refill_scheduler_from_llm() -> bool:
+        if not config.get("llm_seed_fallback"):
+            return False
+        conn_thread = sqlite3.connect(str(db_path))
+        try:
+            generated = maybe_generate_seed_candidates(
+                conn=conn_thread,
+                corpus=corpus,
+                target=effective_target,
+                config=config,
+                results_folder=results_folder,
+            )
+        finally:
+            conn_thread.close()
+        if generated is None or not generated.seeds:
+            return False
+
+        added_any = False
+        for text in generated.seeds:
+            if text in added_seed_inputs_holder[0]:
+                continue
+            candidate = make_generated_seed(
+                text=text,
+                family=family,
+                ordinal=next_discovered_ordinal_holder[0],
+            )
+            candidate_metadata: dict[str, Any] = {
+                "bucket": candidate.bucket,
+                "signals": {
+                    "coverage_key": {"family": candidate.family, "bucket": candidate.bucket},
+                    "status": "generated",
+                },
+            }
+            scheduler.add(candidate, metadata=candidate_metadata)
+            added_seed_inputs_holder[0].add(text)
+            next_discovered_ordinal_holder[0] += 1
+            added_any = True
+        if added_any:
+            llm_refill_attempts[0] += 1
+            print(
+                f"LLM seed fallback added {len(generated.seeds)} candidate seeds "
+                f"(attempt {llm_refill_attempts[0]})."
+            )
+        return added_any
 
     def request_handler() -> None:
         nones_sent = 0
@@ -280,6 +328,9 @@ def run_fuzzer_multi_worker(
                         cond.wait()
                     if not scheduler.empty():
                         continue
+                    if _try_refill_scheduler_from_llm():
+                        cond.notify_all()
+                        continue
                     if total_jobs[0] == 0:
                         total_jobs[0] = iteration_counter[0]
                     reply_queue.put(None)
@@ -382,6 +433,23 @@ def run_fuzzer_multi_worker(
                     added_seed_inputs_holder[0].add(result["mutated_input"])
                     next_discovered_ordinal_holder[0] += 1
                     cond.notify()
+            if any(
+                bool((result.get("signals") or {}).get(key))
+                for key in ("new_coverage", "new_bug", "new_differential_behavior")
+            ):
+                consecutive_non_novel_results[0] = 0
+            else:
+                consecutive_non_novel_results[0] += 1
+            if (
+                config.get("llm_seed_fallback")
+                and config.get("llm_seed_stagnation_threshold", 0) > 0
+                and consecutive_non_novel_results[0]
+                >= config["llm_seed_stagnation_threshold"]
+            ):
+                with cond:
+                    if _try_refill_scheduler_from_llm():
+                        consecutive_non_novel_results[0] = 0
+                        cond.notify_all()
             results_received += 1
             with cond:
                 results_received_count[0] = results_received
