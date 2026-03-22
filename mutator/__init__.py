@@ -15,11 +15,9 @@ from .mutator import (
     generate_ipv6_input,
     generate_json_input,
     interesting_value_mutation,
-    mutate_ip_input,
-    mutate_ipv4_input,
-    mutate_ipv6_input,
-    mutate_json_input,
     mutate_text_with_grammar,
+    mutate_json,
+    mutate_ip
 )
 from .versions import get_mutator, list_versions
 
@@ -40,10 +38,8 @@ __all__ = [
     "get_mutator",
     "interesting_value_mutation",
     "list_versions",
-    "mutate_ip_input",
-    "mutate_ipv4_input",
-    "mutate_ipv6_input",
-    "mutate_json_input",
     "mutate_text_with_grammar",
+    "mutate_json",
+    "mutate_ip"
 ]
 

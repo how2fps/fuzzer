@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import random
 
-from ..mutator import mutate_ip_input, mutate_json_input
+from ..mutator import mutate_json, mutate_ip, JSON_GRAMMAR, IP_GRAMMAR
 
 
 def mutate(
@@ -16,5 +16,5 @@ def mutate(
 ) -> str:
     """Mutate seed text; mutator_kind is 'json', 'ip', or inferred from target."""
     if mutator_kind == "ip":
-        return mutate_ip_input(original_text=text, rng=rng)
-    return mutate_json_input(original_text=text, rng=rng)
+        return mutate_ip(original_text=text, rng=rng)
+    return mutate_json(original_text=text, rng=rng)

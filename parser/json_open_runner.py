@@ -13,7 +13,7 @@ THIS_DIR = Path(__file__).resolve().parent
 
 try:
     # Package-relative import when run as part of the `parser` package
-    from .json_decoder_parser import (
+    from json_decoder_parser import (
         _bug_count_to_csv,
         _log_full_traceback,
         _track_exception,

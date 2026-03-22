@@ -31,6 +31,9 @@ def export_results(
                         "exception", "line", "file", "bug_type", "seed_id", "seed_text",
                         "mutated_input", "status", "iteration", "isinteresting_score",
                     ],
+                    quoting=csv.QUOTE_ALL,
+                    escapechar='\\',
+                    doublequote=True,
                 )
                 w.writeheader()
                 w.writerows(pairs)

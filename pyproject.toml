@@ -1,6 +1,7 @@
 [project]
 name = "my_fuzzer"
 version = "0.1.0"
+requires-python = ">=3.11"
 dependencies = [
     "coverage>=7.13.4",
     "pandas>=3.0.1",
@@ -14,6 +15,9 @@ fuzz-now = "fuzzer.main:main"
 [tool.ruff]
 # Configure your linter for clean code
 line-length = 88
+
+[tool.uv]
+package = true
 
 [dependency-groups]
 dev = [

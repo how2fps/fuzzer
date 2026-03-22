@@ -1,15 +1,14 @@
-from __future__ import annotations
-
 import random
 import re
-from typing import TypeAlias
+import json
+from typing import TypeAlias, Any
+from .operators import AdaptiveStrategy, JSON_OPERATORS, IP_OPERATORS
 
 GrammarRules: TypeAlias = dict[str, list[str]]
 GrammarSpec: TypeAlias = dict[str, object]
 
 _NON_TERMINAL_PATTERN = re.compile(r"<[^<>]+>")
 _INTERESTING_BYTE_VALUES = (0x00, 0x01, 0x0A, 0x0D, 0x20, 0x7F, 0x80, 0xFE, 0xFF)
-
 
 JSON_GRAMMAR: GrammarSpec = {
     "start": "<json>",
@@ -270,67 +269,82 @@ def mutate_text_with_grammar(
         return ""
     return original_text[:start] + original_text[end:]
 
+class GrammarFuzzer:
+    def __init__(self):
+        self.strategies = {
+            "json": AdaptiveStrategy(list(JSON_OPERATORS.keys())),
+            "ip": AdaptiveStrategy(list(IP_OPERATORS.keys())),
+        }
 
-def mutate_json_input(
-    *,
-    original_text: str = "",
-    max_depth: int = 6,
-    regenerate_probability: float = 0.35,
-    rng: random.Random | None = None,
-) -> str:
-    return mutate_text_with_grammar(
-        original_text=original_text,
-        grammar_spec=JSON_GRAMMAR,
-        max_depth=max_depth,
-        regenerate_probability=regenerate_probability,
-        rng=rng,
+    def mutate(
+        self,
+        text: str,
+        grammar_type: str,
+        grammar_spec: GrammarSpec,
+        max_depth: int = 5,
+        rng: random.Random | None = None,
+    ) -> str:
+        rng = rng or random.Random()
+        strategy = self.strategies.get(grammar_type)
+
+        # Decide whether to use a semantic operator, standard grammar mutation, or byte-level
+        choice = rng.random()
+
+        if choice < 0.4 and strategy:
+            # 40% chance: Use a semantic operator
+            op_name = strategy.select_operator(rng)
+            operators = JSON_OPERATORS if grammar_type == "json" else IP_OPERATORS
+            op_func = operators[op_name]
+
+            if grammar_type == "json":
+                try:
+                    data = json.loads(text) if text else {}
+                    mutated_data = op_func(data, rng)
+                    # Handle cases where op_func returns a string (like duplicate_keys)
+                    if isinstance(mutated_data, str):
+                        result = mutated_data
+                    else:
+                        result = json.dumps(mutated_data)
+                except json.JSONDecodeError:
+                    result = mutate_text_with_grammar(original_text=text, grammar_spec=grammar_spec, rng=rng)
+            else:
+                result = op_func(text, rng)
+            
+            # In a real fuzzer, we'd check if this result is 'good' (ROI)
+            # For now, we'll simulate a 10% success rate for the adaptive learner
+            strategy.update_score(op_name, rng.random() < 0.1)
+            return result
+
+        elif choice < 0.7:
+            # 30% chance: Standard structural grammar mutation
+            return mutate_text_with_grammar(
+                original_text=text,
+                grammar_spec=grammar_spec,
+                max_depth=max_depth,
+                rng=rng
+            )
+        else:
+            # 30% chance: Byte-level havoc
+            data = text.encode('utf-8', errors='replace')
+            mutators = [bit_flip, arithmetic_mutation, interesting_value_mutation, delete_block_mutation, clone_block_mutation]
+            func = rng.choice(mutators)
+            return func(data=data, rng=rng).decode('utf-8', errors='ignore')
+
+# Global fuzzer instance
+_GLOBAL_FUZZER = GrammarFuzzer()
+
+def mutate_json(original_text: str = "", rng: random.Random = None) -> str:
+    return _GLOBAL_FUZZER.mutate(
+        text=original_text, 
+        grammar_type="json", 
+        grammar_spec=JSON_GRAMMAR, 
+        rng=rng
     )
 
-
-def mutate_ip_input(
-    *,
-    original_text: str = "",
-    max_depth: int = 3,
-    regenerate_probability: float = 0.35,
-    rng: random.Random | None = None,
-) -> str:
-    return mutate_text_with_grammar(
-        original_text=original_text,
-        grammar_spec=IP_GRAMMAR,
-        max_depth=max_depth,
-        regenerate_probability=regenerate_probability,
-        rng=rng,
+def mutate_ip(original_text: str = "", rng: random.Random = None) -> str:
+    return _GLOBAL_FUZZER.mutate(
+        text=original_text, 
+        grammar_type="ip", 
+        grammar_spec=IP_GRAMMAR, 
+        rng=rng
     )
-
-
-def mutate_ipv4_input(
-    *,
-    original_text: str = "",
-    max_depth: int = 2,
-    regenerate_probability: float = 0.35,
-    rng: random.Random | None = None,
-) -> str:
-    return mutate_text_with_grammar(
-        original_text=original_text,
-        grammar_spec=IPV4_GRAMMAR,
-        max_depth=max_depth,
-        regenerate_probability=regenerate_probability,
-        rng=rng,
-    )
-
-
-def mutate_ipv6_input(
-    *,
-    original_text: str = "",
-    max_depth: int = 2,
-    regenerate_probability: float = 0.35,
-    rng: random.Random | None = None,
-) -> str:
-    return mutate_text_with_grammar(
-        original_text=original_text,
-        grammar_spec=IPV6_GRAMMAR,
-        max_depth=max_depth,
-        regenerate_probability=regenerate_probability,
-        rng=rng,
-    )
-        
