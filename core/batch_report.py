@@ -113,6 +113,267 @@ def _load_run_metrics(*, run_folder: Path, batch_folder: Path) -> RunMetrics | N
     )
 
 
+def _row_iteration(r: dict[str, str]) -> int:
+    try:
+        return int((r.get("iteration") or "0").strip() or 0)
+    except ValueError:
+        return 0
+
+
+def _bug_signature_for_row(
+    r: dict[str, str],
+) -> tuple[str | None, str | None, str | None, str | None]:
+    return (
+        r.get("bug_type") or None,
+        r.get("exception") or None,
+        r.get("file") or None,
+        str(r.get("line") or "") or None,
+    )
+
+
+def _load_cumulative_unique_bug_curves(
+    runs_csv: Path,
+) -> tuple[list[tuple[float, int]], list[tuple[float, int]]]:
+    """
+    Return (points_time, points_iteration).
+
+    points_time: rows sorted by created_at (then iteration); x = elapsed seconds
+    since the earliest created_at in the file. Rows without created_at are skipped
+    for new-signature events (series may be empty if no timestamps).
+
+    points_iteration: rows sorted by iteration (then created_at); x = iteration
+    column when a new signature first appears.
+    """
+    empty: list[tuple[float, int]] = []
+    if not runs_csv.is_file():
+        return empty, empty
+
+    with open(runs_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    if not rows:
+        return empty, empty
+
+    def row_dt(r: dict[str, str]) -> datetime | None:
+        return _parse_iso8601(r.get("created_at"))
+
+    bug_status = {"bug", "crash", "timeout"}
+
+    def _sort_key_time(r: dict[str, str]) -> tuple[int, float, int]:
+        t = row_dt(r)
+        if t is None:
+            return (1, 0.0, _row_iteration(r))
+        try:
+            ts = t.timestamp()
+        except (OSError, OverflowError, ValueError):
+            ts = 0.0
+        return (0, ts, _row_iteration(r))
+
+    # --- Time axis (chronological) ---
+    rows_by_time = sorted(rows, key=_sort_key_time)
+    t0: datetime | None = None
+    for r in rows_by_time:
+        t = row_dt(r)
+        if t is not None:
+            t0 = t
+            break
+
+    points_time: list[tuple[float, int]] = []
+    if t0 is not None:
+        seen_t: set[tuple[str | None, str | None, str | None, str | None]] = set()
+        points_time.append((0.0, 0))
+        for r in rows_by_time:
+            t = row_dt(r)
+            if t is None:
+                continue
+            status = (r.get("status") or "").strip().lower()
+            if status not in bug_status:
+                continue
+            sig = _bug_signature_for_row(r)
+            if sig in seen_t:
+                continue
+            seen_t.add(sig)
+            elapsed = (t - t0).total_seconds()
+            points_time.append((max(0.0, elapsed), len(seen_t)))
+
+    # --- Iteration axis ---
+    rows_by_iter = sorted(
+        rows,
+        key=lambda r: (_row_iteration(r), _sort_key_time(r)),
+    )
+    seen_i: set[tuple[str | None, str | None, str | None, str | None]] = set()
+    points_iter: list[tuple[float, int]] = [(0.0, 0)]
+    for r in rows_by_iter:
+        status = (r.get("status") or "").strip().lower()
+        if status not in bug_status:
+            continue
+        sig = _bug_signature_for_row(r)
+        if sig in seen_i:
+            continue
+        seen_i.add(sig)
+        points_iter.append((float(_row_iteration(r)), len(seen_i)))
+
+    return points_time, points_iter
+
+
+def _config_color(idx: int) -> str:
+    """Distinct HSL strokes for config lines (readable on dark bg)."""
+    hues = (142, 204, 280, 48, 12, 318, 172, 228)
+    h = hues[idx % len(hues)]
+    return f"hsl({h} 72% 58%)"
+
+
+def _svg_unique_bugs_vs_time_chart(
+    *,
+    title: str,
+    run_series: list[tuple[str, str, list[tuple[float, int]]]],
+    x_label: str,
+    width: int = 920,
+    chart_height: int = 300,
+    empty_message: str | None = None,
+) -> str:
+    """
+    run_series: (config_label, run_name, points) where points are (x, cumulative_unique).
+    """
+    if not run_series:
+        return f"<h3>{html.escape(title)}</h3><p>No data.</p>"
+
+    series_draw: list[tuple[str, str, list[tuple[float, int]], str]] = []
+    config_indices: dict[str, int] = {}
+    for cfg, run_name, pts in run_series:
+        if not pts:
+            continue
+        if cfg not in config_indices:
+            config_indices[cfg] = len(config_indices)
+        color = _config_color(config_indices[cfg])
+        series_draw.append((cfg, run_name, pts, color))
+
+    if not series_draw:
+        msg = empty_message or "No data to plot."
+        return f"<h3>{html.escape(title)}</h3><p>{html.escape(msg)}</p>"
+
+    max_x = 0.0
+    max_y = 0
+    for _, _, pts, _ in series_draw:
+        for x, y in pts:
+            max_x = max(max_x, float(x))
+            max_y = max(max_y, int(y))
+    max_x = max(max_x, 1e-9)
+    max_y = float(max(max_y, 1))
+
+    pad_left = 72
+    pad_right = 24
+    pad_top = 48
+    pad_bottom = 52
+    chart_w = width - pad_left - pad_right
+    chart_h = chart_height - pad_top - pad_bottom
+
+    runs_per_cfg: dict[str, int] = {}
+    for cfg, _, _, _ in series_draw:
+        runs_per_cfg[cfg] = runs_per_cfg.get(cfg, 0) + 1
+    multi_run = any(c > 1 for c in runs_per_cfg.values())
+    legend_rows = len(series_draw)
+    legend_row_h = 15
+    legend_pad_top = 8
+    height = chart_height + legend_pad_top + legend_rows * legend_row_h + 24
+
+    parts: list[str] = []
+    parts.append(f"<h3>{html.escape(title)}</h3>")
+    parts.append(
+        f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" '
+        f'role="img" aria-label="{html.escape(title)}">'
+    )
+    parts.append(f"<rect x='0' y='0' width='{width}' height='{height}' fill='#0b0f14' rx='14'/>")
+    parts.append(
+        f"<text x='{pad_left}' y='26' fill='#e6edf3' font-size='15' "
+        f"font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>"
+        f"{html.escape(title)}</text>"
+    )
+
+    ax_y = pad_top + chart_h
+    parts.append(
+        f"<line x1='{pad_left}' y1='{pad_top}' x2='{pad_left}' y2='{ax_y}' "
+        f"stroke='#30363d' stroke-width='1'/>"
+    )
+    parts.append(
+        f"<line x1='{pad_left}' y1='{ax_y}' x2='{pad_left + chart_w}' y2='{ax_y}' "
+        f"stroke='#30363d' stroke-width='1'/>"
+    )
+    parts.append(
+        f"<text x='{pad_left + chart_w // 2}' y='{chart_height - 10}' fill='#9fb2c6' font-size='11' "
+        f"text-anchor='middle' font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>"
+        f"{html.escape(x_label)}</text>"
+    )
+    parts.append(
+        f"<text transform='translate(18,{pad_top + chart_h // 2}) rotate(-90)' fill='#9fb2c6' "
+        f"font-size='11' text-anchor='middle' font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>"
+        f"unique bug signatures</text>"
+    )
+
+    def sx(x: float) -> float:
+        return pad_left + (x / max_x) * chart_w
+
+    def sy(y: float) -> float:
+        return pad_top + chart_h - (y / max_y) * chart_h
+
+    y_tick_count = min(6, max(2, int(max_y) + 1))
+    for i in range(y_tick_count + 1):
+        yi = max_y * i / y_tick_count
+        yy = sy(yi)
+        parts.append(
+            f"<line x1='{pad_left}' y1='{yy}' x2='{pad_left + chart_w}' y2='{yy}' "
+            f"stroke='#21262d' stroke-width='1'/>"
+        )
+        parts.append(
+            f"<text x='{pad_left - 8}' y='{yy + 4}' fill='#9fb2c6' font-size='10' "
+            f"text-anchor='end' font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>"
+            f"{int(round(yi))}</text>"
+        )
+
+    x_tick_n = 5
+    for i in range(x_tick_n + 1):
+        xi = max_x * i / x_tick_n
+        xx = sx(xi)
+        x_txt = f"{xi:.0f}" if max_x >= 30 else f"{xi:.1f}"
+        parts.append(
+            f"<text x='{xx}' y='{ax_y + 16}' fill='#9fb2c6' font-size='10' text-anchor='middle' "
+            f"font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>{x_txt}</text>"
+        )
+
+    for cfg, run_name, pts, color in series_draw:
+        d_parts: list[str] = []
+        for i, (px, py) in enumerate(pts):
+            x_ = sx(float(px))
+            y_ = sy(float(py))
+            if i == 0:
+                d_parts.append(f"M {x_:.2f} {y_:.2f}")
+            else:
+                d_parts.append(f"H {x_:.2f} V {y_:.2f}")
+        path_d = " ".join(d_parts)
+        opacity = 0.92 if runs_per_cfg.get(cfg, 0) == 1 else 0.58
+        sw = 2.4 if runs_per_cfg.get(cfg, 0) == 1 else 2.0
+        parts.append(
+            f"<path d='{path_d}' fill='none' stroke='{color}' stroke-width='{sw}' "
+            f"opacity='{opacity}' stroke-linejoin='round'/>"
+        )
+
+    leg_y0 = chart_height + legend_pad_top
+    for row, (cfg, run_name, _, color) in enumerate(series_draw):
+        yy = leg_y0 + row * legend_row_h
+        lx = 20
+        label = f"{cfg} — {run_name}" if multi_run else cfg
+        parts.append(f"<rect x='{lx}' y='{yy - 9}' width='11' height='11' fill='{color}' rx='2'/>")
+        parts.append(
+            f"<text x='{lx + 16}' y='{yy}' fill='#c9d1d9' font-size='10' "
+            f"font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>"
+            f"{html.escape(label[:92])}</text>"
+        )
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
 def _svg_bar_chart(*, title: str, rows: list[tuple[str, float]], width: int = 900, height: int = 260) -> str:
     if not rows:
         return f"<h3>{html.escape(title)}</h3><p>No data.</p>"
@@ -279,6 +540,30 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
         chart_unique = [(x["config_label"], float(x["unique_bug_signatures_sum"])) for x in config_summary]
         chart_iters = [(x["config_label"], float(x["total_iterations"])) for x in config_summary]
 
+        run_series_time: list[tuple[str, str, list[tuple[float, int]]]] = []
+        run_series_iter: list[tuple[str, str, list[tuple[float, int]]]] = []
+        for m in sorted(ms, key=lambda x: (x.config_label, str(x.run_folder))):
+            pts_time, pts_iter = _load_cumulative_unique_bug_curves(
+                m.run_folder / "runs.csv"
+            )
+            run_series_time.append((m.config_label, m.run_folder.name, pts_time))
+            run_series_iter.append((m.config_label, m.run_folder.name, pts_iter))
+
+        chart_unique_vs_elapsed = _svg_unique_bugs_vs_time_chart(
+            title="Unique bug signatures vs elapsed time (per run; color = config / method)",
+            run_series=run_series_time,
+            x_label="elapsed seconds since earliest created_at in that run’s CSV",
+            empty_message=(
+                "No created_at timestamps in these runs (or empty files); "
+                "use the iteration chart below."
+            ),
+        )
+        chart_unique_vs_iteration = _svg_unique_bugs_vs_time_chart(
+            title="Unique bug signatures vs iteration (per run; color = config / method)",
+            run_series=run_series_iter,
+            x_label="iteration column from runs.csv (rows ordered by iteration, then time)",
+        )
+
         anchor = _slug(target)
         toc_links.append(f"<a href='#{html.escape(anchor)}'>{html.escape(target)}</a>")
         target_sections.append(
@@ -291,6 +576,9 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
       {_svg_bar_chart(title="Bug rate (bug/crash/timeout iterations / total iterations)", rows=chart_bug_rate)}
       {_svg_bar_chart(title="Unique bug signatures (sum across runs)", rows=chart_unique)}
       {_svg_bar_chart(title="Total iterations (sum across runs)", rows=chart_iters)}
+      {chart_unique_vs_elapsed}
+      {chart_unique_vs_iteration}
+      <p class="meta">Step curves: cumulative distinct (bug_type, exception, file, line) on bug/crash/timeout rows. Time chart: created_at order; rows without created_at are skipped, so totals can be lower than the iteration chart if some bugs lack timestamps. Iteration chart: iteration order, then time tie-break. Each run starts at (0, 0).</p>
 """
         )
     toc_html = " · ".join(toc_links)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Sequence
 
 from seed_corpus import Seed
 
@@ -46,6 +46,17 @@ class BaseSeedScheduler(ABC):
     def supports_feedback_updates(self) -> bool:
         """Return True for schedulers that expect per-mutation `update(...)` calls."""
         return False
+
+    def complete_batch(
+        self, item: ScheduledSeed, *, batch_scores: Sequence[float]
+    ) -> None:
+        """
+        Re-queue a seed after a non-feedback (batch) lease finishes.
+
+        Queue/heap schedulers pop items in `next()` and must put them back here.
+        Feedback schedulers use `update(...)` per mutation instead; default is no-op.
+        """
+        return
 
     def update(
         self,

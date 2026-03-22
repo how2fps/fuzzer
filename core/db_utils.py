@@ -224,7 +224,8 @@ def get_inputs_for_unique_error_line_pairs(
     """
     cur = conn.execute("""
         SELECT exception, line, file, bug_type,
-               seed_id, seed_text, mutated_input, status, iteration, isinteresting_score
+               seed_id, seed_text, mutated_input, status, iteration, isinteresting_score,
+               created_at
         FROM runs
         WHERE status IN ('bug', 'crash', 'timeout') AND (exception IS NOT NULL OR line IS NOT NULL)
         ORDER BY exception, line
@@ -233,7 +234,19 @@ def get_inputs_for_unique_error_line_pairs(
     seen: set[tuple[str | None, int | None]] = set()
     out: list[dict[str, Any]] = []
     for row in rows:
-        exc, line, file_, bug_type, seed_id, seed_text, mutated_input, status, iteration, score = row
+        (
+            exc,
+            line,
+            file_,
+            bug_type,
+            seed_id,
+            seed_text,
+            mutated_input,
+            status,
+            iteration,
+            score,
+            created_at,
+        ) = row
         key = (exc, line)
         if key in seen:
             continue
@@ -249,6 +262,7 @@ def get_inputs_for_unique_error_line_pairs(
             "status": status,
             "iteration": iteration,
             "isinteresting_score": score,
+            "datetime_executed": created_at,
         })
     return out
 

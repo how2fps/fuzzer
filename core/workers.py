@@ -342,6 +342,18 @@ def run_fuzzer_multi_worker(
                                         if remaining_budget is not None
                                         else max(1, energy)
                                     )
+                                    # Keep at least one mutation per in-flight worker when the power
+                                    # schedule assigns low energy, so we do not drain the scheduler's
+                                    # ready set (heap/queue) with one next() per worker before results
+                                    # arrive and starve the rest.
+                                    if not scheduler_uses_feedback and workers > 1:
+                                        parallel_floor = (
+                                            min(workers, remaining_budget[0])
+                                            if remaining_budget is not None
+                                            else workers
+                                        )
+                                        if parallel_floor >= 1:
+                                            n = max(n, parallel_floor)
                                     current_batch.clear()
                                     current_batch.extend(
                                         generate_unique_mutations(
@@ -549,8 +561,12 @@ def run_fuzzer_multi_worker(
                             batch_scores_by_item.setdefault(item_id, []).append(score)
                             expected = batch_expected.get(item_id, 1)
                             if len(batch_scores_by_item[item_id]) >= expected:
-                                batch_scores_by_item.pop(item_id, [])
+                                finished_scores = batch_scores_by_item.pop(item_id)
                                 batch_expected.pop(item_id, None)
+                                scheduler.complete_batch(
+                                    scheduled, batch_scores=finished_scores
+                                )
+                                cond.notify_all()
                 parser_result = result.pop("parser_result", None)
                 insert_run(
                     conn,

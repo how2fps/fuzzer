@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any
+from typing import Any, Sequence
 
 from seed_corpus import Seed
 
@@ -53,6 +53,14 @@ class QueueScheduler(BaseSeedScheduler):
     def __len__(self) -> int:
         """Return the number of queued items ready to be selected."""
         return len(self._queue)
+
+    def complete_batch(self, item: ScheduledSeed, *, batch_scores: Sequence[float]) -> None:
+        if batch_scores:
+            n = len(batch_scores)
+            item.updates += n
+            item.total_isinteresting_score += float(sum(batch_scores))
+            item.last_isinteresting_score = float(batch_scores[-1])
+        self._queue.append(item.item_id)
 
     def stats(self) -> dict[str, Any]:
         """Return queue-oriented scheduler metrics."""

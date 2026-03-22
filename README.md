@@ -92,7 +92,7 @@ Contents:
 - **`runs.db`** — SQLite database of every iteration (seed id, seed text, mutated input, status, bug_type, exception, line, scores, etc.).
 - **`runs.csv`** — Full export of `runs` as CSV.
 - **`unique_error_line_pairs.csv`** — One row per unique (exception, line) pair that triggered a bug/crash/timeout, with a representative input.
-- **`bug_counts.csv`** — (json-decoder only) Copy of the bug-counts CSV produced by rerunning `json_decoder_stv.py` with `--show-coverage` on the representative inputs.
+- **`bug_counts.csv`** — Merged from per-worker `logs/bug_counts.csv` under `.worker_cwd/` when present, otherwise copied from the target’s canonical `logs/` (same flow for json-decoder and binary targets). Json-decoder counts are updated during each fuzz iteration (no STV rerun at export).
 
 ### Batch runs (configs)
 

@@ -14,6 +14,7 @@ def export_results(
     results_folder: Path,
     db_path: Path,
     target: str,
+    copy_bug_counts: bool = True,
 ) -> None:
     get_fuzzer_logger().info("Exporting results to %s", results_folder)
     conn = open_results_db(db_path)
@@ -25,8 +26,17 @@ def export_results(
                 w = csv.DictWriter(
                     f,
                     fieldnames=[
-                        "exception", "line", "file", "bug_type", "seed_id", "seed_text",
-                        "mutated_input", "status", "iteration", "isinteresting_score",
+                        "exception",
+                        "line",
+                        "file",
+                        "bug_type",
+                        "seed_id",
+                        "seed_text",
+                        "mutated_input",
+                        "status",
+                        "iteration",
+                        "isinteresting_score",
+                        "datetime_executed",
                     ],
                 )
                 w.writeheader()
@@ -34,7 +44,9 @@ def export_results(
         else:
             with open(pairs_path, "w", newline="", encoding="utf-8") as f:
                 f.write(
-                    "exception,line,file,bug_type,seed_id,seed_text,mutated_input,status,iteration,isinteresting_score\n")
+                    "exception,line,file,bug_type,seed_id,seed_text,mutated_input,"
+                    "status,iteration,isinteresting_score,datetime_executed\n"
+                )
 
         runs_path = results_folder / "runs.csv"
         cur = conn.execute(
@@ -50,5 +62,6 @@ def export_results(
     finally:
         conn.close()
 
-    copy_bug_counts_csv_if_present(target=target, results_folder=results_folder)
+    if copy_bug_counts:
+        copy_bug_counts_csv_if_present(target=target, results_folder=results_folder)
 
