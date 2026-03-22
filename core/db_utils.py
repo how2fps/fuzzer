@@ -113,6 +113,12 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (file, from_line, to_line)
         )
     """)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_runs_mutated_input_target
+        ON runs (mutated_input, target)
+        """
+    )
     conn.commit()
 
 
@@ -172,6 +178,25 @@ def input_already_run(
     return cur.fetchone() is not None
 
 
+def insert_seen_branches_into_conn(
+    conn: sqlite3.Connection,
+    result: dict[str, Any],
+) -> None:
+    """Insert covered branches from the parser result using an existing connection."""
+    edges = get_covered_edges_from_result(result)
+    if not edges:
+        return
+    try:
+        for (f, fl, tl) in edges:
+            conn.execute(
+                "INSERT OR IGNORE INTO seen_branches (file, from_line, to_line) VALUES (?, ?, ?)",
+                (f, fl, tl),
+            )
+        conn.commit()
+    except (sqlite3.Error, OSError):
+        pass
+
+
 def insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
     """Insert covered branches from the parser result into seen_branches."""
     edges = get_covered_edges_from_result(result)
@@ -183,12 +208,7 @@ def insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
     try:
         conn = open_results_db(path)
         try:
-            for (f, fl, tl) in edges:
-                conn.execute(
-                    "INSERT OR IGNORE INTO seen_branches (file, from_line, to_line) VALUES (?, ?, ?)",
-                    (f, fl, tl),
-                )
-            conn.commit()
+            insert_seen_branches_into_conn(conn, result)
         finally:
             conn.close()
     except (sqlite3.Error, OSError):

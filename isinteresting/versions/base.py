@@ -177,20 +177,25 @@ def _get_covered_edges(closed: Mapping[str, Any]) -> set[tuple[str, int, int]]:
 
 
 def _new_edges_score(conn: sqlite3.Connection, edges: set[tuple[str, int, int]]) -> float:
-    """Read-only: query seen_branches for which edges are new; return AFL-style score. No insert."""
+    """Read-only: which result edges are absent from seen_branches; AFL-style score. No insert."""
     if not edges:
         return 0.0
-    seen: set[tuple[str, int, int]] = set()
+    new_count = 0
     try:
-        cur = conn.execute("SELECT file, from_line, to_line FROM seen_branches")
-        for row in cur:
-            seen.add((str(row[0]), int(row[1]), int(row[2])))
+        # Indexed lookups on PRIMARY KEY (file, from_line, to_line) — avoid full-table scans
+        # that grew with corpus size and dominated worker time.
+        for f, fl, tl in edges:
+            row = conn.execute(
+                "SELECT 1 FROM seen_branches WHERE file = ? AND from_line = ? AND to_line = ? LIMIT 1",
+                (f, fl, tl),
+            ).fetchone()
+            if row is None:
+                new_count += 1
     except sqlite3.OperationalError:
-        pass
-    new_edges = edges - seen
-    new_ratio = len(new_edges) / float(len(edges))
-    if new_ratio <= 0.0:
         return 0.0
+    if new_count <= 0:
+        return 0.0
+    new_ratio = new_count / float(len(edges))
     return 0.5 + 0.5 * min(new_ratio, 1.0)
 
 
@@ -236,6 +241,7 @@ def compute_interestingness(
     result: Mapping[str, Any],
     db_path: Path | str | None = None,
     target: str = "",
+    sqlite_conn: sqlite3.Connection | None = None,
     **kwargs: Any,
 ) -> float:
     """
@@ -290,7 +296,16 @@ def compute_interestingness(
     metric_sum = s_status + s_diff + s_cov
     metric_max = 3.0
 
-    if db_path and Path(db_path).exists():
+    if sqlite_conn is not None:
+        try:
+            edges = _get_covered_edges(coverage_source)
+            s_new = _new_edges_score(sqlite_conn, edges)
+            s_rare = _rare_bug_score(sqlite_conn, closed_status, closed_bug, target)
+            metric_sum += s_new + (s_rare * 0.9)
+            metric_max += 1.9
+        except (sqlite3.Error, OSError):
+            pass
+    elif db_path and Path(db_path).exists():
         path = Path(db_path) if isinstance(db_path, str) else db_path
         try:
             conn = open_results_db(path)

@@ -136,34 +136,58 @@ def _closed_status(result: dict[str, Any]) -> str:
     return str(status).strip().lower() if isinstance(status, str) else ""
 
 
-def _has_new_coverage(db_path: Path | str, result: dict[str, Any]) -> bool:
+def _has_new_coverage(
+    db_path: Path | str,
+    result: dict[str, Any],
+    *,
+    sqlite_conn: sqlite3.Connection | None = None,
+) -> bool:
     """Return True if the current result covers any edge not yet in seen_branches."""
     edges = get_covered_edges_from_result(result)
     if not edges:
         return False
+
+    def _any_new(conn: sqlite3.Connection) -> bool:
+        try:
+            for f, fl, tl in edges:
+                row = conn.execute(
+                    "SELECT 1 FROM seen_branches WHERE file = ? AND from_line = ? AND to_line = ? LIMIT 1",
+                    (f, fl, tl),
+                ).fetchone()
+                if row is None:
+                    return True
+            return False
+        except sqlite3.OperationalError:
+            return False
+
+    if sqlite_conn is not None:
+        return _any_new(sqlite_conn)
+
     path = Path(db_path) if isinstance(db_path, str) else db_path
     if not path.exists():
         return False
     try:
         conn = open_results_db(path)
         try:
-            seen: set[tuple[str, int, int]] = set()
-            cur = conn.execute("SELECT file, from_line, to_line FROM seen_branches")
-            for row in cur:
-                seen.add((str(row[0]), int(row[1]), int(row[2])))
-            return bool(edges - seen)
+            return _any_new(conn)
         finally:
             conn.close()
     except (sqlite3.Error, OSError):
         return False
 
 
-def _has_new_bug(db_path: Path | str, result: dict[str, Any], target: str) -> bool:
+def _has_new_bug(
+    db_path: Path | str,
+    result: dict[str, Any],
+    target: str,
+    *,
+    sqlite_conn: sqlite3.Connection | None = None,
+) -> bool:
     """Return True if the current bug/crash signature has not appeared before for this target."""
-    closed = result.get("closed_result", {})
     status = _closed_status(result)
     if status not in {"bug", "crash", "timeout", "error"}:
         return False
+    closed = result.get("closed_result", {})
     bug_signature = closed.get("bug_signature") or {}
     if not isinstance(bug_signature, dict):
         return False
@@ -176,24 +200,34 @@ def _has_new_bug(db_path: Path | str, result: dict[str, Any], target: str) -> bo
             line = int(line_raw)
         except (TypeError, ValueError):
             line = None
+
+    def _is_first_occurrence(conn: sqlite3.Connection) -> bool:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+              AND COALESCE(exception, '') = COALESCE(?, '')
+              AND COALESCE(file, '') = COALESCE(?, '')
+              AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
+            """,
+            (target, exc, file_, line, line),
+        )
+        row = cur.fetchone()
+        return int(row[0]) == 0 if row else False
+
+    if sqlite_conn is not None:
+        try:
+            return _is_first_occurrence(sqlite_conn)
+        except sqlite3.OperationalError:
+            return False
+
     path = Path(db_path) if isinstance(db_path, str) else db_path
     if not path.exists():
         return False
     try:
         conn = open_results_db(path)
         try:
-            cur = conn.execute(
-                """
-                SELECT COUNT(*) FROM runs
-                WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
-                  AND COALESCE(exception, '') = COALESCE(?, '')
-                  AND COALESCE(file, '') = COALESCE(?, '')
-                  AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
-                """,
-                (target, exc, file_, line, line),
-            )
-            row = cur.fetchone()
-            return int(row[0]) == 0 if row else False
+            return _is_first_occurrence(conn)
         finally:
             conn.close()
     except (sqlite3.Error, OSError):
@@ -209,6 +243,7 @@ def build_ucb_update_signals(
     iteration: int,
     seed_id: str,
     score: float,
+    sqlite_conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Build the per-mutation feedback payload consumed by the UCB scheduler."""
     status = _closed_status(result)
@@ -218,8 +253,10 @@ def build_ucb_update_signals(
         "bucket": bucket,
         "status": status,
         "isinteresting": score,
-        "new_coverage": _has_new_coverage(db_path, result),
-        "new_bug": _has_new_bug(db_path, result, target),
+        "new_coverage": _has_new_coverage(
+            db_path, result, sqlite_conn=sqlite_conn
+        ),
+        "new_bug": _has_new_bug(db_path, result, target, sqlite_conn=sqlite_conn),
         "crash": status == "crash",
         "timeout": status == "timeout",
         "closed_result": result.get("closed_result", {}),

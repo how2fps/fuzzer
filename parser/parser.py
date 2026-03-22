@@ -34,6 +34,8 @@ _TARGETS_BASE = Path(__file__).resolve().parent.parent / "targets"
 
 # Absolute path to the json_open runner script that uses stdlib json
 JSON_OPEN_SCRIPT = Path(__file__).resolve().parent / "json_open_runner.py"
+# Child entry so json-decoder (in-process loads + coverage) honors timeout like subprocess targets
+_JSON_DECODER_ISOLATED_MAIN = Path(__file__).resolve().parent / "json_decoder_isolated_main.py"
 
 # Target name -> path, run command, and optional oracle target.
 # cmd: argv list (relative paths resolved against target dir). Input is appended as final arg
@@ -481,7 +483,8 @@ def run_parser(
 
     closed_cwd_override: If set, the closed target subprocess uses this directory as cwd (created if
     needed) so each worker can write logs/bug_counts.csv under a separate tree instead of sharing
-    the canonical target folder.
+    the canonical target folder. For json-decoder (in-process handler), this sets the logs directory
+    for tracebacks and bug_counts.csv the same way (…/.worker_cwd/wN/logs).
 
     Returns:
         Dict with:
@@ -516,8 +519,15 @@ def run_parser(
     handler = entry.get("handler")
     if handler == "json_decoder":
         input_str = data.decode("utf-8", errors="replace")
-        kwargs: dict[str, Any] = {"json_string": input_str}
-        json_decoder_info = run_json_decoder_with_branches(**kwargs)
+        json_log_dir: str | None = None
+        if closed_cwd_override is not None:
+            scratch_logs = (Path(closed_cwd_override).resolve() / "logs")
+            scratch_logs.mkdir(parents=True, exist_ok=True)
+            json_log_dir = str(scratch_logs)
+        json_decoder_info = run_json_decoder_with_branches(
+            json_string=input_str,
+            log_dir=json_log_dir,
+        )
 
         base_result: dict[str, Any] = {
             "target": target,
@@ -558,7 +568,9 @@ def run_parser(
                 timeout=timeout,
                 seed_family=seed_family,
             )
-            if enable_open_coverage:
+            # json-decoder closed path already runs buggy_json under coverage; skip
+            # a second coverage subprocess for the json_open oracle.
+            if enable_open_coverage and handler != "json_decoder":
                 coverage_open_result = _run_open_target_with_coverage(
                     target_name=open_name,
                     target_dir=open_dir,

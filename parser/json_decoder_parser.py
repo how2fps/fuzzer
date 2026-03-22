@@ -239,6 +239,7 @@ def run_json_decoder_with_branches(
     *,
     json_string: str,
     coverage_file: str | None = None,  # ignored: coverage is kept in memory
+    log_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     Clone of json_decoder_stv main logic that:
@@ -246,9 +247,20 @@ def run_json_decoder_with_branches(
     - tracks bug counts and logs tracebacks
     - returns detailed information about uncovered branches
 
+    log_dir: Directory for tracebacks.log and bug_counts.csv. If None, uses
+    targets/json-decoder/logs. When fuzzing with multiple workers, pass a per-worker
+    scratch path (e.g. results/.../.worker_cwd/w0/logs) to avoid concurrent writes.
+
     This is intended to be callable from parser/parser.py so the
     returned data can be embedded directly into the overall result JSON.
     """
+    effective_log_dir = (
+        log_dir
+        if log_dir is not None
+        else str((BUGGY_JSON_DIR / "logs").resolve())
+    )
+    os.makedirs(effective_log_dir, exist_ok=True)
+
     bug_count: dict[tuple[Any, ...], int] = defaultdict(int)
 
     cov = coverage.Coverage(
@@ -286,7 +298,7 @@ def run_json_decoder_with_branches(
         bug_count[bug_id] += 1
     except (InvalidityBug, JSONDecodeError) as exc:
         bug_category = "invalidity"
-        _log_full_traceback(exc, bug_category)
+        _log_full_traceback(exc, bug_category, log_dir=effective_log_dir)
         bug_details = _track_exception(exc)
         bug_signature = {
             "type": bug_category,
@@ -305,7 +317,7 @@ def run_json_decoder_with_branches(
         bug_count[bug_id] += 1
     except Exception as exc:
         bug_category = "bonus"
-        _log_full_traceback(exc, bug_category)
+        _log_full_traceback(exc, bug_category, log_dir=effective_log_dir)
         bug_details = _track_exception(exc)
         bug_signature = {
             "type": bug_category,
@@ -327,6 +339,11 @@ def run_json_decoder_with_branches(
 
     branch_counts = _collect_branch_counts(cov)
     branch_details_by_file = _collect_branch_details_by_file(cov)
+
+    _bug_count_to_csv(
+        bug_count,
+        os.path.join(effective_log_dir, "bug_counts.csv"),
+    )
 
     return {
         "status": "ok" if bug_signature is None else "bug",
