@@ -11,6 +11,9 @@ from typing import Any
 from isinteresting import get_covered_edges_from_result
 from seed_corpus import Seed
 
+from core.fuzzer_logging import get_fuzzer_logger
+from core.sqlite_conn import open_results_db
+
 from .base import BaseSeedScheduler
 from .types import ScheduledSeed
 
@@ -142,7 +145,7 @@ def _has_new_coverage(db_path: Path | str, result: dict[str, Any]) -> bool:
     if not path.exists():
         return False
     try:
-        conn = sqlite3.connect(str(path))
+        conn = open_results_db(path)
         try:
             seen: set[tuple[str, int, int]] = set()
             cur = conn.execute("SELECT file, from_line, to_line FROM seen_branches")
@@ -177,7 +180,7 @@ def _has_new_bug(db_path: Path | str, result: dict[str, Any], target: str) -> bo
     if not path.exists():
         return False
     try:
-        conn = sqlite3.connect(str(path))
+        conn = open_results_db(path)
         try:
             cur = conn.execute(
                 """
@@ -347,11 +350,15 @@ class UCBTreeScheduler(BaseSeedScheduler):
                 raw_signals=signals,
                 normalized_signals=normalized_signals,
             )
-            print(
-                "[ucb.update] "
-                f"item={stored.item_id} seed={stored.seed.seed_id} "
-                f"score={isinteresting_score:.3f} reward={reward:.3f} "
-                f"leaf=({cov_key}, {bug_key}) summary={trace_summary!r}"
+            get_fuzzer_logger().info(
+                "[ucb.update] item=%s seed=%s score=%.3f reward=%.3f leaf=(%s, %s) summary=%r",
+                stored.item_id,
+                stored.seed.seed_id,
+                isinteresting_score,
+                reward,
+                cov_key,
+                bug_key,
+                trace_summary,
             )
         leaf = self._ensure_leaf(cov_key, bug_key)
         self._insert_into_leaf(leaf, stored)

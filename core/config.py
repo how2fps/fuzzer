@@ -15,6 +15,8 @@ from seed_scheduler import list_versions as scheduler_versions
 
 from core.paths import CONFIGS_DIR
 
+ENABLE_OPEN_COVERAGE: bool = False
+
 
 class FuzzConfig(TypedDict):
     target: str
@@ -38,6 +40,7 @@ class FuzzConfig(TypedDict):
     llm_seed_stagnation_threshold: int
     llm_seed_min_candidates: int
     llm_seed_max_candidates: int
+    enable_open_coverage: bool
 
 
 def get_default_config() -> FuzzConfig:
@@ -64,6 +67,7 @@ def get_default_config() -> FuzzConfig:
         "llm_seed_stagnation_threshold": 0,
         "llm_seed_min_candidates": 5,
         "llm_seed_max_candidates": 12,
+        "enable_open_coverage": ENABLE_OPEN_COVERAGE,
     }
 
 
@@ -117,6 +121,8 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             "llm_seed_max_candidates must be >= llm_seed_min_candidates."
         )
+    if not isinstance(config["enable_open_coverage"], bool):
+        raise ValueError("enable_open_coverage must be a boolean.")
 
 
 def load_config_from_file(path: Path) -> FuzzConfig:
@@ -325,6 +331,12 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         default=1,
         help="Number of times to run each config (when using --config or --configs-dir).",
     )
+    parser.add_argument(
+        "--enable-open-coverage",
+        action="store_true",
+        default=ENABLE_OPEN_COVERAGE,
+        help="Enable optional coverage collection for open_result targets.",
+    )
 
     args = parser.parse_args()
 
@@ -368,6 +380,7 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "llm_seed_stagnation_threshold": args.llm_seed_stagnation_threshold,
         "llm_seed_min_candidates": args.llm_seed_min_candidates,
         "llm_seed_max_candidates": args.llm_seed_max_candidates,
+        "enable_open_coverage": args.enable_open_coverage,
     }
 
     if args.config is not None:
@@ -395,25 +408,30 @@ def infer_mutator_kind(*, mutator_kind: str, target: str) -> str:
 
 
 def print_config(config: FuzzConfig) -> None:
-    print("Fuzzer configuration:")
-    print(f"  target: {config['target']}")
-    print(f"  scheduler_kind: {config['scheduler_kind']}")
-    print(f"  mutator_kind: {config['mutator_kind']}")
-    print(f"  ucb_trace: {config['ucb_trace']}")
-    print(f"  ucb_debug_tree: {config['ucb_debug_tree']}")
-    print(f"  max_iterations: {config['max_iterations']}")
-    print(f"  max_hours: {config['max_hours']}")
-    print(f"  timeout: {config['timeout']}")
-    print(f"  rng_seed: {config['rng_seed']}")
-    print(f"  workers: {config['workers']}")
-    print(f"  isinteresting_version: {config['isinteresting_version']}")
-    print(f"  mutator_version: {config['mutator_version']}")
-    print(f"  parser_version: {config['parser_version']}")
-    print(f"  power_scheduler_version: {config['power_scheduler_version']}")
-    print(f"  seed_corpus_version: {config['seed_corpus_version']}")
-    print(f"  llm_seed_fallback: {config['llm_seed_fallback']}")
-    print(
-        f"  llm_seed_stagnation_threshold: {config['llm_seed_stagnation_threshold']}"
+    from core.fuzzer_logging import get_fuzzer_logger
+
+    log = get_fuzzer_logger()
+    log.info("Fuzzer configuration:")
+    log.info("  target: %s", config["target"])
+    log.info("  scheduler_kind: %s", config["scheduler_kind"])
+    log.info("  mutator_kind: %s", config["mutator_kind"])
+    log.info("  ucb_trace: %s", config["ucb_trace"])
+    log.info("  ucb_debug_tree: %s", config["ucb_debug_tree"])
+    log.info("  max_iterations: %s", config["max_iterations"])
+    log.info("  max_hours: %s", config["max_hours"])
+    log.info("  timeout: %s", config["timeout"])
+    log.info("  rng_seed: %s", config["rng_seed"])
+    log.info("  workers: %s", config["workers"])
+    log.info("  isinteresting_version: %s", config["isinteresting_version"])
+    log.info("  mutator_version: %s", config["mutator_version"])
+    log.info("  parser_version: %s", config["parser_version"])
+    log.info("  power_scheduler_version: %s", config["power_scheduler_version"])
+    log.info("  seed_corpus_version: %s", config["seed_corpus_version"])
+    log.info("  llm_seed_fallback: %s", config["llm_seed_fallback"])
+    log.info(
+        "  llm_seed_stagnation_threshold: %s",
+        config["llm_seed_stagnation_threshold"],
     )
-    print(f"  llm_seed_min_candidates: {config['llm_seed_min_candidates']}")
-    print(f"  llm_seed_max_candidates: {config['llm_seed_max_candidates']}")
+    log.info("  llm_seed_min_candidates: %s", config["llm_seed_min_candidates"])
+    log.info("  llm_seed_max_candidates: %s", config["llm_seed_max_candidates"])
+    log.info("  enable_open_coverage: %s", config["enable_open_coverage"])

@@ -9,6 +9,8 @@ from typing import Any
 from isinteresting import get_covered_edges_from_result
 from power_scheduler import SeedStats
 
+from core.sqlite_conn import open_results_db
+
 
 def get_seed_stats_from_db(
     conn: sqlite3.Connection,
@@ -179,7 +181,7 @@ def insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
     if not path.exists():
         return
     try:
-        conn = sqlite3.connect(str(path))
+        conn = open_results_db(path)
         try:
             for (f, fl, tl) in edges:
                 conn.execute(

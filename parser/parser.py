@@ -14,6 +14,7 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +234,7 @@ def run_target(
     timeout: float = DEFAULT_TIMEOUT,
     *,
     seed_family: str | None = None,
+    process_cwd: Path | str | None = None,
 ) -> dict[str, Any]:
     """
     Run one target with the given input. Return result dict with status and
@@ -281,10 +283,15 @@ def run_target(
     # Treat that as a *minimum* timeout rather than overriding the user-configured value.
     entry_timeout = entry.get("timeout")
     effective_timeout = max(float(timeout), float(entry_timeout)) if entry_timeout is not None else float(timeout)
+    # Isolated cwd (e.g. per worker scratch) avoids concurrent writes to logs/bug_counts.csv
+    # when multiple processes run the same closed target.
+    run_cwd = Path(process_cwd).resolve() if process_cwd is not None else target_dir
+    if process_cwd is not None:
+        run_cwd.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.run(
             argv,
-            cwd=str(target_dir),
+            cwd=str(run_cwd),
             input=input_data if input_via_stdin else None,
             capture_output=True,
             timeout=effective_timeout,
@@ -340,6 +347,120 @@ def run_target(
     return result
 
 
+def _run_open_target_with_coverage(
+    *,
+    target_name: str,
+    target_dir: Path,
+    input_data: bytes,
+    timeout: float,
+) -> dict[str, Any] | None:
+    if target_name not in {"json_open", "cidrize", "ipyparse"}:
+        return None
+
+    project_root = str(Path(__file__).resolve().parent.parent)
+    runner_code = f"""
+from __future__ import annotations
+import json
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = r\"{project_root}\"
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from parser.open_coverage_runner import run_open_target_with_branches
+
+def main() -> None:
+    data = sys.stdin.buffer.read()
+    out = run_open_target_with_branches(target_name={target_name!r}, input_data=data)
+    print(json.dumps(out, sort_keys=True, separators=(",", ":")))
+
+if __name__ == "__main__":
+    main()
+"""
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix="_open_cov_runner.py",
+            encoding="utf-8",
+            delete=False,
+        ) as tmp:
+            tmp.write(runner_code)
+            temp_path = tmp.name
+
+        proc = subprocess.run(
+            [sys.executable, temp_path],
+            cwd=str(target_dir),
+            input=input_data,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "target": target_name,
+            "status": "timeout",
+            "bug_signature": None,
+            "covered_branches": 0,
+            "missing_branches": 0,
+            "branch_details_by_file": [],
+        }
+    except Exception as exc:
+        return {
+            "target": target_name,
+            "status": "error",
+            "bug_signature": {
+                "type": "exception",
+                "exception": type(exc).__name__,
+                "message": str(exc),
+                "file": None,
+                "line": None,
+            },
+            "covered_branches": 0,
+            "missing_branches": 0,
+            "branch_details_by_file": [],
+        }
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    payload: dict[str, Any] | None = None
+    try:
+        parsed = json.loads(stdout)
+        payload = parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        payload = None
+
+    if payload is None:
+        bug_sig = _parse_bug_signature(stderr)
+        status = "crash" if proc.returncode != 0 else "error"
+        if bug_sig.get("type") and status == "error":
+            status = "bug"
+        return {
+            "target": target_name,
+            "status": status,
+            "bug_signature": bug_sig if bug_sig.get("type") else None,
+            "covered_branches": 0,
+            "missing_branches": 0,
+            "branch_details_by_file": [],
+        }
+
+    out: dict[str, Any] = {
+        "target": target_name,
+        "status": payload.get("status", "ok"),
+        "bug_signature": payload.get("bug_signature"),
+        "covered_branches": payload.get("covered_branches", 0),
+        "missing_branches": payload.get("missing_branches", 0),
+        "branch_details_by_file": payload.get("branch_details_by_file", []),
+    }
+    return out
+
+
 def run_parser(
     *,
     input_data: bytes | None = None,
@@ -348,6 +469,8 @@ def run_parser(
     timeout: float = DEFAULT_TIMEOUT,
     print_json: bool = False,
     seed_family: str | None = None,
+    enable_open_coverage: bool = False,
+    closed_cwd_override: Path | str | None = None,
 ) -> dict[str, Any]:
     """
     Run fuzzer input against the selected target and return (and optionally print) JSON results.
@@ -355,6 +478,10 @@ def run_parser(
     Provide exactly one of input_data or input_path. If neither is provided, stdin is read.
     target is the target name (key in TARGETS). For closed targets (cidrize-runner, IPv4-IPv6-parser),
     the equivalent open target is also run and its output is returned separately.
+
+    closed_cwd_override: If set, the closed target subprocess uses this directory as cwd (created if
+    needed) so each worker can write logs/bug_counts.csv under a separate tree instead of sharing
+    the canonical target folder.
 
     Returns:
         Dict with:
@@ -408,7 +535,14 @@ def run_parser(
                 print(json.dumps(wrapped), file=sys.stderr)
             return wrapped
 
-        result = run_target(target, target_dir, data, timeout=timeout, seed_family=seed_family)
+        result = run_target(
+            target,
+            target_dir,
+            data,
+            timeout=timeout,
+            seed_family=seed_family,
+            process_cwd=closed_cwd_override,
+        )
 
     # For closed targets, also run the oracle target
     open_name = entry.get("oracle")
@@ -417,13 +551,52 @@ def run_parser(
         open_dir = _TARGETS_BASE / (open_entry["path"] if open_entry and "path" in open_entry else open_name)
         open_dir = open_dir.resolve()
         if open_dir.is_dir():
-            result["open_result"] = run_target(
+            open_result = run_target(
                 open_name,
                 open_dir,
                 data,
                 timeout=timeout,
                 seed_family=seed_family,
             )
+            if enable_open_coverage:
+                coverage_open_result = _run_open_target_with_coverage(
+                    target_name=open_name,
+                    target_dir=open_dir,
+                    input_data=data,
+                    timeout=timeout,
+                )
+                coverage_payload = {
+                    "covered_branches": 0,
+                    "missing_branches": 0,
+                    "branch_details_by_file": [],
+                }
+                if isinstance(coverage_open_result, dict):
+                    coverage_payload = {
+                        "covered_branches": coverage_open_result.get(
+                            "covered_branches", 0
+                        ),
+                        "missing_branches": coverage_open_result.get(
+                            "missing_branches", 0
+                        ),
+                        "branch_details_by_file": coverage_open_result.get(
+                            "branch_details_by_file", []
+                        ),
+                    }
+                open_result.update(coverage_payload)
+                if isinstance(coverage_open_result, dict):
+                    if coverage_open_result.get("status") in {
+                        "ok",
+                        "bug",
+                        "crash",
+                        "timeout",
+                        "error",
+                    }:
+                        open_result["status"] = coverage_open_result["status"]
+                    if coverage_open_result.get("bug_signature") is not None:
+                        open_result["bug_signature"] = coverage_open_result[
+                            "bug_signature"
+                        ]
+            result["open_result"] = open_result
         else:
             result["open_result"] = {
                 "target": open_name,

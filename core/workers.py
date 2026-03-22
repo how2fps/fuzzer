@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import json
 import queue
 import random
 import sqlite3
+import sys
 import threading
 import time
 from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Any, Callable
 
+from tqdm import tqdm
+
 from core.config import FuzzConfig
+from core.fuzzer_logging import get_fuzzer_logger
 from core.db_utils import insert_run, insert_seen_branches, seed_stats_for_power_schedule
+from core.sqlite_conn import open_results_db
 from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
 from isinteresting import get_compute_interestingness
 from core.mutation_utils import generate_unique_mutations, make_discovered_seed
@@ -69,6 +75,10 @@ def run_worker_process(
                 timeout=config["timeout"],
                 print_json=False,
                 seed_family=seed_family,
+                enable_open_coverage=config.get("enable_open_coverage", False),
+                closed_cwd_override=results_folder
+                / ".worker_cwd"
+                / f"w{worker_id}",
             )
         except KeyboardInterrupt:
             # Treat a KeyboardInterrupt inside a worker as a request to stop
@@ -76,7 +86,6 @@ def run_worker_process(
             # be joined or terminated by the parent.
             break
 
-        print(result)
         db_path = results_folder / "runs.db"
 
         score = compute_interestingness_fn(
@@ -107,6 +116,7 @@ def run_worker_process(
                 "bug_signature": closed.get("bug_signature"),
                 "isinteresting_score": score,
                 "signals": signals,
+                "parser_result": result,
             }
         )
 
@@ -154,11 +164,14 @@ def run_fuzzer_multi_worker(
     results_received_count: list[int] = [0]
     consecutive_non_novel_results: list[int] = [0]
     llm_refill_attempts: list[int] = [0]
+    worker_shutdown_grace_seconds = max(5.0, float(config["timeout"]) * 2.0)
+    log = get_fuzzer_logger()
+    max_iterations = config["max_iterations"]
 
     def _try_refill_scheduler_from_llm() -> bool:
         if not config.get("llm_seed_fallback"):
             return False
-        conn_thread = sqlite3.connect(str(db_path))
+        conn_thread = open_results_db(db_path)
         try:
             generated = maybe_generate_seed_candidates(
                 conn=conn_thread,
@@ -194,9 +207,10 @@ def run_fuzzer_multi_worker(
             added_any = True
         if added_any:
             llm_refill_attempts[0] += 1
-            print(
-                f"LLM seed fallback added {len(generated.seeds)} candidate seeds "
-                f"(attempt {llm_refill_attempts[0]})."
+            log.info(
+                "LLM seed fallback added %s candidate seeds (attempt %s).",
+                len(generated.seeds),
+                llm_refill_attempts[0],
             )
         return added_any
 
@@ -241,7 +255,7 @@ def run_fuzzer_multi_worker(
                         break
                     if not scheduler.empty():
                         if current_mutations_left[0] <= 0:
-                            conn_thread = sqlite3.connect(str(db_path))
+                            conn_thread = open_results_db(db_path)
                             try:
                                 stats = seed_stats_for_power_schedule(
                                     corpus=corpus,
@@ -293,8 +307,12 @@ def run_fuzzer_multi_worker(
                                     if scheduler_uses_feedback
                                     else "batch"
                                 )
-                                print(
-                                  f"Scheduled seed {current_scheduled[0].seed.seed_id} with energy {energy} ({len(current_batch)} unique mutations, mode={mode})"
+                                log.info(
+                                    "Scheduled seed %s with energy %s (%s unique mutations, mode=%s)",
+                                    current_scheduled[0].seed.seed_id,
+                                    energy,
+                                    len(current_batch),
+                                    mode,
                                 )
                             finally:
                                 conn_thread.close()
@@ -359,118 +377,165 @@ def run_fuzzer_multi_worker(
         p.start()
 
     results_received = 0
+    last_result_time = time.time()
     batch_scores_by_item: dict[str, list[float]] = {}
     try:
-        while True:
-            try:
-                # Use a timeout so we can periodically check for shutdown
-                # requests even when no new results are arriving.
-                result = result_queue.get(timeout=0.5)
-            except queue.Empty:
-                if shutdown_requested[0]:
-                    break
-                continue
-            except InterruptedError:
-                # System call interrupted by signal; if a shutdown has been
-                # requested, stop waiting for more results.
-                if shutdown_requested[0]:
-                    break
-                continue
-
-            with cond:
-                job_id = result["job_id"]
-                scheduled, iteration = pending.pop(job_id, (None, None))
-                if scheduled is None:
-                    # Should not happen, but avoid crashing on shutdown races.
+        with tqdm(
+            total=max_iterations,
+            unit="iter",
+            desc="Fuzz",
+            dynamic_ncols=True,
+            file=sys.stderr,
+            mininterval=0.25,
+        ) as pbar:
+            while True:
+                try:
+                    # Use a timeout so we can periodically check for shutdown
+                    # requests even when no new results are arriving.
+                    result = result_queue.get(timeout=0.5)
+                except queue.Empty:
+                    if (
+                        total_jobs[0] > 0
+                        and results_received < total_jobs[0]
+                        and (time.time() - last_result_time)
+                        >= worker_shutdown_grace_seconds
+                    ):
+                        log.warning(
+                            "Timed out waiting for remaining worker results; forcing shutdown."
+                        )
+                        break
+                    if shutdown_requested[0]:
+                        break
                     continue
-                item_id = scheduled.item_id
-                score = result["isinteresting_score"]
-                if scheduler_uses_feedback:
-                    scheduler.update(
-                        scheduled,
-                        isinteresting_score=score,
-                        signals=result["signals"],
-                    )
-                else:
-                    batch_scores_by_item.setdefault(item_id, []).append(score)
-                    expected = batch_expected.get(item_id, 1)
-                    if len(batch_scores_by_item[item_id]) >= expected:
-                        batch_scores_by_item.pop(item_id, [])
-                        batch_expected.pop(item_id, None)
-            insert_run(
-                conn,
-                iteration=iteration,
-                seed_id=result["seed_id"],
-                seed_text=result["seed_text"],
-                mutated_input=result["mutated_input"],
-                status=result["status"],
-                bug_signature=result["bug_signature"],
-                isinteresting_score=result["isinteresting_score"],
-                target=effective_target,
-            )
-            with cond:
-                if (
-                    result["isinteresting_score"] > 0
-                    and result["mutated_input"] not in added_seed_inputs_holder[0]
-                ):
-                    parent_signals = (result.get("signals") or {}).copy()
-                    parent_bucket = parent_signals.get("bucket", "discovered")
-                    candidate = make_discovered_seed(
-                        result["mutated_input"],
-                        family,
-                        parent_bucket,
-                        next_discovered_ordinal_holder[0],
-                    )
-                    candidate_metadata: dict[str, Any] = {
-                        "bucket": candidate.bucket,
-                        "parent_seed_id": result["seed_id"],
-                    }
-                    if parent_signals:
-                        candidate_metadata["signals"] = parent_signals
-                    if scheduler_uses_feedback and config["ucb_trace"]:
-                        candidate_metadata["_ucb_trace"] = True
-                    scheduler.add(candidate, metadata=candidate_metadata)
-                    added_seed_inputs_holder[0].add(result["mutated_input"])
-                    next_discovered_ordinal_holder[0] += 1
-                    cond.notify()
-            if any(
-                bool((result.get("signals") or {}).get(key))
-                for key in ("new_coverage", "new_bug", "new_differential_behavior")
-            ):
-                consecutive_non_novel_results[0] = 0
-            else:
-                consecutive_non_novel_results[0] += 1
-            if (
-                config.get("llm_seed_fallback")
-                and config.get("llm_seed_stagnation_threshold", 0) > 0
-                and consecutive_non_novel_results[0]
-                >= config["llm_seed_stagnation_threshold"]
-            ):
+                except InterruptedError:
+                    # System call interrupted by signal; if a shutdown has been
+                    # requested, stop waiting for more results.
+                    if shutdown_requested[0]:
+                        break
+                    continue
+
                 with cond:
-                    if _try_refill_scheduler_from_llm():
-                        consecutive_non_novel_results[0] = 0
-                        cond.notify_all()
-            results_received += 1
-            with cond:
-                results_received_count[0] = results_received
-                cond.notify()
-            if iteration:
-                print(
-                    f"[iter {iteration}] seed={result['seed_id']} "
-                    f"score={result['isinteresting_score']:.3f} status={result['status']} input={result['seed_text']} mutated input={result['mutated_input']}"
+                    job_id = result["job_id"]
+                    scheduled, iteration = pending.pop(job_id, (None, None))
+                    if scheduled is None:
+                        # Should not happen, but avoid crashing on shutdown races.
+                        continue
+                    item_id = scheduled.item_id
+                    score = result["isinteresting_score"]
+                    if scheduler_uses_feedback:
+                        scheduler.update(
+                            scheduled,
+                            isinteresting_score=score,
+                            signals=result["signals"],
+                        )
+                    else:
+                        batch_scores_by_item.setdefault(item_id, []).append(score)
+                        expected = batch_expected.get(item_id, 1)
+                        if len(batch_scores_by_item[item_id]) >= expected:
+                            batch_scores_by_item.pop(item_id, [])
+                            batch_expected.pop(item_id, None)
+                parser_result = result.pop("parser_result", None)
+                insert_run(
+                    conn,
+                    iteration=iteration,
+                    seed_id=result["seed_id"],
+                    seed_text=result["seed_text"],
+                    mutated_input=result["mutated_input"],
+                    status=result["status"],
+                    bug_signature=result["bug_signature"],
+                    isinteresting_score=result["isinteresting_score"],
+                    target=effective_target,
                 )
-            if scheduler_uses_feedback and config["ucb_debug_tree"]:
-                print(scheduler.render_tree(limit=12))
-            if total_jobs[0] > 0 and results_received >= total_jobs[0]:
-                break
-            if shutdown_requested[0]:
-                # On explicit shutdown (Ctrl+C), stop waiting for any
-                # remaining in-flight work; we'll tear down workers below.
-                break
+                with cond:
+                    if (
+                        result["isinteresting_score"] > 0
+                        and result["mutated_input"] not in added_seed_inputs_holder[0]
+                    ):
+                        parent_signals = (result.get("signals") or {}).copy()
+                        parent_bucket = parent_signals.get("bucket", "discovered")
+                        candidate = make_discovered_seed(
+                            result["mutated_input"],
+                            family,
+                            parent_bucket,
+                            next_discovered_ordinal_holder[0],
+                        )
+                        candidate_metadata: dict[str, Any] = {
+                            "bucket": candidate.bucket,
+                            "parent_seed_id": result["seed_id"],
+                        }
+                        if parent_signals:
+                            candidate_metadata["signals"] = parent_signals
+                        if scheduler_uses_feedback and config["ucb_trace"]:
+                            candidate_metadata["_ucb_trace"] = True
+                        scheduler.add(candidate, metadata=candidate_metadata)
+                        added_seed_inputs_holder[0].add(result["mutated_input"])
+                        next_discovered_ordinal_holder[0] += 1
+                        cond.notify()
+                if any(
+                    bool((result.get("signals") or {}).get(key))
+                    for key in (
+                        "new_coverage",
+                        "new_bug",
+                        "new_differential_behavior",
+                    )
+                ):
+                    consecutive_non_novel_results[0] = 0
+                else:
+                    consecutive_non_novel_results[0] += 1
+                if (
+                    config.get("llm_seed_fallback")
+                    and config.get("llm_seed_stagnation_threshold", 0) > 0
+                    and consecutive_non_novel_results[0]
+                    >= config["llm_seed_stagnation_threshold"]
+                ):
+                    with cond:
+                        if _try_refill_scheduler_from_llm():
+                            consecutive_non_novel_results[0] = 0
+                            cond.notify_all()
+                results_received += 1
+                last_result_time = time.time()
+                with cond:
+                    results_received_count[0] = results_received
+                    cond.notify()
+
+                if parser_result is not None:
+                    try:
+                        log.info(
+                            "%s",
+                            json.dumps(parser_result, default=str, sort_keys=True),
+                        )
+                    except (TypeError, ValueError):
+                        log.info("%s", repr(parser_result))
+                log.info(
+                    "[iter %s] seed=%s score=%.3f status=%s input=%s mutated input=%s",
+                    iteration,
+                    result["seed_id"],
+                    result["isinteresting_score"],
+                    result["status"],
+                    result["seed_text"],
+                    result["mutated_input"],
+                )
+                if scheduler_uses_feedback and config["ucb_debug_tree"]:
+                    log.info("%s", scheduler.render_tree(limit=12))
+                pbar.update(1)
+                if total_jobs[0] > 0 and results_received >= total_jobs[0]:
+                    break
+                if shutdown_requested[0]:
+                    # On explicit shutdown (Ctrl+C), stop waiting for any
+                    # remaining in-flight work; we'll tear down workers below.
+                    break
     finally:
         request_thread.join(timeout=1.0)
         for p in procs:
             if p.is_alive():
                 p.terminate()
         for p in procs:
-            p.join()
+            p.join(timeout=worker_shutdown_grace_seconds)
+            if not p.is_alive():
+                continue
+            log.warning(
+                "Worker process pid=%s did not exit after terminate(); killing.",
+                p.pid,
+            )
+            p.kill()
+            p.join(timeout=1.0)

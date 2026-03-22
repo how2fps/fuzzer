@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from core.sqlite_conn import open_results_db
+
 
 def _as_mapping(value: Any) -> Mapping[str, Any] | None:
     if isinstance(value, Mapping):
@@ -118,7 +120,31 @@ def get_covered_edges_from_result(result: Mapping[str, Any]) -> set[tuple[str, i
     closed = _as_mapping(closed_raw)
     if closed is None:
         return set()
-    return _get_covered_edges(closed)
+    open_raw = result.get("open_result") if isinstance(result, Mapping) else None
+    open_res = _as_mapping(open_raw) if open_raw is not None else None
+    coverage_source = _select_coverage_source(closed=closed, open_res=open_res)
+    return _get_covered_edges(coverage_source)
+
+
+def _has_coverage_fields(value: Mapping[str, Any] | None) -> bool:
+    if value is None:
+        return False
+    covered = value.get("covered_branches")
+    missing = value.get("missing_branches")
+    details = value.get("branch_details_by_file")
+    return covered is not None and missing is not None and isinstance(details, Sequence)
+
+
+def _select_coverage_source(
+    *,
+    closed: Mapping[str, Any],
+    open_res: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    if _has_coverage_fields(closed):
+        return closed
+    if _has_coverage_fields(open_res):
+        return open_res
+    return closed
 
 
 def _get_covered_edges(closed: Mapping[str, Any]) -> set[tuple[str, int, int]]:
@@ -244,8 +270,9 @@ def compute_interestingness(
     closed_bug = _as_mapping(closed.get("bug_signature"))
     open_bug = _as_mapping(open_res.get("bug_signature")) if open_res else None
 
-    covered_branches = closed.get("covered_branches")
-    missing_branches = closed.get("missing_branches")
+    coverage_source = _select_coverage_source(closed=closed, open_res=open_res)
+    covered_branches = coverage_source.get("covered_branches")
+    missing_branches = coverage_source.get("missing_branches")
 
     s_status = _status_score(closed_status=closed_status)
     s_diff = _differential_score(
@@ -258,20 +285,27 @@ def compute_interestingness(
         covered_branches=covered_branches,
         missing_branches=missing_branches,
     )
-    score = max(s_status, s_diff, s_cov, 0.0)
+    # Additive scoring: combine all available signals instead of taking only
+    # the strongest one. This makes cumulative evidence matter.
+    metric_sum = s_status + s_diff + s_cov
+    metric_max = 3.0
 
     if db_path and Path(db_path).exists():
         path = Path(db_path) if isinstance(db_path, str) else db_path
         try:
-            conn = sqlite3.connect(str(path))
+            conn = open_results_db(path)
             try:
-                edges = _get_covered_edges(closed)
+                edges = _get_covered_edges(coverage_source)
                 s_new = _new_edges_score(conn, edges)
                 s_rare = _rare_bug_score(conn, closed_status, closed_bug, target)
-                score *= max(score, s_new, s_rare * 0.9, 0.0)
+                metric_sum += s_new + (s_rare * 0.9)
+                metric_max += 1.9
             finally:
                 conn.close()
         except (sqlite3.Error, OSError):
             pass
 
+    if metric_max <= 0.0:
+        return 0.0
+    score = metric_sum / metric_max
     return max(0.0, min(1.0, float(score)))

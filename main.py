@@ -4,12 +4,15 @@ from datetime import datetime, timezone
 from multiprocessing import current_process
 
 from core.config import get_run_plan, print_config
+from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
 from core.fuzzer_runner import run_fuzzer
 from core.paths import RESULTS_DIR
 from core.batch_report import generate_batch_report
 
 
 def main() -> None:
+    configure_fuzzer_logging()
+    log = get_fuzzer_logger()
     entries, runs_per_config = get_run_plan()
     batch_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     batch_folder = RESULTS_DIR / f"batch_{batch_timestamp}"
@@ -23,9 +26,14 @@ def main() -> None:
             run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             run_folder = config_folder / f"run_{run_index + 1}_{run_timestamp}"
             if runs_per_config > 1:
-                print(f"\n--- Run {run_index + 1}/{runs_per_config} for config: {config_path or 'CLI'} ---")
+                log.info(
+                    "--- Run %s/%s for config: %s ---",
+                    run_index + 1,
+                    runs_per_config,
+                    config_path or "CLI",
+                )
             elif config_path:
-                print(f"\n--- Config: {config_path} ---")
+                log.info("--- Config: %s ---", config_path)
             print_config(config)
             run_fuzzer(config, results_folder=run_folder, config_path=config_path)
 

@@ -3,12 +3,13 @@ from __future__ import annotations
 import csv
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 from core.db_utils import get_inputs_for_unique_error_line_pairs
+from core.fuzzer_logging import get_fuzzer_logger
+from core.sqlite_conn import open_results_db
 from core.paths import JSON_DECODER_STV_SCRIPT, JSON_DECODER_TARGET_DIR
 from core.target_artifacts import copy_bug_counts_csv_if_present
 
@@ -19,8 +20,8 @@ def export_results(
     db_path: Path,
     target: str,
 ) -> None:
-    print(f"Exporting results to {results_folder}")
-    conn = sqlite3.connect(str(db_path))
+    get_fuzzer_logger().info("Exporting results to %s", results_folder)
+    conn = open_results_db(db_path)
     try:
         pairs = get_inputs_for_unique_error_line_pairs(conn)
         pairs_path = results_folder / "unique_error_line_pairs.csv"
@@ -55,7 +56,9 @@ def export_results(
         conn.close()
 
     if target == "json-decoder" and JSON_DECODER_STV_SCRIPT.is_file():
-        print("Running json_decoder_stv.py with for each input that triggered a unique (error, line)")
+        get_fuzzer_logger().info(
+            "Running json_decoder_stv.py for each input that triggered a unique (error, line)"
+        )
         stv_logs_dir = JSON_DECODER_TARGET_DIR / "logs"
         stv_logs_dir.mkdir(parents=True, exist_ok=True)
         stv_csv = stv_logs_dir / "bug_counts.csv"
@@ -64,8 +67,10 @@ def export_results(
         coverage_file = str(
             (results_folder / ".coverage_buggy_json").resolve())
         for rec in pairs:
-            print(
-                f"Running json_decoder_stv.py with input: {rec.get('mutated_input')}")
+            get_fuzzer_logger().info(
+                "Running json_decoder_stv.py with input: %s",
+                rec.get("mutated_input"),
+            )
             input_text = rec.get("mutated_input") or ""
             if not input_text:
                 continue
@@ -88,7 +93,7 @@ def export_results(
                 text=True,
             )
             if proc.returncode != 0 and proc.stderr:
-                print(f"STV script stderr: {proc.stderr}", file=sys.stderr)
+                get_fuzzer_logger().warning("STV script stderr: %s", proc.stderr)
 
     copy_bug_counts_csv_if_present(target=target, results_folder=results_folder)
 
