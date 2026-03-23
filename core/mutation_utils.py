@@ -23,14 +23,16 @@ def initial_scheduler_seeds(
     preload_mode: str,
     preload_total: int,
     rng: random.Random,
+    bucket_ratios: dict[str, float] | None = None,
 ) -> list[Seed]:
+    ratios = bucket_ratios if bucket_ratios is not None else DEFAULT_PRELOAD_BUCKET_RATIOS
     if preload_mode == "full":
         return list(corpus.target(target).seeds)
     if preload_mode == "ratio_batch":
         return corpus.sample_ratio_batch(
             target,
             total=preload_total,
-            bucket_ratios=DEFAULT_PRELOAD_BUCKET_RATIOS,
+            bucket_ratios=ratios,
             rng=rng,
             shuffle=True,
         )

@@ -1,19 +1,20 @@
 {
   "target": "IPv4-IPv6-parser",
-  "scheduler_kind": "heap",
+  "scheduler_kind": "thompson",
   "mutator_kind": "auto",
-  "seed_preload_mode": "full",
-  "seed_preload_total": 50,
+  "seed_preload_mode": "ratio_batch",
+  "seed_preload_total": 10,
   "ucb_trace": false,
   "ucb_debug_tree": false,
-  "max_iterations": 10000,
-  "max_hours": null,
-  "timeout": 600.0,
+  "max_iterations": null,
+  "max_hours": 4,
+  "timeout": 60.0,
   "rng_seed": 42,
-  "workers": 1,
+  "workers": 8,
   "isinteresting_version": "base",
   "mutator_version": "base",
   "parser_version": "base",
   "power_scheduler_version": "base",
-  "seed_corpus_version": "base"
+  "seed_corpus_version": "base",
+  "enable_open_coverage": true
 }

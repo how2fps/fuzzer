@@ -13,6 +13,7 @@ from power_scheduler import list_versions as power_scheduler_versions
 from seed_corpus import list_versions as seed_corpus_versions
 from seed_scheduler import list_versions as scheduler_versions
 
+from core.mutation_utils import DEFAULT_PRELOAD_BUCKET_RATIOS
 from core.paths import CONFIGS_DIR
 
 ENABLE_OPEN_COVERAGE: bool = False
@@ -25,6 +26,8 @@ class FuzzConfig(TypedDict):
     debug_mode: bool
     seed_preload_mode: str
     seed_preload_total: int
+    seed_preload_bucket_ratios: dict[str, float]
+    seed_corpus_initial_draw: str | None
     ucb_trace: bool
     ucb_debug_tree: bool
     max_iterations: int | None
@@ -53,6 +56,8 @@ def get_default_config() -> FuzzConfig:
         "debug_mode": False,
         "seed_preload_mode": "full",
         "seed_preload_total": 50,
+        "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
+        "seed_corpus_initial_draw": None,
         "ucb_trace": False,
         "ucb_debug_tree": False,
         "max_iterations": 10,
@@ -93,8 +98,26 @@ def _validate_config(config: FuzzConfig) -> None:
             f"Invalid seed_preload_mode: {config['seed_preload_mode']}. "
             "Must be full, ratio_batch, or sample."
         )
+    draw = config["seed_corpus_initial_draw"]
+    if draw is not None and draw not in ("bucketed", "random", "full"):
+        raise ValueError(
+            f"Invalid seed_corpus_initial_draw: {draw!r}. "
+            "Must be null, bucketed, random, or full."
+        )
     if config["seed_preload_total"] <= 0:
         raise ValueError("seed_preload_total must be positive.")
+    ratios = config["seed_preload_bucket_ratios"]
+    if not isinstance(ratios, dict) or not ratios:
+        raise ValueError("seed_preload_bucket_ratios must be a non-empty object.")
+    for name, weight in ratios.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("seed_preload_bucket_ratios keys must be non-empty strings.")
+        if not isinstance(weight, (int, float)) or weight < 0:
+            raise ValueError(
+                f"seed_preload_bucket_ratios[{name!r}] must be a non-negative number."
+            )
+    if sum(float(v) for v in ratios.values()) <= 0:
+        raise ValueError("sum of seed_preload_bucket_ratios values must be > 0.")
     if config["max_hours"] is not None and config["max_iterations"] is not None:
         raise ValueError("Cannot set both max_iterations and max_hours.")
     if config["max_hours"] is not None and config["max_hours"] <= 0:
@@ -139,6 +162,14 @@ def load_config_from_file(path: Path) -> FuzzConfig:
     # Normalize: if max_hours is set, clear max_iterations
     if merged.get("max_hours"):
         merged["max_iterations"] = None
+    # Friendly alias: bucketed -> ratio_batch, random -> sample for initial corpus draw
+    if merged["seed_corpus_initial_draw"] is not None:
+        _draw_map = {
+            "bucketed": "ratio_batch",
+            "random": "sample",
+            "full": "full",
+        }
+        merged["seed_preload_mode"] = _draw_map[merged["seed_corpus_initial_draw"]]
     _validate_config(merged)
     return merged
 
@@ -390,6 +421,8 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "llm_seed_min_candidates": args.llm_seed_min_candidates,
         "llm_seed_max_candidates": args.llm_seed_max_candidates,
         "enable_open_coverage": args.enable_open_coverage,
+        "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
+        "seed_corpus_initial_draw": None,
     }
 
     if args.config is not None:
@@ -431,6 +464,10 @@ def print_config(config: FuzzConfig) -> None:
     log.info("  scheduler_kind: %s", config["scheduler_kind"])
     log.info("  mutator_kind: %s", config["mutator_kind"])
     log.info("  debug_mode: %s", config["debug_mode"])
+    log.info("  seed_corpus_initial_draw: %s", config["seed_corpus_initial_draw"])
+    log.info("  seed_preload_mode: %s", config["seed_preload_mode"])
+    log.info("  seed_preload_total: %s", config["seed_preload_total"])
+    log.info("  seed_preload_bucket_ratios: %s", config["seed_preload_bucket_ratios"])
     log.info("  ucb_trace: %s", config["ucb_trace"])
     log.info("  ucb_debug_tree: %s", config["ucb_debug_tree"])
     log.info("  max_iterations: %s", config["max_iterations"])

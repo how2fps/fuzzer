@@ -57,6 +57,7 @@ def run_fuzzer(
         preload_mode=config["seed_preload_mode"],
         preload_total=config["seed_preload_total"],
         rng=rng,
+        bucket_ratios=config["seed_preload_bucket_ratios"],
     )
     for seed in initial_seeds:
         metadata: dict[str, Any] = {
