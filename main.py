@@ -1,15 +1,54 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from multiprocessing import current_process
 
-from core.config import build_config, print_config
+from core.config import get_run_plan, is_debug_run, print_config
+from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
 from core.fuzzer_runner import run_fuzzer
+from core.live_ui import console, render_config_panel
+from core.paths import RESULTS_DIR
+from core.batch_report import generate_batch_report
 
 
 def main() -> None:
-    config = build_config()
-    print_config(config)
-    run_fuzzer(config)
+    configure_fuzzer_logging()
+    log = get_fuzzer_logger()
+    entries, runs_per_config = get_run_plan()
+    batch_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    batch_folder = RESULTS_DIR / f"batch_{batch_timestamp}"
+    batch_folder.mkdir(parents=True, exist_ok=True)
+
+    for config_path, config in entries:
+        config_label = config_path.stem if config_path is not None else "cli"
+        config_folder = batch_folder / config_label
+        config_folder.mkdir(parents=True, exist_ok=True)
+        for run_index in range(runs_per_config):
+            run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            run_folder = config_folder / f"run_{run_index + 1}_{run_timestamp}"
+            if runs_per_config > 1:
+                log.info(
+                    "--- Run %s/%s for config: %s ---",
+                    run_index + 1,
+                    runs_per_config,
+                    config_path or "CLI",
+                )
+            elif config_path:
+                log.info("--- Config: %s ---", config_path)
+            if is_debug_run(config):
+                print_config(config)
+            else:
+                console.print(
+                    render_config_panel(
+                        config=config,
+                        config_label=config_label,
+                        run_index=run_index + 1,
+                        total_runs=runs_per_config,
+                    )
+                )
+            run_fuzzer(config, results_folder=run_folder, config_path=config_path)
+
+    generate_batch_report(batch_folder=batch_folder)
 
 
 if __name__ == "__main__":

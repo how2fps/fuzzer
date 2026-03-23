@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import heapq
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from seed_corpus import Seed
 
@@ -101,6 +101,15 @@ class HeapScheduler(BaseSeedScheduler):
             "priority_order": items,
             "truncated": len(self._items) > len(items),
         }
+
+    def complete_batch(self, item: ScheduledSeed, *, batch_scores: Sequence[float]) -> None:
+        if batch_scores:
+            n = len(batch_scores)
+            item.updates += n
+            item.total_isinteresting_score += float(sum(batch_scores))
+            item.last_isinteresting_score = float(batch_scores[-1])
+        item.priority = self._compute_priority(item)
+        self._push_heap(item)
 
     def _compute_priority(self, item: ScheduledSeed) -> float:
         """Compute an item's effective priority from bucket bias and score history."""

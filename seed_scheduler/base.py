@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Sequence
 
 from seed_corpus import Seed
 
@@ -42,3 +42,35 @@ class BaseSeedScheduler(ABC):
         Concrete schedulers can override with scheduler-specific structure.
         """
         return {"stats": self.stats(), "note": "debug_dump not implemented"}
+
+    def supports_feedback_updates(self) -> bool:
+        """Return True for schedulers that expect per-mutation `update(...)` calls."""
+        return False
+
+    def complete_batch(
+        self, item: ScheduledSeed, *, batch_scores: Sequence[float]
+    ) -> None:
+        """
+        Re-queue a seed after a non-feedback (batch) lease finishes.
+
+        Queue/heap schedulers pop items in `next()` and must put them back here.
+        Feedback schedulers use `update(...)` per mutation instead; default is no-op.
+        """
+        return
+
+    def update(
+        self,
+        item: ScheduledSeed,
+        *,
+        isinteresting_score: float,
+        signals: dict[str, Any] | None = None,
+    ) -> ScheduledSeed:
+        """
+        Optional per-mutation feedback hook.
+
+        Feedback-driven schedulers should override this method and return the
+        updated scheduled item.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support feedback updates"
+        )

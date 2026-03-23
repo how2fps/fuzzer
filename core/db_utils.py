@@ -9,6 +9,8 @@ from typing import Any
 from isinteresting import get_covered_edges_from_result
 from power_scheduler import SeedStats
 
+from core.sqlite_conn import open_results_db
+
 
 def get_seed_stats_from_db(
     conn: sqlite3.Connection,
@@ -111,6 +113,12 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (file, from_line, to_line)
         )
     """)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_runs_mutated_input_target
+        ON runs (mutated_input, target)
+        """
+    )
     conn.commit()
 
 
@@ -170,6 +178,25 @@ def input_already_run(
     return cur.fetchone() is not None
 
 
+def insert_seen_branches_into_conn(
+    conn: sqlite3.Connection,
+    result: dict[str, Any],
+) -> None:
+    """Insert covered branches from the parser result using an existing connection."""
+    edges = get_covered_edges_from_result(result)
+    if not edges:
+        return
+    try:
+        for (f, fl, tl) in edges:
+            conn.execute(
+                "INSERT OR IGNORE INTO seen_branches (file, from_line, to_line) VALUES (?, ?, ?)",
+                (f, fl, tl),
+            )
+        conn.commit()
+    except (sqlite3.Error, OSError):
+        pass
+
+
 def insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
     """Insert covered branches from the parser result into seen_branches."""
     edges = get_covered_edges_from_result(result)
@@ -179,14 +206,9 @@ def insert_seen_branches(db_path: Path | str, result: dict[str, Any]) -> None:
     if not path.exists():
         return
     try:
-        conn = sqlite3.connect(str(path))
+        conn = open_results_db(path)
         try:
-            for (f, fl, tl) in edges:
-                conn.execute(
-                    "INSERT OR IGNORE INTO seen_branches (file, from_line, to_line) VALUES (?, ?, ?)",
-                    (f, fl, tl),
-                )
-            conn.commit()
+            insert_seen_branches_into_conn(conn, result)
         finally:
             conn.close()
     except (sqlite3.Error, OSError):
@@ -202,7 +224,8 @@ def get_inputs_for_unique_error_line_pairs(
     """
     cur = conn.execute("""
         SELECT exception, line, file, bug_type,
-               seed_id, seed_text, mutated_input, status, iteration, isinteresting_score
+               seed_id, seed_text, mutated_input, status, iteration, isinteresting_score,
+               created_at
         FROM runs
         WHERE status IN ('bug', 'crash', 'timeout') AND (exception IS NOT NULL OR line IS NOT NULL)
         ORDER BY exception, line
@@ -211,7 +234,19 @@ def get_inputs_for_unique_error_line_pairs(
     seen: set[tuple[str | None, int | None]] = set()
     out: list[dict[str, Any]] = []
     for row in rows:
-        exc, line, file_, bug_type, seed_id, seed_text, mutated_input, status, iteration, score = row
+        (
+            exc,
+            line,
+            file_,
+            bug_type,
+            seed_id,
+            seed_text,
+            mutated_input,
+            status,
+            iteration,
+            score,
+            created_at,
+        ) = row
         key = (exc, line)
         if key in seen:
             continue
@@ -227,6 +262,170 @@ def get_inputs_for_unique_error_line_pairs(
             "status": status,
             "iteration": iteration,
             "isinteresting_score": score,
+            "datetime_executed": created_at,
         })
     return out
 
+
+def get_run_summary(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+) -> dict[str, Any]:
+    total_results = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE target = ?",
+            (target,),
+        ).fetchone()[0]
+    )
+    interesting_results = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE target = ? AND COALESCE(isinteresting_score, 0) > 0",
+            (target,),
+        ).fetchone()[0]
+    )
+
+    status_counts = {
+        str(status or "unknown"): int(count)
+        for status, count in conn.execute(
+            """
+            SELECT COALESCE(status, 'unknown'), COUNT(*)
+            FROM runs
+            WHERE target = ?
+            GROUP BY COALESCE(status, 'unknown')
+            """,
+            (target,),
+        ).fetchall()
+    }
+
+    unique_bug_count = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT
+                    COALESCE(status, ''),
+                    COALESCE(bug_type, ''),
+                    COALESCE(exception, ''),
+                    COALESCE(file, ''),
+                    COALESCE(line, -1)
+                FROM runs
+                WHERE target = ? AND COALESCE(status, '') IN ('bug', 'crash', 'timeout', 'error')
+            )
+            """,
+            (target,),
+        ).fetchone()[0]
+    )
+
+    bug_type_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(bug_type, ''), NULLIF(exception, ''), NULLIF(status, ''), 'unknown') AS label,
+            COUNT(*) AS occurrences
+        FROM runs
+        WHERE target = ? AND COALESCE(status, '') IN ('bug', 'crash', 'timeout', 'error')
+        GROUP BY label
+        ORDER BY occurrences DESC, label ASC
+        LIMIT 8
+        """,
+        (target,),
+    ).fetchall()
+
+    return {
+        "total_results": total_results,
+        "interesting_results": interesting_results,
+        "status_counts": status_counts,
+        "unique_bug_count": unique_bug_count,
+        "bug_types": [
+            {"label": str(label), "count": int(count)}
+            for label, count in bug_type_rows
+        ],
+    }
+
+
+def _dedupe_text_rows(rows: list[tuple[Any, ...]], *, limit: int) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not row:
+            continue
+        text = row[0]
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def get_seed_generation_context(
+    *,
+    conn: sqlite3.Connection,
+    corpus: Any,
+    target: str,
+    interesting_limit: int = 10,
+    not_interesting_limit: int = 10,
+    fuzzed_limit: int = 20,
+) -> dict[str, list[str]]:
+    target_set = corpus.target(target)
+    top_interesting_rows = conn.execute(
+        """
+        SELECT mutated_input
+        FROM runs
+        WHERE target = ? AND isinteresting_score > 0
+        ORDER BY isinteresting_score DESC, iteration DESC
+        LIMIT ?
+        """,
+        (target, interesting_limit * 5),
+    ).fetchall()
+    not_interesting_rows = conn.execute(
+        """
+        SELECT mutated_input
+        FROM runs
+        WHERE target = ? AND COALESCE(isinteresting_score, 0) <= 0
+        ORDER BY iteration DESC
+        LIMIT ?
+        """,
+        (target, not_interesting_limit * 5),
+    ).fetchall()
+    already_fuzzed_rows = conn.execute(
+        """
+        SELECT mutated_input
+        FROM runs
+        WHERE target = ?
+        ORDER BY iteration DESC
+        LIMIT ?
+        """,
+        (target, fuzzed_limit * 5),
+    ).fetchall()
+
+    top_interesting = _dedupe_text_rows(top_interesting_rows, limit=interesting_limit)
+    not_interesting = _dedupe_text_rows(
+        not_interesting_rows,
+        limit=not_interesting_limit,
+    )
+    already_fuzzed = _dedupe_text_rows(already_fuzzed_rows, limit=fuzzed_limit)
+
+    if len(already_fuzzed) < fuzzed_limit:
+        for seed in target_set.seeds:
+            if seed.text not in already_fuzzed:
+                already_fuzzed.append(seed.text)
+            if len(already_fuzzed) >= fuzzed_limit:
+                break
+
+    if not top_interesting:
+        for seed in target_set.seeds[:interesting_limit]:
+            top_interesting.append(seed.text)
+
+    if not not_interesting:
+        fallback = [text for text in already_fuzzed if text not in top_interesting]
+        not_interesting.extend(fallback[:not_interesting_limit])
+
+    return {
+        "top_interesting_seeds": top_interesting[:interesting_limit],
+        "not_interesting_seeds": not_interesting[:not_interesting_limit],
+        "already_fuzzed_seeds": already_fuzzed[:fuzzed_limit],
+    }

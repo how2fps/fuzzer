@@ -39,6 +39,9 @@ python main.py --help
 | `--parser-version` | `base` | Parser module version (for ablation). |
 | `--power-scheduler-version` | `base` | Power scheduler module version (for ablation). |
 | `--seed-corpus-version` | `base` | Seed corpus module version (for ablation). |
+| `--config PATH` | (none) | Run a single JSON config file (see `configs/_template.json`). |
+| `--configs-dir [DIR]` | (none) | Run all `.json` configs in `DIR`. If `DIR` is omitted, defaults to `configs/`. Config files starting with `_` are ignored. |
+| `--runs` | `1` | When using `--config` or `--configs-dir`, run each config this many times. |
 
 ### Examples
 
@@ -60,11 +63,22 @@ python main.py --timeout 5.0
 
 # Multi-process fuzzing with 4 workers
 python main.py --workers 4 --iterations 50000
+
+# Run one config file
+python main.py --config configs/my_run.json
+
+# Run one config file 5 times
+python main.py --config configs/my_run.json --runs 5
+
+# Run all configs in configs/ 3 times each
+python main.py --configs-dir --runs 3
 ```
 
 ## Results
 
-After each run, a new folder is created under `results/` named:
+### Single runs (CLI-only)
+
+When running without `--config` / `--configs-dir`, a new folder is created under `results/` named:
 
 ```
 results/<target>_<timestamp>/
@@ -74,9 +88,31 @@ For example: `results/json-decoder_20250301_143022/`
 
 Contents:
 
+- **`config.json`** — The config used for this run (resolved from CLI defaults + flags).
 - **`runs.db`** — SQLite database of every iteration (seed id, seed text, mutated input, status, bug_type, exception, line, scores, etc.).
 - **`runs.csv`** — Full export of `runs` as CSV.
 - **`unique_error_line_pairs.csv`** — One row per unique (exception, line) pair that triggered a bug/crash/timeout, with a representative input.
-- **`bug_counts.csv`** — (json-decoder only) Copy of the bug-counts CSV produced by rerunning `json_decoder_stv.py` with `--show-coverage` on the representative inputs.
+- **`bug_counts.csv`** — Merged from per-worker `logs/bug_counts.csv` under `.worker_cwd/` when present, otherwise copied from the target’s canonical `logs/` (same flow for json-decoder and binary targets). Json-decoder counts are updated during each fuzz iteration (no STV rerun at export).
+
+### Batch runs (configs)
+
+When running with `--config` or `--configs-dir`, a **batch folder** is created under `results/`:
+
+```
+results/batch_<timestamp>/
+```
+
+Inside it, each config gets its own folder and each repeated run gets a subfolder:
+
+```
+results/batch_<timestamp>/<config_label>/run_<n>_<timestamp>/
+```
+
+Each run subfolder contains the same artifacts as a single run (including `config.json`).
+
+After the full run plan finishes, an overview report is written into the batch folder:
+
+- **`report.html`** — charts + tables comparing configs
+- **`report.json`** — raw aggregated metrics used by the report
 
 Run from the repository root so that imports (`isinteresting`, `mutator`, `parser`, etc.) resolve correctly.

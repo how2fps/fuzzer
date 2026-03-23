@@ -11,6 +11,9 @@ from typing import Any
 from isinteresting import get_covered_edges_from_result
 from seed_corpus import Seed
 
+from core.fuzzer_logging import get_fuzzer_logger
+from core.sqlite_conn import open_results_db
+
 from .base import BaseSeedScheduler
 from .types import ScheduledSeed
 
@@ -133,34 +136,58 @@ def _closed_status(result: dict[str, Any]) -> str:
     return str(status).strip().lower() if isinstance(status, str) else ""
 
 
-def _has_new_coverage(db_path: Path | str, result: dict[str, Any]) -> bool:
+def _has_new_coverage(
+    db_path: Path | str,
+    result: dict[str, Any],
+    *,
+    sqlite_conn: sqlite3.Connection | None = None,
+) -> bool:
     """Return True if the current result covers any edge not yet in seen_branches."""
     edges = get_covered_edges_from_result(result)
     if not edges:
         return False
+
+    def _any_new(conn: sqlite3.Connection) -> bool:
+        try:
+            for f, fl, tl in edges:
+                row = conn.execute(
+                    "SELECT 1 FROM seen_branches WHERE file = ? AND from_line = ? AND to_line = ? LIMIT 1",
+                    (f, fl, tl),
+                ).fetchone()
+                if row is None:
+                    return True
+            return False
+        except sqlite3.OperationalError:
+            return False
+
+    if sqlite_conn is not None:
+        return _any_new(sqlite_conn)
+
     path = Path(db_path) if isinstance(db_path, str) else db_path
     if not path.exists():
         return False
     try:
-        conn = sqlite3.connect(str(path))
+        conn = open_results_db(path)
         try:
-            seen: set[tuple[str, int, int]] = set()
-            cur = conn.execute("SELECT file, from_line, to_line FROM seen_branches")
-            for row in cur:
-                seen.add((str(row[0]), int(row[1]), int(row[2])))
-            return bool(edges - seen)
+            return _any_new(conn)
         finally:
             conn.close()
     except (sqlite3.Error, OSError):
         return False
 
 
-def _has_new_bug(db_path: Path | str, result: dict[str, Any], target: str) -> bool:
+def _has_new_bug(
+    db_path: Path | str,
+    result: dict[str, Any],
+    target: str,
+    *,
+    sqlite_conn: sqlite3.Connection | None = None,
+) -> bool:
     """Return True if the current bug/crash signature has not appeared before for this target."""
-    closed = result.get("closed_result", {})
     status = _closed_status(result)
     if status not in {"bug", "crash", "timeout", "error"}:
         return False
+    closed = result.get("closed_result", {})
     bug_signature = closed.get("bug_signature") or {}
     if not isinstance(bug_signature, dict):
         return False
@@ -173,24 +200,34 @@ def _has_new_bug(db_path: Path | str, result: dict[str, Any], target: str) -> bo
             line = int(line_raw)
         except (TypeError, ValueError):
             line = None
+
+    def _is_first_occurrence(conn: sqlite3.Connection) -> bool:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+              AND COALESCE(exception, '') = COALESCE(?, '')
+              AND COALESCE(file, '') = COALESCE(?, '')
+              AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
+            """,
+            (target, exc, file_, line, line),
+        )
+        row = cur.fetchone()
+        return int(row[0]) == 0 if row else False
+
+    if sqlite_conn is not None:
+        try:
+            return _is_first_occurrence(sqlite_conn)
+        except sqlite3.OperationalError:
+            return False
+
     path = Path(db_path) if isinstance(db_path, str) else db_path
     if not path.exists():
         return False
     try:
-        conn = sqlite3.connect(str(path))
+        conn = open_results_db(path)
         try:
-            cur = conn.execute(
-                """
-                SELECT COUNT(*) FROM runs
-                WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
-                  AND COALESCE(exception, '') = COALESCE(?, '')
-                  AND COALESCE(file, '') = COALESCE(?, '')
-                  AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
-                """,
-                (target, exc, file_, line, line),
-            )
-            row = cur.fetchone()
-            return int(row[0]) == 0 if row else False
+            return _is_first_occurrence(conn)
         finally:
             conn.close()
     except (sqlite3.Error, OSError):
@@ -206,6 +243,7 @@ def build_ucb_update_signals(
     iteration: int,
     seed_id: str,
     score: float,
+    sqlite_conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Build the per-mutation feedback payload consumed by the UCB scheduler."""
     status = _closed_status(result)
@@ -215,8 +253,10 @@ def build_ucb_update_signals(
         "bucket": bucket,
         "status": status,
         "isinteresting": score,
-        "new_coverage": _has_new_coverage(db_path, result),
-        "new_bug": _has_new_bug(db_path, result, target),
+        "new_coverage": _has_new_coverage(
+            db_path, result, sqlite_conn=sqlite_conn
+        ),
+        "new_bug": _has_new_bug(db_path, result, target, sqlite_conn=sqlite_conn),
         "crash": status == "crash",
         "timeout": status == "timeout",
         "closed_result": result.get("closed_result", {}),
@@ -274,6 +314,7 @@ class UCBTreeScheduler(BaseSeedScheduler):
             priority=0.0,
             metadata=metadata,
         )
+        item.metadata["_ucb_insert_seq"] = self._seq
         item.metadata["_ucb_home"] = (cov_key, bug_key)
         self._items[item.item_id] = item
         self._insert_into_leaf(leaf, item)
@@ -330,20 +371,31 @@ class UCBTreeScheduler(BaseSeedScheduler):
         for node in path:
             node.update_stats(reward)
 
-        cov_key, bug_key = stored.metadata.get("_ucb_last_leaf") or stored.metadata.get(
-            "_ucb_home", ("NO_COVERAGE", "NO_BUG")
-        )
+        if normalized_signals:
+            cov_key = self._coverage_bucket_key(normalized_signals)
+            bug_key = self._bug_bucket_key(normalized_signals)
+        else:
+            cov_key, bug_key = stored.metadata.get("_ucb_last_leaf") or stored.metadata.get(
+                "_ucb_home", ("NO_COVERAGE", "NO_BUG")
+            )
+        stored.metadata["_ucb_home"] = (cov_key, bug_key)
+        stored.metadata["_ucb_last_leaf"] = (cov_key, bug_key)
+        stored.metadata.pop("_ucb_last_path", None)
         trace = stored.metadata.get("_ucb_trace")
         if trace:
             trace_summary = _summarize_trace_payload(
                 raw_signals=signals,
                 normalized_signals=normalized_signals,
             )
-            print(
-                "[ucb.update] "
-                f"item={stored.item_id} seed={stored.seed.seed_id} "
-                f"score={isinteresting_score:.3f} reward={reward:.3f} "
-                f"leaf=({cov_key}, {bug_key}) summary={trace_summary!r}"
+            get_fuzzer_logger().info(
+                "[ucb.update] item=%s seed=%s score=%.3f reward=%.3f leaf=(%s, %s) summary=%r",
+                stored.item_id,
+                stored.seed.seed_id,
+                isinteresting_score,
+                reward,
+                cov_key,
+                bug_key,
+                trace_summary,
             )
         leaf = self._ensure_leaf(cov_key, bug_key)
         self._insert_into_leaf(leaf, stored)
@@ -397,6 +449,9 @@ class UCBTreeScheduler(BaseSeedScheduler):
             "leaves": leaves[: max(limit, 0)],
             "truncated": len(leaves) > min(max(limit, 0), len(leaves)),
         }
+
+    def supports_feedback_updates(self) -> bool:
+        return True
 
     def render_tree(self, limit: int = 20) -> str:
         """Render a readable tree snapshot for logging/debugging."""
@@ -458,13 +513,28 @@ class UCBTreeScheduler(BaseSeedScheduler):
         """Insert an item into a leaf and evict overflow items beyond the leaf limit."""
         leaf.seeds.append(item)
         if len(leaf.seeds) > self._max_seeds_per_leaf:
-            evicted = leaf.seeds[self._max_seeds_per_leaf :]
+            leaf.seeds.sort(key=self._leaf_retention_key, reverse=True)
+            evicted = leaf.seeds[self._max_seeds_per_leaf:]
             leaf.seeds = leaf.seeds[: self._max_seeds_per_leaf]
             if leaf.rr_index > len(leaf.seeds):
                 leaf.rr_index = len(leaf.seeds)
             for old in evicted:
                 # If the just-added item gets evicted, also drop it from item registry.
                 self._items.pop(old.item_id, None)
+
+    def _leaf_retention_key(self, item: ScheduledSeed) -> tuple[float, float, float, float]:
+        """
+        Rank items to keep when a leaf overflows.
+
+        Prefer unseen seeds first so new additions get evaluated at least once,
+        then prefer historically higher-value seeds, then less-selected seeds,
+        and finally newer arrivals as a deterministic tiebreaker.
+        """
+        is_unseen = 1.0 if item.updates == 0 else 0.0
+        avg_score = item.avg_isinteresting_score
+        less_selected = -float(item.times_selected)
+        insert_seq = float(item.metadata.get("_ucb_insert_seq", 0))
+        return (is_unseen, avg_score, less_selected, insert_seq)
 
     def _select_ucb_child(self, parent: _TreeNode) -> _TreeNode | None:
         """Select the next child node to traverse using the UCB1 score."""
