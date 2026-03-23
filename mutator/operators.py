@@ -137,6 +137,118 @@ def ip_near_valid_malformed(ip_str: str, rng: random.Random) -> str:
     return ip_str + ":ffff:ffff"
 
 
+def ip_leading_zeros(ip_str: str, rng: random.Random) -> str:
+    """Inject leading zeros into IPv4 octets: 1.2.3.4 -> 01.002.003.04.
+    Some parsers treat these as octal, which is a classic bug source.
+    """
+    if "." not in ip_str:
+        return ip_str
+    # Only touch the host part (before any / or zone)
+    base = ip_str.split("/")[0].split("%")[0]
+    suffix = ip_str[len(base):]
+    octets = base.split(".")
+    mutated = []
+    for octet in octets:
+        if octet.isdigit() and rng.random() < 0.6:
+            pad = rng.randint(1, 3)
+            mutated.append("0" * pad + octet)
+        else:
+            mutated.append(octet)
+    return ".".join(mutated) + suffix
+
+
+def ip_embedded_ipv4(ip_str: str, rng: random.Random) -> str:
+    """Generate an IPv4-mapped or IPv4-compatible IPv6 address.
+    e.g. ::ffff:192.168.0.1 or 64:ff9b::10.0.0.1
+    """
+    ipv4_pool = [
+        "127.0.0.1", "0.0.0.0", "255.255.255.255",
+        "192.168.0.1", "10.0.0.1", "172.16.0.1",
+    ]
+    ipv4 = rng.choice(ipv4_pool)
+    prefix = rng.choice([
+        "::ffff:",
+        "::ffff:0:",
+        "64:ff9b::",
+        "2002:",          # 6to4 tunnel address start
+        "::0:",
+    ])
+    return prefix + ipv4
+
+
+def ip_zone_id(ip_str: str, rng: random.Random) -> str:
+    """Append a zone ID to an IPv6 address: fe80::1 -> fe80::1%eth0.
+    Zone IDs are only valid on link-local addresses but some parsers accept
+    them anywhere, and the % encoding is a common confusion point.
+    """
+    if ":" not in ip_str:
+        return ip_str
+    # Strip existing zone/prefix
+    base = ip_str.split("%")[0].split("/")[0]
+    zones = ["%eth0", "%lo", "%en0", "%25eth0", "%en1", "%0", "%"]
+    return base + rng.choice(zones)
+
+
+def ip_mixed_case_hex(ip_str: str, rng: random.Random) -> str:
+    """Randomise the case of hex characters in IPv6 hextets.
+    e.g. fe80::AbCd or FE80::FFFF
+    """
+    if ":" not in ip_str:
+        return ip_str
+    result = []
+    for ch in ip_str:
+        if ch in "abcdefABCDEF" and rng.random() < 0.5:
+            result.append(ch.upper() if ch.islower() else ch.lower())
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+def ip_truncate(ip_str: str, rng: random.Random) -> str:
+    """Drop or duplicate an octet/hextet to produce structurally malformed addresses.
+    e.g. 1.2.3.4 -> 1.2.3  or  1.2.3.4 -> 1.2.3.4.4
+    """
+    if "." in ip_str:
+        base = ip_str.split("/")[0].split("%")[0]
+        suffix = ip_str[len(base):]
+        parts = base.split(".")
+        if not parts:
+            return ip_str
+        action = rng.choice(["drop", "duplicate", "swap"])
+        idx = rng.randrange(len(parts))
+        if action == "drop" and len(parts) > 1:
+            parts.pop(idx)
+        elif action == "duplicate":
+            parts.insert(idx, parts[idx])
+        elif action == "swap" and len(parts) > 1:
+            other = rng.randrange(len(parts))
+            parts[idx], parts[other] = parts[other], parts[idx]
+        return ".".join(parts) + suffix
+
+    if ":" in ip_str:
+        base = ip_str.split("%")[0].split("/")[0]
+        suffix = ip_str[len(base):]
+        # Split on :: carefully
+        if "::" in base:
+            left, _, right = base.partition("::")
+            side = rng.choice(["left", "right"])
+            parts = (left if side == "left" else right).split(":") if (left if side == "left" else right) else []
+            if parts:
+                idx = rng.randrange(len(parts))
+                parts.pop(idx)
+            rejoined = (":".join(parts) if parts else "")
+            base = (left if side == "right" else rejoined) + "::" + (right if side == "left" else rejoined)
+        else:
+            parts = base.split(":")
+            if len(parts) > 1:
+                idx = rng.randrange(len(parts))
+                parts.pop(idx)
+            base = ":".join(parts)
+        return base + suffix
+
+    return ip_str
+
+
 # --- Adaptive Strategy (Mopt-like) ---
 
 class AdaptiveStrategy:
@@ -183,4 +295,9 @@ IP_OPERATORS = {
     "compression_variant": ip_compression_variant,
     "separator_whitespace": ip_separator_whitespace,
     "near_valid_malformed": ip_near_valid_malformed,
+    "leading_zeros": ip_leading_zeros,
+    "embedded_ipv4": ip_embedded_ipv4,
+    "zone_id": ip_zone_id,
+    "mixed_case_hex": ip_mixed_case_hex,
+    "truncate": ip_truncate,
 }

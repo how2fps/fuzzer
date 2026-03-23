@@ -20,7 +20,7 @@ fuzz-now = "fuzzer.main:main"
 line-length = 88
 
 [tool.uv]
-package = true
+package = false
 
 [dependency-groups]
 dev = [
@@ -29,3 +29,12 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.15.2",
 ]
+
+[tool.setuptools.packages.find]
+# This tells setuptools to look for packages in the current directory
+where = ["."]
+# Only include your actual code folders (add/remove as needed)
+include = ["core*", "mutator*", "parser*", "seed_scheduler*", "isinteresting*"]
+# Exclude things that shouldn't be "installed" as code
+exclude = ["targets*", "configs*", "tests*", "targets_backup*"]
+namespaces = false

@@ -17,7 +17,8 @@ from .mutator import (
     interesting_value_mutation,
     mutate_text_with_grammar,
     mutate_json,
-    mutate_ip
+    mutate_ip,
+    record_operator_coverage,
 )
 from .versions import get_mutator, list_versions
 
@@ -40,6 +41,7 @@ __all__ = [
     "list_versions",
     "mutate_text_with_grammar",
     "mutate_json",
-    "mutate_ip"
+    "mutate_ip",
+    "record_operator_coverage",
 ]
 
