@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from multiprocessing import current_process
 
-from core.config import get_run_plan, print_config
+from core.config import get_run_plan, is_debug_run, print_config
 from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
 from core.fuzzer_runner import run_fuzzer
+from core.live_ui import console, render_config_panel
 from core.paths import RESULTS_DIR
 from core.batch_report import generate_batch_report
 
@@ -34,7 +35,17 @@ def main() -> None:
                 )
             elif config_path:
                 log.info("--- Config: %s ---", config_path)
-            print_config(config)
+            if is_debug_run(config):
+                print_config(config)
+            else:
+                console.print(
+                    render_config_panel(
+                        config=config,
+                        config_label=config_label,
+                        run_index=run_index + 1,
+                        total_runs=runs_per_config,
+                    )
+                )
             run_fuzzer(config, results_folder=run_folder, config_path=config_path)
 
     generate_batch_report(batch_folder=batch_folder)

@@ -22,6 +22,7 @@ class FuzzConfig(TypedDict):
     target: str
     scheduler_kind: str
     mutator_kind: str
+    debug_mode: bool
     seed_preload_mode: str
     seed_preload_total: int
     ucb_trace: bool
@@ -49,6 +50,7 @@ def get_default_config() -> FuzzConfig:
         "target": "json-decoder",
         "scheduler_kind": "heap",
         "mutator_kind": "auto",
+        "debug_mode": False,
         "seed_preload_mode": "full",
         "seed_preload_total": 50,
         "ucb_trace": False,
@@ -192,6 +194,12 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         default="auto",
         choices=["auto", "json", "ip"],
         help="Mutation mode: auto-detect from target, or force json/ip.",
+    )
+    parser.add_argument(
+        "--debug",
+        dest="debug_mode",
+        action="store_true",
+        help="Run with the old verbose debug output instead of the live Rich table.",
     )
     parser.add_argument(
         "--seed-preload-mode",
@@ -362,6 +370,7 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
         "mutator_kind": args.mutator_kind,
+        "debug_mode": args.debug_mode,
         "seed_preload_mode": args.seed_preload_mode,
         "seed_preload_total": args.seed_preload_total,
         "ucb_trace": args.ucb_trace,
@@ -407,6 +416,12 @@ def infer_mutator_kind(*, mutator_kind: str, target: str) -> str:
     return "json"
 
 
+def is_debug_run(config: FuzzConfig) -> bool:
+    return bool(
+        config["debug_mode"] or config["ucb_trace"] or config["ucb_debug_tree"]
+    )
+
+
 def print_config(config: FuzzConfig) -> None:
     from core.fuzzer_logging import get_fuzzer_logger
 
@@ -415,6 +430,7 @@ def print_config(config: FuzzConfig) -> None:
     log.info("  target: %s", config["target"])
     log.info("  scheduler_kind: %s", config["scheduler_kind"])
     log.info("  mutator_kind: %s", config["mutator_kind"])
+    log.info("  debug_mode: %s", config["debug_mode"])
     log.info("  ucb_trace: %s", config["ucb_trace"])
     log.info("  ucb_debug_tree: %s", config["ucb_debug_tree"])
     log.info("  max_iterations: %s", config["max_iterations"])

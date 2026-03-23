@@ -14,3 +14,4 @@ __pycache__/
 *.pyzw
 results/
 *.log
+.env

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import json
 import queue
 import random
 import sqlite3
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from tqdm import tqdm
 
-from core.config import FuzzConfig
+from core.config import FuzzConfig, is_debug_run
 from core.fuzzer_logging import get_fuzzer_logger
+from core.live_ui import RunDashboard, console
 from core.db_utils import (
     insert_run,
     insert_seen_branches_into_conn,
@@ -26,6 +27,7 @@ from isinteresting import get_compute_interestingness
 from core.mutation_utils import generate_unique_mutations, make_discovered_seed
 from parser import get_parser
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
+from rich.live import Live
 from seed_scheduler import (
     BaseSeedScheduler,
     ScheduledSeed,
@@ -196,6 +198,31 @@ def run_fuzzer_multi_worker(
     worker_shutdown_grace_seconds = max(5.0, float(config["timeout"]) * 2.0)
     log = get_fuzzer_logger()
     max_iterations = config["max_iterations"]
+    debug_mode = is_debug_run(config)
+    use_live_ui = not debug_mode
+    seen_bug_keys: set[tuple[str, str, str, str, str]] = set()
+    dashboard = RunDashboard(
+        target=effective_target,
+        workers=workers,
+        results_folder=str(results_folder),
+        max_iterations=max_iterations,
+        max_hours=max_hours,
+    )
+
+    def _bug_key(result: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
+        status = str(result.get("status") or "").strip().lower()
+        if status not in {"bug", "crash", "timeout", "error"}:
+            return None
+        signature = result.get("bug_signature") or {}
+        if not isinstance(signature, dict):
+            signature = {}
+        return (
+            status,
+            str(signature.get("type") or ""),
+            str(signature.get("exception") or ""),
+            str(signature.get("file") or ""),
+            str(signature.get("line") or ""),
+        )
 
     def _try_refill_scheduler_from_llm() -> bool:
         if not config.get("llm_seed_fallback"):
@@ -241,6 +268,11 @@ def run_fuzzer_multi_worker(
                 len(generated.seeds),
                 llm_refill_attempts[0],
             )
+            if use_live_ui:
+                dashboard.update_status(
+                    "RUNNING",
+                    event=f"LLM refill added {len(generated.seeds)} candidate seeds",
+                )
         return added_any
 
     def request_handler() -> None:
@@ -375,13 +407,23 @@ def run_fuzzer_multi_worker(
                                         if scheduler_uses_feedback
                                         else "batch"
                                     )
-                                    log.info(
-                                        "Scheduled seed %s with energy %s (%s unique mutations, mode=%s)",
-                                        current_scheduled[0].seed.seed_id,
-                                        energy,
-                                        len(current_batch),
-                                        mode,
-                                    )
+                                    if debug_mode:
+                                        log.info(
+                                            "Scheduled seed %s with energy %s (%s unique mutations, mode=%s)",
+                                            current_scheduled[0].seed.seed_id,
+                                            energy,
+                                            len(current_batch),
+                                            mode,
+                                        )
+                                    if use_live_ui:
+                                        dashboard.record_schedule(
+                                            pending_jobs=len(pending),
+                                            queue_depth=len(batch_expected) + len(pending),
+                                            event=(
+                                                f"seed {current_scheduled[0].seed.seed_id} "
+                                                f"scheduled with {len(current_batch)} mutations"
+                                            ),
+                                        )
                                 finally:
                                     conn_thread.close()
                             scheduled = current_scheduled[0]
@@ -475,14 +517,29 @@ def run_fuzzer_multi_worker(
     last_result_time = time.time()
     batch_scores_by_item: dict[str, list[float]] = {}
     try:
-        with tqdm(
-            total=max_iterations,
-            unit="iter",
-            desc="Fuzz",
-            dynamic_ncols=True,
-            file=sys.stderr,
-            mininterval=0.25,
-        ) as pbar:
+        display_context = (
+            Live(
+                dashboard.render(),
+                console=console,
+                screen=True,
+                refresh_per_second=4,
+                transient=False,
+                redirect_stdout=False,
+                redirect_stderr=False,
+                vertical_overflow="crop",
+            )
+            if use_live_ui
+            else nullcontext()
+        )
+        with display_context as live:
+            pbar = None if use_live_ui else tqdm(
+                total=max_iterations,
+                unit="iter",
+                desc="Fuzz",
+                dynamic_ncols=True,
+                file=sys.stderr,
+                mininterval=0.25,
+            )
             while True:
                 try:
                     # Use a timeout so we can periodically check for shutdown
@@ -512,6 +569,12 @@ def run_fuzzer_multi_worker(
                                 results_received,
                                 total_jobs[0] or iteration_counter[0],
                             )
+                            if use_live_ui:
+                                dashboard.update_status(
+                                    "STOPPING",
+                                    event="forcing shutdown after idle timeout",
+                                )
+                                live.update(dashboard.render())
                             break
                     if (
                         total_jobs[0] > 0
@@ -522,15 +585,34 @@ def run_fuzzer_multi_worker(
                         log.warning(
                             "Timed out waiting for remaining worker results; forcing shutdown."
                         )
+                        if use_live_ui:
+                            dashboard.update_status(
+                                "STOPPING", event="timed out waiting for workers"
+                            )
+                            live.update(dashboard.render())
                         break
                     if shutdown_requested[0]:
+                        if use_live_ui:
+                            dashboard.update_status(
+                                "STOPPING", event="shutdown requested"
+                            )
+                            live.update(dashboard.render())
                         break
+                    if use_live_ui:
+                        live.update(dashboard.render())
                     continue
                 except InterruptedError:
                     # System call interrupted by signal; if a shutdown has been
                     # requested, stop waiting for more results.
                     if shutdown_requested[0]:
+                        if use_live_ui:
+                            dashboard.update_status(
+                                "STOPPING", event="shutdown requested"
+                            )
+                            live.update(dashboard.render())
                         break
+                    if use_live_ui:
+                        live.update(dashboard.render())
                     continue
 
                 with cond:
@@ -631,7 +713,34 @@ def run_fuzzer_multi_worker(
                 last_result_time = time.time()
                 with cond:
                     results_received_count[0] = results_received
+                    pending_jobs = len(pending)
+                    queue_depth = len(batch_expected) + len(pending)
                     cond.notify()
+
+                status = str(result.get("status") or "").strip().lower() or "unknown"
+                signals = result.get("signals") or {}
+                new_coverage = bool(signals.get("new_coverage"))
+                new_bug = bool(signals.get("new_bug"))
+                bug_key = _bug_key(result)
+                if bug_key is not None and bug_key not in seen_bug_keys:
+                    seen_bug_keys.add(bug_key)
+                    new_bug = True
+
+                event_bits = [f"iter {iteration}", status]
+                if new_bug:
+                    event_bits.append("new bug")
+                if new_coverage:
+                    event_bits.append("new coverage")
+                if use_live_ui:
+                    dashboard.record_result(
+                        status=status,
+                        score=result["isinteresting_score"],
+                        new_coverage=new_coverage,
+                        new_bug=new_bug,
+                        pending_jobs=pending_jobs,
+                        queue_depth=queue_depth,
+                        event=" | ".join(event_bits),
+                    )
 
                 # if parser_result is not None:
                 #     try:
@@ -641,24 +750,43 @@ def run_fuzzer_multi_worker(
                 #         )
                 #     except (TypeError, ValueError):
                 #         log.info("%s", repr(parser_result))
-                log.info(
-                    "[iter %s] seed=%s score=%.3f status=%s input=%s mutated input=%s",
-                    iteration,
-                    result["seed_id"],
-                    result["isinteresting_score"],
-                    result["status"],
-                    result["seed_text"],
-                    result["mutated_input"],
-                )
+                if debug_mode:
+                    log.info(
+                        "[iter %s] seed=%s score=%.3f status=%s input=%s mutated input=%s",
+                        iteration,
+                        result["seed_id"],
+                        result["isinteresting_score"],
+                        result["status"],
+                        result["seed_text"],
+                        result["mutated_input"],
+                    )
+                if debug_mode and new_bug:
+                    log.info(
+                        "Unique bug %s found at iteration %s (seed=%s).",
+                        dashboard.unique_bugs_found if use_live_ui else len(seen_bug_keys),
+                        iteration,
+                        result["seed_id"],
+                    )
                 if scheduler_uses_feedback and config["ucb_debug_tree"]:
                     log.info("%s", scheduler.render_tree(limit=12))
-                pbar.update(1)
+                if use_live_ui:
+                    live.update(dashboard.render())
+                elif pbar is not None:
+                    pbar.update(1)
                 if total_jobs[0] > 0 and results_received >= total_jobs[0]:
+                    if use_live_ui:
+                        dashboard.update_status("DONE", event="run complete")
+                        live.update(dashboard.render())
                     break
                 if shutdown_requested[0]:
                     # On explicit shutdown (Ctrl+C), stop waiting for any
                     # remaining in-flight work; we'll tear down workers below.
+                    if use_live_ui:
+                        dashboard.update_status("STOPPING", event="shutdown requested")
+                        live.update(dashboard.render())
                     break
+            if pbar is not None:
+                pbar.close()
     finally:
         request_thread.join(timeout=1.0)
         for p in procs:
