@@ -12,6 +12,7 @@ import requests
 
 from core.config import FuzzConfig
 from core.db_utils import get_seed_generation_context
+from core.fuzzer_logging import get_fuzzer_logger
 from core.paths import FUZZER_ROOT
 from parser import TARGETS
 from seed_corpus import Seed
@@ -241,6 +242,21 @@ def _extract_seed_candidates(response_text: str) -> list[str]:
     return out
 
 
+def _llm_seed_provider_status() -> tuple[bool, str]:
+    _load_dotenv_if_present()
+    model = (os.environ.get("LLM_SEED_MODEL") or "").strip()
+    api_key = (
+        os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("LLM_SEED_API_KEY")
+        or ""
+    ).strip()
+    if not model:
+        return False, "missing LLM_SEED_MODEL"
+    if not api_key:
+        return False, "missing LLM_SEED_API_KEY / ANTHROPIC_API_KEY"
+    return True, "configured"
+
+
 def _call_openai_compatible(prompt_text: str) -> str:
     _load_dotenv_if_present()
     api_key = os.environ.get("LLM_SEED_API_KEY")
@@ -357,7 +373,13 @@ def maybe_generate_seed_candidates(
     config: FuzzConfig,
     results_folder: Path,
 ) -> LLMSeedFallbackResult | None:
+    log = get_fuzzer_logger()
     if not config["llm_seed_fallback"]:
+        return None
+
+    ready, provider_status = _llm_seed_provider_status()
+    if not ready:
+        log.warning("LLM seed fallback is enabled but %s.", provider_status)
         return None
 
     context = get_seed_generation_context(
@@ -366,7 +388,14 @@ def maybe_generate_seed_candidates(
         target=target,
     )
     prompt_text = _build_prompt(target=target, context=context, config=config)
-    raw_response_text = call_seed_generation_model(prompt_text)
+    try:
+        raw_response_text = call_seed_generation_model(prompt_text)
+    except requests.RequestException as exc:
+        log.warning("LLM seed fallback request failed: %s", exc)
+        raw_response_text = ""
+    except Exception as exc:
+        log.warning("LLM seed fallback failed unexpectedly: %s", exc)
+        raw_response_text = ""
     seeds = _extract_seed_candidates(raw_response_text)
 
     debug_path = results_folder / "llm_seed_fallback"
@@ -376,7 +405,17 @@ def maybe_generate_seed_candidates(
     prompt_file.write_text(prompt_text, encoding="utf-8")
     response_file.write_text(raw_response_text or "", encoding="utf-8")
 
+    if not raw_response_text:
+        log.warning(
+            "LLM seed fallback produced an empty response. Check the model/API configuration."
+        )
+        return None
     if not seeds:
+        log.warning(
+            "LLM seed fallback returned output, but no candidate seeds could be parsed. "
+            "See %s for the raw response.",
+            response_file,
+        )
         return None
     return LLMSeedFallbackResult(
         seeds=seeds,

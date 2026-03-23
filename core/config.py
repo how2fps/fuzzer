@@ -104,8 +104,8 @@ def _validate_config(config: FuzzConfig) -> None:
             f"Invalid seed_corpus_initial_draw: {draw!r}. "
             "Must be null, bucketed, random, or full."
         )
-    if config["seed_preload_total"] <= 0:
-        raise ValueError("seed_preload_total must be positive.")
+    if config["seed_preload_total"] < 0:
+        raise ValueError("seed_preload_total must be >= 0.")
     ratios = config["seed_preload_bucket_ratios"]
     if not isinstance(ratios, dict) or not ratios:
         raise ValueError("seed_preload_bucket_ratios must be a non-empty object.")
@@ -385,8 +385,8 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
     if args.max_hours is not None:
         if args.max_hours <= 0:
             parser.error("--hours must be positive.")
-    if args.seed_preload_total <= 0:
-        parser.error("--seed-preload-total must be positive.")
+    if args.seed_preload_total < 0:
+        parser.error("--seed-preload-total must be >= 0.")
     if args.config is not None and args.configs_dir is not None:
         parser.error("Cannot specify both --config and --configs-dir.")
     if args.runs < 1:

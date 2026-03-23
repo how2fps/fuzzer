@@ -1,0 +1,31 @@
+{
+  "target": "json-decoder",
+  "scheduler_kind": "heap",
+  "mutator_kind": "auto",
+  "debug_mode": false,
+  "seed_preload_mode": "sample",
+  "seed_preload_total": 0,
+  "seed_preload_bucket_ratios": {
+    "valid": 0.7,
+    "string_stress": 0.2,
+    "near_valid": 0.1
+  },
+  "seed_corpus_initial_draw": null,
+  "ucb_trace": false,
+  "ucb_debug_tree": false,
+  "max_iterations": 100,
+  "max_hours": null,
+  "timeout": 10.0,
+  "rng_seed": 42,
+  "workers": 1,
+  "isinteresting_version": "base",
+  "mutator_version": "base",
+  "parser_version": "base",
+  "power_scheduler_version": "annealing",
+  "seed_corpus_version": "base",
+  "llm_seed_fallback": true,
+  "llm_seed_stagnation_threshold": 5,
+  "llm_seed_min_candidates": 5,
+  "llm_seed_max_candidates": 12,
+  "enable_open_coverage": false
+}

@@ -11,6 +11,8 @@ from core.config import FuzzConfig, infer_mutator_kind
 from core.db_utils import get_run_summary, init_results_db, warmup_power_schedule
 from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
 from core.live_ui import console, render_run_summary_panel
+from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
+from core.paths import DISCOVERED_SEED_ORDINAL_BASE
 from core.sqlite_conn import open_results_db
 from isinteresting import get_compute_interestingness
 from core.mutation_utils import initial_scheduler_seeds
@@ -31,6 +33,7 @@ def run_fuzzer(
     config_path: Path | None = None,
 ) -> None:
     configure_fuzzer_logging()
+    log = get_fuzzer_logger()
     corpus_loader = get_corpus_loader(config["seed_corpus_version"])
     corpus = corpus_loader.load()
 
@@ -71,9 +74,6 @@ def run_fuzzer(
             metadata["_ucb_trace"] = True
         scheduler.add(seed, metadata=metadata)
 
-    if not scheduler or scheduler.empty():
-        return
-
     results_folder.mkdir(parents=True, exist_ok=True)
     # Clear canonical target logs + per-worker scratch so bug_counts doesn't leak across runs.
     clear_bug_counts_csv(target=effective_target, results_folder=results_folder)
@@ -89,6 +89,49 @@ def run_fuzzer(
     db_path = results_folder / "runs.db"
     conn = open_results_db(db_path)
     init_results_db(conn)
+
+    if scheduler.empty() and config.get("llm_seed_fallback"):
+        family = corpus.target(effective_target).family
+        llm_generated = maybe_generate_seed_candidates(
+            conn=conn,
+            corpus=corpus,
+            target=effective_target,
+            config=config,
+            results_folder=results_folder,
+        )
+        if llm_generated is not None and llm_generated.seeds:
+            next_ordinal = DISCOVERED_SEED_ORDINAL_BASE
+            for text in llm_generated.seeds:
+                candidate = make_generated_seed(
+                    text=text,
+                    family=family,
+                    ordinal=next_ordinal,
+                )
+                scheduler.add(
+                    candidate,
+                    metadata={
+                        "bucket": candidate.bucket,
+                        "signals": {
+                            "coverage_key": {
+                                "family": candidate.family,
+                                "bucket": candidate.bucket,
+                            },
+                            "status": "generated",
+                        },
+                    },
+                )
+                next_ordinal += 1
+            log.info(
+                "Bootstrapped scheduler with %s LLM-generated seeds.",
+                len(llm_generated.seeds),
+            )
+
+    if not scheduler or scheduler.empty():
+        log.warning(
+            "No schedulable seeds available after preload%s.",
+            " and LLM fallback" if config.get("llm_seed_fallback") else "",
+        )
+        return
 
     seed_energies = warmup_power_schedule(
         corpus=corpus,
