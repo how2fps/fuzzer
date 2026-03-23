@@ -267,6 +267,81 @@ def get_inputs_for_unique_error_line_pairs(
     return out
 
 
+def get_run_summary(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+) -> dict[str, Any]:
+    total_results = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE target = ?",
+            (target,),
+        ).fetchone()[0]
+    )
+    interesting_results = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE target = ? AND COALESCE(isinteresting_score, 0) > 0",
+            (target,),
+        ).fetchone()[0]
+    )
+
+    status_counts = {
+        str(status or "unknown"): int(count)
+        for status, count in conn.execute(
+            """
+            SELECT COALESCE(status, 'unknown'), COUNT(*)
+            FROM runs
+            WHERE target = ?
+            GROUP BY COALESCE(status, 'unknown')
+            """,
+            (target,),
+        ).fetchall()
+    }
+
+    unique_bug_count = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT
+                    COALESCE(status, ''),
+                    COALESCE(bug_type, ''),
+                    COALESCE(exception, ''),
+                    COALESCE(file, ''),
+                    COALESCE(line, -1)
+                FROM runs
+                WHERE target = ? AND COALESCE(status, '') IN ('bug', 'crash', 'timeout', 'error')
+            )
+            """,
+            (target,),
+        ).fetchone()[0]
+    )
+
+    bug_type_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(bug_type, ''), NULLIF(exception, ''), NULLIF(status, ''), 'unknown') AS label,
+            COUNT(*) AS occurrences
+        FROM runs
+        WHERE target = ? AND COALESCE(status, '') IN ('bug', 'crash', 'timeout', 'error')
+        GROUP BY label
+        ORDER BY occurrences DESC, label ASC
+        LIMIT 8
+        """,
+        (target,),
+    ).fetchall()
+
+    return {
+        "total_results": total_results,
+        "interesting_results": interesting_results,
+        "status_counts": status_counts,
+        "unique_bug_count": unique_bug_count,
+        "bug_types": [
+            {"label": str(label), "count": int(count)}
+            for label, count in bug_type_rows
+        ],
+    }
+
+
 def _dedupe_text_rows(rows: list[tuple[Any, ...]], *, limit: int) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()

@@ -60,6 +60,57 @@ def render_config_panel(
     return Panel(table, title="Fuzzer Configuration", border_style="cyan")
 
 
+def render_run_summary_panel(
+    *,
+    target: str,
+    results_folder: str,
+    summary: Mapping[str, object],
+) -> Panel:
+    stats = Table.grid(expand=True)
+    for _ in range(6):
+        stats.add_column(justify="center")
+    status_counts = summary.get("status_counts")
+    if not isinstance(status_counts, Mapping):
+        status_counts = {}
+    stats.add_row(
+        Text.assemble(("Target\n", "dim"), str(target)),
+        Text.assemble(("Results\n", "dim"), str(summary.get("total_results", 0))),
+        Text.assemble(("Interesting\n", "dim"), str(summary.get("interesting_results", 0))),
+        Text.assemble(("Crashes\n", "dim"), str(status_counts.get("crash", 0))),
+        Text.assemble(("Unique Bugs\n", "dim"), str(summary.get("unique_bug_count", 0))),
+        Text.assemble(("Timeouts\n", "dim"), str(status_counts.get("timeout", 0))),
+    )
+
+    bug_table = Table(
+        expand=True,
+        header_style="bold magenta",
+        box=None,
+        pad_edge=False,
+    )
+    bug_table.add_column("Bug Type", ratio=4)
+    bug_table.add_column("Count", justify="right", ratio=1)
+    bug_types = summary.get("bug_types")
+    if isinstance(bug_types, list) and bug_types:
+        for item in bug_types:
+            if not isinstance(item, Mapping):
+                continue
+            bug_table.add_row(str(item.get("label", "unknown")), str(item.get("count", 0)))
+    else:
+        bug_table.add_row("No bug signatures recorded", "0")
+
+    footer = Table.grid(padding=(0, 1))
+    footer.add_row(
+        Text("Results folder", style="dim"),
+        Text(results_folder, style="white"),
+    )
+
+    return Panel(
+        Group(stats, Text(""), bug_table, Text(""), footer),
+        title="Run Complete",
+        border_style="green",
+    )
+
+
 @dataclass
 class RunDashboard:
     target: str

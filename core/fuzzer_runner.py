@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from core.config import FuzzConfig, infer_mutator_kind
-from core.db_utils import init_results_db, warmup_power_schedule
+from core.db_utils import get_run_summary, init_results_db, warmup_power_schedule
 from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
+from core.live_ui import console, render_run_summary_panel
 from core.sqlite_conn import open_results_db
 from isinteresting import get_compute_interestingness
 from core.mutation_utils import initial_scheduler_seeds
@@ -104,6 +105,7 @@ def run_fuzzer(
         )
 
     original_sigint = None
+    final_summary_printed = False
     try:
         try:
             original_sigint = signal.getsignal(signal.SIGINT)
@@ -134,8 +136,24 @@ def run_fuzzer(
             mutate_fn=mutate_fn,
             rng=rng,
         )
+        console.print(
+            render_run_summary_panel(
+                target=effective_target,
+                results_folder=str(results_folder),
+                summary=get_run_summary(conn, target=effective_target),
+            )
+        )
+        final_summary_printed = True
     finally:
         try:
+            if not final_summary_printed:
+                console.print(
+                    render_run_summary_panel(
+                        target=effective_target,
+                        results_folder=str(results_folder),
+                        summary=get_run_summary(conn, target=effective_target),
+                    )
+                )
             conn.close()
         finally:
             export_results(
@@ -150,4 +168,3 @@ def run_fuzzer(
                     # If we cannot restore the original handler, ignore; this is
                     # best-effort and should not mask earlier exceptions.
                     pass
-
