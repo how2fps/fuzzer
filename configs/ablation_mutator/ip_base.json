@@ -1,0 +1,6 @@
+{
+  "target": "cidrize-runner",
+  "max_iterations": 2000,
+  "workers": 4,
+  "mutator_version": "base"
+}
