@@ -88,6 +88,20 @@ schedule = compute_power_schedule(
 )
 ```
 
+### Annealing version
+
+The `annealing` power scheduler assigns energy with a temperature-controlled
+softmax over feedback scores:
+
+- higher temperature: flatter, more exploratory energy allocation
+- lower temperature: sharper, more exploitative allocation
+
+Use it via:
+
+```bash
+python main.py --power-scheduler-version annealing
+```
+
 `seed_stats` is a `list[SeedStats]`. The function returns a `PowerScheduleResult`:
 
 - `seed_energies[seed_id]` is the number of fuzzing attempts you should allocate to that seed in the next cycle.
@@ -148,4 +162,3 @@ You can extend this skeleton by:
 
 - Tracking coverage bitmaps per seed (from your targets) and feeding them into `SeedStats["coverage_bitmap"]`.
 - Recording average execution times per seed in `exec_time_ms` and using that for future non-uniform schedulers.
-

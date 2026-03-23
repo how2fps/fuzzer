@@ -168,7 +168,7 @@ class RunDashboard:
 
         if score > 0:
             self.interesting_results += 1
-        if status in {"bug", "crash"}:
+        if status == "crash":
             self.crashes_found += 1
         if status == "timeout":
             self.timeouts_found += 1
