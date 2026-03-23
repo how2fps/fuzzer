@@ -130,9 +130,23 @@ class RunDashboard:
     pending_jobs: int = 0
     last_event: str = "warming up"
     status: str = "RUNNING"
+    # Only treat a result as "interesting" when its score is sufficiently high.
+    interesting_score_threshold: float = 0.5
 
     def _elapsed_seconds(self) -> float:
         return max(0.0, time.monotonic() - self.started_at)
+
+    def _fmt_elapsed(self) -> str:
+        seconds = self._elapsed_seconds()
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+
+        minutes = seconds / 60
+        if minutes < 60:
+            return f"{minutes:.1f}m"
+
+        hours = minutes / 60
+        return f"{hours:.2f}h"
 
     def _exec_rate(self) -> float:
         elapsed = self._elapsed_seconds()
@@ -166,7 +180,7 @@ class RunDashboard:
         self.queue_depth = queue_depth
         self.last_event = event
 
-        if score > 0:
+        if score > self.interesting_score_threshold:
             self.interesting_results += 1
         if status == "crash":
             self.crashes_found += 1
@@ -261,7 +275,7 @@ class RunDashboard:
             Text(str(self.timeouts_found), style=timeouts_style),
             Text(str(self.errors_found), style=errors_style),
             Text(str(self.pending_jobs), style=pending_style),
-            f"{self._elapsed_seconds():.1f}s / {limit}",
+            f"{self._fmt_elapsed()} / {limit}",
             self.last_event,
         )
         return table
