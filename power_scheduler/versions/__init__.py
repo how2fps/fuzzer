@@ -5,12 +5,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import base, hybrid, constant
+from . import annealing, base, hybrid, constant
 
 REGISTRY: dict[str, Any] = {
     "base": base,
     "hybrid": hybrid,
     "constant": constant,
+    "annealing": annealing,
 }
 
 

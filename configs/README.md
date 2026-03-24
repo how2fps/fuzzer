@@ -18,7 +18,7 @@ Defaults shown below match `core.config.get_default_config()`.
 - **`scheduler_kind`** (string, default: `heap`): must be one of `seed_scheduler.list_versions()`.
 - **`mutator_kind`** (string, default: `auto`): one of `auto`, `json`, `ip`.
 - **`seed_preload_mode`** (string, default: `full`): one of `full`, `ratio_batch`, `sample`.
-- **`seed_preload_total`** (int, default: `50`): must be \(> 0\). Used for `ratio_batch`/`sample`.
+- **`seed_preload_total`** (int, default: `50`): must be `>= 0`. If set to `0`, no corpus seeds are preloaded; with `llm_seed_fallback: true`, this lets the run bootstrap from LLM-generated seeds only.
 - **`ucb_trace`** (bool, default: `false`): extra UCB debug logs.
 - **`ucb_debug_tree`** (bool, default: `false`): prints UCB tree snapshot each iteration for `ucb_tree`.
 

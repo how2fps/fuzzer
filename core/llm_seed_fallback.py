@@ -12,6 +12,7 @@ import requests
 
 from core.config import FuzzConfig
 from core.db_utils import get_seed_generation_context
+from core.fuzzer_logging import get_fuzzer_logger
 from core.paths import FUZZER_ROOT
 from parser import TARGETS
 from seed_corpus import Seed
@@ -169,6 +170,8 @@ Follow these steps internally before producing the final answer:
 3. Propose new inputs that preserve useful structure while varying boundary values, nesting, formatting, semantic edge cases, and malformed-near-valid cases.
 4. Avoid exact duplicates and avoid trivial mutations of already fuzzed seeds.
 5. Prefer diversity over quantity duplication.
+6. Before answering, self-check that your entire response is valid JSON parseable by a strict JSON parser.
+7. Before answering, self-check that every `candidate_seeds[i].seed` value is a literal concrete string, not code, not pseudocode, not a template, and not an expression.
 
 ## Seed generation goals
 Generate seeds that include a mix of:
@@ -211,6 +214,15 @@ Return ONLY valid JSON with this exact schema:
 - Do not output any seed that exactly matches an already fuzzed seed.
 - Keep each seed as a single string.
 - Ensure the returned set satisfies the balance requirements above.
+- Every `seed` field must be a fully materialized literal string value.
+- Do not use Python, JavaScript, or pseudocode expressions inside `seed` values.
+- Do not use string concatenation, repetition, interpolation, builders, helper functions, or placeholders.
+- Invalid examples of forbidden `seed` values:
+  - `"{{\\"x\\":\\"" + "a" * 100 + "\\"}}"`
+  - `"[" + ",".join(["null"] * 10) + "]"`
+  - `"<repeat 100 times>"`
+- Valid examples must already contain the final literal text exactly as it should be fuzzed.
+- If you cannot produce valid JSON that passes these checks, output `{{"target":"{target_name}","generation_strategy":[],"candidate_seeds":[]}}`.
 """.format(**payload)
 
 
@@ -241,6 +253,21 @@ def _extract_seed_candidates(response_text: str) -> list[str]:
     return out
 
 
+def _llm_seed_provider_status() -> tuple[bool, str]:
+    _load_dotenv_if_present()
+    model = (os.environ.get("LLM_SEED_MODEL") or "").strip()
+    api_key = (
+        os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("LLM_SEED_API_KEY")
+        or ""
+    ).strip()
+    if not model:
+        return False, "missing LLM_SEED_MODEL"
+    if not api_key:
+        return False, "missing LLM_SEED_API_KEY / ANTHROPIC_API_KEY"
+    return True, "configured"
+
+
 def _call_openai_compatible(prompt_text: str) -> str:
     _load_dotenv_if_present()
     api_key = os.environ.get("LLM_SEED_API_KEY")
@@ -258,6 +285,7 @@ def _call_openai_compatible(prompt_text: str) -> str:
         json={
             "model": model,
             "temperature": 0.7,
+            "max_tokens": 2400,
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -306,7 +334,7 @@ def _call_anthropic(prompt_text: str) -> str:
         },
         json={
             "model": model,
-            "max_tokens": 1200,
+            "max_tokens": 2400,
             "temperature": 0.7,
             "system": "You generate seed candidates for fuzzing. Output JSON only.",
             "messages": [
@@ -357,16 +385,30 @@ def maybe_generate_seed_candidates(
     config: FuzzConfig,
     results_folder: Path,
 ) -> LLMSeedFallbackResult | None:
+    log = get_fuzzer_logger()
     if not config["llm_seed_fallback"]:
+        return None
+
+    ready, provider_status = _llm_seed_provider_status()
+    if not ready:
+        log.warning("LLM seed fallback is enabled but %s.", provider_status)
         return None
 
     context = get_seed_generation_context(
         conn=conn,
         corpus=corpus,
         target=target,
+        include_corpus_seed_fallback=config.get("llm_seed_use_corpus_context", True),
     )
     prompt_text = _build_prompt(target=target, context=context, config=config)
-    raw_response_text = call_seed_generation_model(prompt_text)
+    try:
+        raw_response_text = call_seed_generation_model(prompt_text)
+    except requests.RequestException as exc:
+        log.warning("LLM seed fallback request failed: %s", exc)
+        raw_response_text = ""
+    except Exception as exc:
+        log.warning("LLM seed fallback failed unexpectedly: %s", exc)
+        raw_response_text = ""
     seeds = _extract_seed_candidates(raw_response_text)
 
     debug_path = results_folder / "llm_seed_fallback"
@@ -376,7 +418,17 @@ def maybe_generate_seed_candidates(
     prompt_file.write_text(prompt_text, encoding="utf-8")
     response_file.write_text(raw_response_text or "", encoding="utf-8")
 
+    if not raw_response_text:
+        log.warning(
+            "LLM seed fallback produced an empty response. Check the model/API configuration."
+        )
+        return None
     if not seeds:
+        log.warning(
+            "LLM seed fallback returned output, but no candidate seeds could be parsed. "
+            "See %s for the raw response.",
+            response_file,
+        )
         return None
     return LLMSeedFallbackResult(
         seeds=seeds,

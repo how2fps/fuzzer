@@ -366,6 +366,7 @@ def get_seed_generation_context(
     conn: sqlite3.Connection,
     corpus: Any,
     target: str,
+    include_corpus_seed_fallback: bool = True,
     interesting_limit: int = 10,
     not_interesting_limit: int = 10,
     fuzzed_limit: int = 20,
@@ -409,18 +410,18 @@ def get_seed_generation_context(
     )
     already_fuzzed = _dedupe_text_rows(already_fuzzed_rows, limit=fuzzed_limit)
 
-    if len(already_fuzzed) < fuzzed_limit:
+    if include_corpus_seed_fallback and len(already_fuzzed) < fuzzed_limit:
         for seed in target_set.seeds:
             if seed.text not in already_fuzzed:
                 already_fuzzed.append(seed.text)
             if len(already_fuzzed) >= fuzzed_limit:
                 break
 
-    if not top_interesting:
+    if include_corpus_seed_fallback and not top_interesting:
         for seed in target_set.seeds[:interesting_limit]:
             top_interesting.append(seed.text)
 
-    if not not_interesting:
+    if include_corpus_seed_fallback and not not_interesting:
         fallback = [text for text in already_fuzzed if text not in top_interesting]
         not_interesting.extend(fallback[:not_interesting_limit])
 

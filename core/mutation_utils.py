@@ -25,6 +25,8 @@ def initial_scheduler_seeds(
     rng: random.Random,
     bucket_ratios: dict[str, float] | None = None,
 ) -> list[Seed]:
+    if preload_total <= 0:
+        return []
     ratios = bucket_ratios if bucket_ratios is not None else DEFAULT_PRELOAD_BUCKET_RATIOS
     if preload_mode == "full":
         return list(corpus.target(target).seeds)
@@ -97,4 +99,3 @@ def generate_unique_mutations(
             seen.add(candidate)
             batch.append(candidate)
     return batch
-
