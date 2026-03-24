@@ -131,7 +131,40 @@ def _print_final_probabilities():
     print("\n" + "="*50)
     print(" ADAPTIVE ALL: FINAL OPERATOR PROBABILITIES")
     print("="*50)
+
+    # 1. Define which operator belongs to which study category
+    json_groups = {op: "Semantic" for op in JSON_OPERATORS}
+    json_groups["grammar_splice"] = "Grammar"
+    for op in ALL_JSON_OPS:
+        if op.startswith("byte_"):
+            json_groups[op] = "Byte Havoc"
+            
+    # 2. (Same logic for IP operators)
+    ip_groups = {op: "Semantic" for op in IP_OPERATORS}
+    ip_groups["grammar_splice"] = "Grammar"
+    for op in ALL_IP_OPS:
+        if op.startswith("byte_"):
+            ip_groups[op] = "Byte Havoc"
+
+    group_maps = {"json": json_groups, "ip": ip_groups}
+
+    # 3. Print the new "Ablation Study" section for each target kind (JSON/IP)
     for kind, strategy in _ALL_FUZZER.strategies.items():
+        # Only print stats for the target kind that was actually used
+        total_usage = sum(strategy.usage.values())
+        if total_usage == 0:
+            continue
+
+        # 1. Category-level Ablation Study
+        group_stats = strategy.get_group_stats(group_maps[kind])
+        print(f"\n[{kind.upper()} Ablation Study - Category Stats]")
+        print(f"  {'Category':15s} | {'Prob':6s} | {'Success Rate':12s}")
+        print(f"  {'-'*15}-+-{'-'*6}-+-{'-'*12}")
+        for group, s in sorted(group_stats.items(), key=lambda x: -x[1]["probability"]):
+            # Normalize display: Probability as percentage, Success Rate as percentage of tries
+            print(f"  {group:15s} | {s['probability']:6.1%} | {s['success_rate']:12.2%}")
+
+        # 2. Individual Top 10
         probs = strategy.get_probabilities()
         if not probs:
             continue

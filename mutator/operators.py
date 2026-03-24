@@ -268,8 +268,9 @@ class AdaptiveStrategy:
     def update_score(self, operator: str, gained_new_coverage: bool):
         if gained_new_coverage:
             self.success[operator] += 1
-            # Increase weight
-            self.weights[operator] = self.weights[operator] * (1 + self.alpha)
+            # Aggressively reward finding new coverage (5x weight)
+            # This helps rare successes (Grammar) break through the noise
+            self.weights[operator] = self.weights[operator] * 4.0
         else:
             # Slightly decrease weight to avoid stagnation
             self.weights[operator] = max(0.1, self.weights[operator] * (1 - self.alpha * 0.1))
@@ -277,6 +278,29 @@ class AdaptiveStrategy:
     def get_probabilities(self) -> dict[str, float]:
         total = sum(self.weights.values())
         return {op: w / total for op, w in self.weights.items()}
+
+    def get_group_stats(self, op_to_group: dict[str, str]) -> dict[str, dict[str, float]]:
+        # 1. Initialize result dictionary
+        stats: dict[str, dict[str, float]] = {}
+        
+        # 2. Iterate through the mapping we passed in (e.g. "bit_flip" -> "Byte Havoc")
+        for op, group in op_to_group.items():
+            if op not in self.weights: continue # Safety check
+            
+            # 3. Sum up the weights, usage count, and success count for all ops in this group
+            g = stats.setdefault(group, {"weight": 0.0, "usage": 0.0, "success": 0.0})
+            g["weight"] += self.weights[op]
+            g["usage"] += self.usage[op]
+            g["success"] += self.success[op]
+
+        # 4. Calculate final percentages
+        total_weight = sum(s["weight"] for s in stats.values())
+        for s in stats.values():
+            # Probability: The % of time the fuzzer picks this category
+            s["probability"] = s["weight"] / total_weight if total_weight > 0 else 0.0
+            # Success Rate: How often this category actually found code coverage
+            s["success_rate"] = s["success"] / s["usage"] if s["usage"] > 0 else 0.0
+        return stats
 
 # Mapping names to functions
 JSON_OPERATORS = {
