@@ -275,7 +275,8 @@ class RunDashboard:
             Text(str(self.timeouts_found), style=timeouts_style),
             Text(str(self.errors_found), style=errors_style),
             Text(str(self.pending_jobs), style=pending_style),
-            f"{self._fmt_elapsed()} / {limit}",
+            f"{self._elapsed_seconds():.1f}s",
+            budget_text,
             self.last_event,
         )
         return table
