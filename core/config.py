@@ -10,6 +10,7 @@ from isinteresting import list_versions as isinteresting_versions
 from mutator import list_versions as mutator_versions
 from parser import DEFAULT_TIMEOUT, TARGETS, list_versions as parser_versions
 from power_scheduler import list_versions as power_scheduler_versions
+from seed_corpus import canonicalize_version as canonicalize_seed_corpus_version
 from seed_corpus import list_versions as seed_corpus_versions
 from seed_scheduler import list_versions as scheduler_versions
 
@@ -40,6 +41,7 @@ class FuzzConfig(TypedDict):
     parser_version: str
     power_scheduler_version: str
     seed_corpus_version: str
+    grammar_rules_file: str | None
     llm_seed_candidates: int
     enable_open_coverage: bool
 
@@ -67,10 +69,10 @@ def get_default_config() -> FuzzConfig:
         "parser_version": "base",
         "power_scheduler_version": "base",
         "seed_corpus_version": "base",
+        "grammar_rules_file": None,
         "llm_seed_candidates": 5,
         "enable_open_coverage": ENABLE_OPEN_COVERAGE,
     }
-
 
 def _validate_config(config: FuzzConfig) -> None:
     """Validate config values against allowed choices; raise ValueError on invalid."""
@@ -132,8 +134,11 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             f"Invalid seed_corpus_version: {config['seed_corpus_version']}"
         )
-    if config["llm_seed_candidates"] < 1:
-        raise ValueError("llm_seed_candidates must be >= 1.")
+    grammar_rules_file = config["grammar_rules_file"]
+    if grammar_rules_file is not None and not Path(grammar_rules_file).is_file():
+        raise ValueError(f"grammar_rules_file does not exist: {grammar_rules_file}")
+    if config["llm_seed_candidates"] < 0:
+        raise ValueError("llm_seed_candidates must be >= 0.")
     if not isinstance(config["enable_open_coverage"], bool):
         raise ValueError("enable_open_coverage must be a boolean.")
 
@@ -147,6 +152,9 @@ def load_config_from_file(path: Path) -> FuzzConfig:
     for key in merged:
         if key in data and data[key] is not None:
             merged[key] = data[key]  # type: ignore[literal-required]
+    merged["seed_corpus_version"] = canonicalize_seed_corpus_version(
+        merged["seed_corpus_version"]
+    )
     # Normalize: if max_hours is set, clear max_iterations
     if merged.get("max_hours"):
         merged["max_iterations"] = None
@@ -314,6 +322,14 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         help="Seed corpus module version for ablation.",
     )
     parser.add_argument(
+        "-g",
+        "--grammar-rules-file",
+        dest="grammar_rules_file",
+        default=None,
+        metavar="PATH",
+        help="Optional text file with extra grammar rules for the grammar_ast mutator.",
+    )
+    parser.add_argument(
         "--llm-seed-candidates",
         type=int,
         default=5,
@@ -387,11 +403,15 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "parser_version": args.parser_version,
         "power_scheduler_version": args.power_scheduler_version,
         "seed_corpus_version": args.seed_corpus_version,
+        "grammar_rules_file": args.grammar_rules_file,
         "llm_seed_candidates": args.llm_seed_candidates,
         "enable_open_coverage": args.enable_open_coverage,
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "seed_corpus_initial_draw": None,
     }
+    from_args["seed_corpus_version"] = canonicalize_seed_corpus_version(
+        from_args["seed_corpus_version"]
+    )
 
     if args.config is not None:
         config = load_config_from_file(args.config)
@@ -448,5 +468,6 @@ def print_config(config: FuzzConfig) -> None:
     log.info("  parser_version: %s", config["parser_version"])
     log.info("  power_scheduler_version: %s", config["power_scheduler_version"])
     log.info("  seed_corpus_version: %s", config["seed_corpus_version"])
+    log.info("  grammar_rules_file: %s", config["grammar_rules_file"])
     log.info("  llm_seed_candidates: %s", config["llm_seed_candidates"])
     log.info("  enable_open_coverage: %s", config["enable_open_coverage"])

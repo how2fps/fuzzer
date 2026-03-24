@@ -1,0 +1,14 @@
+# URL grammar demo for the generalized grammar_ast mutator.
+# Core format rules:
+scheme ::= "http" | "https"
+label ::= (<letter>|<digit>|"-"){1,8}
+host ::= <label> "." <label>
+segment ::= (<letter>|<digit>|"-"|"_"){1,10}
+path ::= "/" <segment> ("/" <segment>){0,3}
+query ::= "" | "?id=" <digit>{1,4}
+url ::= <scheme> "://" <host> <path> <query>
+url_start ::= <url>
+
+# Optional mutation overlays:
+host_mut ::= "localhost" | "127.0.0.1" | "999.999.999.999"
+segment_mut ::= ".." | "%2e%2e" | "admin" | "////"

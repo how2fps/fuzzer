@@ -135,4 +135,4 @@ You can adapt the same pattern for `generate_ip_input`/`mutate_ip_input` (or the
 - `base`: grammar-shaped JSON/IP mutation
 - `byte_havoc`: AFL-style byte-level mutations
 - `json_walk`: JSON-structure walk + havoc strategy
-- `grammar_ast`: mutates a small grammar AST, generates a candidate, then optionally splices it with the incoming seed
+- `grammar_ast`: generalized grammar-AST mutator inspired by `mutator_test.py`; mutates generic grammar node classes (`Sequence`, `Alternation`, `Repeat`, `Literal`, `Ref`, etc.), uses the seed to pick a start rule and bias relevant grammar rules, and supports extra DSL rules via `-g/--grammar-rules-file`
