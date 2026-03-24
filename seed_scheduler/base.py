@@ -36,6 +36,11 @@ class BaseSeedScheduler(ABC):
         """Return a lightweight snapshot of scheduler state for logging/debugging."""
         raise NotImplementedError
 
+    @abstractmethod
+    def ready_items(self) -> list[ScheduledSeed]:
+        """Return the currently schedulable items without mutating scheduler state."""
+        raise NotImplementedError
+
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
         """
         Optional human-readable snapshot for debugging.

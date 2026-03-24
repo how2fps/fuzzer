@@ -94,21 +94,26 @@ def run_fuzzer(
     db_path = results_folder / "runs.db"
     conn = open_results_db(db_path)
     init_results_db(conn)
+    startup_llm_seeds: list[str] = []
 
-    if scheduler.empty() and (config.get("llm_seed_fallback") or use_llm_bootstrap):
+    if scheduler.empty() and use_llm_bootstrap:
         family = corpus.target(effective_target).family
         llm_bootstrap_config = dict(config)
-        if use_llm_bootstrap:
-            llm_bootstrap_config["llm_seed_fallback"] = True
-            llm_bootstrap_config["llm_seed_use_corpus_context"] = False
-        llm_generated = maybe_generate_seed_candidates(
-            conn=conn,
-            corpus=corpus,
-            target=effective_target,
-            config=llm_bootstrap_config,  # type: ignore[arg-type]
-            results_folder=results_folder,
-        )
+        requested = max(1, int(llm_bootstrap_config["llm_seed_candidates"]))
+        with console.status(
+            f"Generating {requested} LLM seeds for {effective_target}...",
+            spinner="dots",
+        ):
+            llm_generated = maybe_generate_seed_candidates(
+                conn=conn,
+                corpus=corpus,
+                target=effective_target,
+                config=llm_bootstrap_config,  # type: ignore[arg-type]
+                results_folder=results_folder,
+                include_corpus_context=not use_llm_bootstrap,
+            )
         if llm_generated is not None and llm_generated.seeds:
+            startup_llm_seeds = list(llm_generated.seeds)
             next_ordinal = DISCOVERED_SEED_ORDINAL_BASE
             for text in llm_generated.seeds:
                 candidate = make_generated_seed(
@@ -141,8 +146,6 @@ def run_fuzzer(
             (
                 " and startup LLM bootstrap"
                 if use_llm_bootstrap
-                else " and LLM fallback"
-                if config.get("llm_seed_fallback")
                 else ""
             ),
         )
@@ -194,6 +197,7 @@ def run_fuzzer(
             shutdown_requested=shutdown_requested,
             mutate_fn=mutate_fn,
             rng=rng,
+            startup_llm_seeds=startup_llm_seeds,
         )
         console.print(
             render_run_summary_panel(

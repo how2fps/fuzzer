@@ -272,6 +272,14 @@ class ThompsonFeatureScheduler(BaseSeedScheduler):
             "favored_inputs": len(self._favored_inputs),
         }
 
+    def ready_items(self) -> list[ScheduledSeed]:
+        """Return currently ready items in a deterministic item-id order."""
+        return [
+            self._items[item_id]
+            for item_id in sorted(self._ready)
+            if item_id in self._items
+        ]
+
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
         ready_items = [
             {

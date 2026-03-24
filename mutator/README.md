@@ -130,3 +130,9 @@ def fuzz_one_iteration(previous_seed: str | None) -> bytes:
 
 You can adapt the same pattern for `generate_ip_input`/`mutate_ip_input` (or the v4/v6‑specific variants) depending on which targets you are fuzzing.
 
+### Mutator versions
+
+- `base`: grammar-shaped JSON/IP mutation
+- `byte_havoc`: AFL-style byte-level mutations
+- `json_walk`: JSON-structure walk + havoc strategy
+- `grammar_ast`: mutates a small grammar AST, generates a candidate, then optionally splices it with the incoming seed

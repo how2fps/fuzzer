@@ -77,6 +77,15 @@ class HeapScheduler(BaseSeedScheduler):
             "total_items": len(self._items),
         }
 
+    def ready_items(self) -> list[ScheduledSeed]:
+        """Return unique ready items currently represented in the heap."""
+        ready_ids = {
+            item_id
+            for _neg_prio, _order, item_id in self._heap
+            if item_id in self._items
+        }
+        return [self._items[item_id] for item_id in sorted(ready_ids)]
+
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
         """Return a priority-ordered snapshot of tracked scheduler items."""
         # Show current items ordered by computed priority (highest first).

@@ -70,6 +70,14 @@ class QueueScheduler(BaseSeedScheduler):
             "total_items": len(self._items),
         }
 
+    def ready_items(self) -> list[ScheduledSeed]:
+        """Return queued items in dequeue order without consuming them."""
+        return [
+            self._items[item_id]
+            for item_id in list(self._queue)
+            if item_id in self._items
+        ]
+
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
         """Return the current queue order with lightweight per-item metadata."""
         ordered_ids = list(self._queue)[: max(limit, 0)]
