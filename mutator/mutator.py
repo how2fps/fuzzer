@@ -465,3 +465,8 @@ def record_operator_coverage(mutated_text: str, gained_coverage: bool) -> None:
     Non-operator mutations (grammar / byte-havoc) are silently ignored.
     """
     _GLOBAL_FUZZER.record_coverage(mutated_text, gained_coverage)
+    try:
+        from .versions.adaptive_all import handle_coverage_feedback
+        handle_coverage_feedback(mutated_text, gained_coverage)
+    except ImportError:
+        pass
