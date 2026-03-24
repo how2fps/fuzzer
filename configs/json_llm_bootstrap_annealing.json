@@ -22,10 +22,11 @@
   "mutator_version": "base",
   "parser_version": "base",
   "power_scheduler_version": "annealing",
-  "seed_corpus_version": "base",
+  "seed_corpus_version": "llm_bootstrap",
   "llm_seed_fallback": true,
+  "llm_seed_use_corpus_context": true,
   "llm_seed_stagnation_threshold": 5,
-  "llm_seed_min_candidates": 5,
-  "llm_seed_max_candidates": 12,
+  "llm_seed_min_candidates": 20,
+  "llm_seed_max_candidates": 20,
   "enable_open_coverage": false
 }

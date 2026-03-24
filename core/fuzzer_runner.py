@@ -34,6 +34,7 @@ def run_fuzzer(
 ) -> None:
     configure_fuzzer_logging()
     log = get_fuzzer_logger()
+    use_llm_bootstrap = config["seed_corpus_version"] == "llm_bootstrap"
     corpus_loader = get_corpus_loader(config["seed_corpus_version"])
     corpus = corpus_loader.load()
 
@@ -54,13 +55,17 @@ def run_fuzzer(
         config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
 
     scheduler = make_scheduler(config["scheduler_kind"])
-    initial_seeds = initial_scheduler_seeds(
-        corpus=corpus,
-        target=effective_target,
-        preload_mode=config["seed_preload_mode"],
-        preload_total=config["seed_preload_total"],
-        rng=rng,
-        bucket_ratios=config["seed_preload_bucket_ratios"],
+    initial_seeds = (
+        []
+        if use_llm_bootstrap
+        else initial_scheduler_seeds(
+            corpus=corpus,
+            target=effective_target,
+            preload_mode=config["seed_preload_mode"],
+            preload_total=config["seed_preload_total"],
+            rng=rng,
+            bucket_ratios=config["seed_preload_bucket_ratios"],
+        )
     )
     for seed in initial_seeds:
         metadata: dict[str, Any] = {
@@ -90,13 +95,17 @@ def run_fuzzer(
     conn = open_results_db(db_path)
     init_results_db(conn)
 
-    if scheduler.empty() and config.get("llm_seed_fallback"):
+    if scheduler.empty() and (config.get("llm_seed_fallback") or use_llm_bootstrap):
         family = corpus.target(effective_target).family
+        llm_bootstrap_config = dict(config)
+        if use_llm_bootstrap:
+            llm_bootstrap_config["llm_seed_fallback"] = True
+            llm_bootstrap_config["llm_seed_use_corpus_context"] = False
         llm_generated = maybe_generate_seed_candidates(
             conn=conn,
             corpus=corpus,
             target=effective_target,
-            config=config,
+            config=llm_bootstrap_config,  # type: ignore[arg-type]
             results_folder=results_folder,
         )
         if llm_generated is not None and llm_generated.seeds:
@@ -129,7 +138,13 @@ def run_fuzzer(
     if not scheduler or scheduler.empty():
         log.warning(
             "No schedulable seeds available after preload%s.",
-            " and LLM fallback" if config.get("llm_seed_fallback") else "",
+            (
+                " and startup LLM bootstrap"
+                if use_llm_bootstrap
+                else " and LLM fallback"
+                if config.get("llm_seed_fallback")
+                else ""
+            ),
         )
         return
 

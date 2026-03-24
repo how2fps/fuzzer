@@ -41,6 +41,7 @@ class FuzzConfig(TypedDict):
     power_scheduler_version: str
     seed_corpus_version: str
     llm_seed_fallback: bool
+    llm_seed_use_corpus_context: bool
     llm_seed_stagnation_threshold: int
     llm_seed_min_candidates: int
     llm_seed_max_candidates: int
@@ -71,6 +72,7 @@ def get_default_config() -> FuzzConfig:
         "power_scheduler_version": "base",
         "seed_corpus_version": "base",
         "llm_seed_fallback": False,
+        "llm_seed_use_corpus_context": True,
         "llm_seed_stagnation_threshold": 0,
         "llm_seed_min_candidates": 5,
         "llm_seed_max_candidates": 12,
@@ -140,6 +142,8 @@ def _validate_config(config: FuzzConfig) -> None:
         )
     if config["llm_seed_stagnation_threshold"] < 0:
         raise ValueError("llm_seed_stagnation_threshold must be >= 0.")
+    if not isinstance(config["llm_seed_use_corpus_context"], bool):
+        raise ValueError("llm_seed_use_corpus_context must be a boolean.")
     if config["llm_seed_min_candidates"] < 1:
         raise ValueError("llm_seed_min_candidates must be >= 1.")
     if config["llm_seed_max_candidates"] < config["llm_seed_min_candidates"]:
@@ -331,6 +335,12 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         help="Enable LLM-based seed regeneration when the scheduler is exhausted or stagnates.",
     )
     parser.add_argument(
+        "--llm-seed-use-corpus-context",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether LLM seed generation may include base corpus examples as prompt context.",
+    )
+    parser.add_argument(
         "--llm-seed-stagnation-threshold",
         type=int,
         default=0,
@@ -417,6 +427,7 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "power_scheduler_version": args.power_scheduler_version,
         "seed_corpus_version": args.seed_corpus_version,
         "llm_seed_fallback": args.llm_seed_fallback,
+        "llm_seed_use_corpus_context": args.llm_seed_use_corpus_context,
         "llm_seed_stagnation_threshold": args.llm_seed_stagnation_threshold,
         "llm_seed_min_candidates": args.llm_seed_min_candidates,
         "llm_seed_max_candidates": args.llm_seed_max_candidates,
@@ -481,6 +492,9 @@ def print_config(config: FuzzConfig) -> None:
     log.info("  power_scheduler_version: %s", config["power_scheduler_version"])
     log.info("  seed_corpus_version: %s", config["seed_corpus_version"])
     log.info("  llm_seed_fallback: %s", config["llm_seed_fallback"])
+    log.info(
+        "  llm_seed_use_corpus_context: %s", config["llm_seed_use_corpus_context"]
+    )
     log.info(
         "  llm_seed_stagnation_threshold: %s",
         config["llm_seed_stagnation_threshold"],

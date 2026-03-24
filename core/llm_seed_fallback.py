@@ -170,6 +170,8 @@ Follow these steps internally before producing the final answer:
 3. Propose new inputs that preserve useful structure while varying boundary values, nesting, formatting, semantic edge cases, and malformed-near-valid cases.
 4. Avoid exact duplicates and avoid trivial mutations of already fuzzed seeds.
 5. Prefer diversity over quantity duplication.
+6. Before answering, self-check that your entire response is valid JSON parseable by a strict JSON parser.
+7. Before answering, self-check that every `candidate_seeds[i].seed` value is a literal concrete string, not code, not pseudocode, not a template, and not an expression.
 
 ## Seed generation goals
 Generate seeds that include a mix of:
@@ -212,6 +214,15 @@ Return ONLY valid JSON with this exact schema:
 - Do not output any seed that exactly matches an already fuzzed seed.
 - Keep each seed as a single string.
 - Ensure the returned set satisfies the balance requirements above.
+- Every `seed` field must be a fully materialized literal string value.
+- Do not use Python, JavaScript, or pseudocode expressions inside `seed` values.
+- Do not use string concatenation, repetition, interpolation, builders, helper functions, or placeholders.
+- Invalid examples of forbidden `seed` values:
+  - `"{{\\"x\\":\\"" + "a" * 100 + "\\"}}"`
+  - `"[" + ",".join(["null"] * 10) + "]"`
+  - `"<repeat 100 times>"`
+- Valid examples must already contain the final literal text exactly as it should be fuzzed.
+- If you cannot produce valid JSON that passes these checks, output `{{"target":"{target_name}","generation_strategy":[],"candidate_seeds":[]}}`.
 """.format(**payload)
 
 
@@ -274,6 +285,7 @@ def _call_openai_compatible(prompt_text: str) -> str:
         json={
             "model": model,
             "temperature": 0.7,
+            "max_tokens": 2400,
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -322,7 +334,7 @@ def _call_anthropic(prompt_text: str) -> str:
         },
         json={
             "model": model,
-            "max_tokens": 1200,
+            "max_tokens": 2400,
             "temperature": 0.7,
             "system": "You generate seed candidates for fuzzing. Output JSON only.",
             "messages": [
@@ -386,6 +398,7 @@ def maybe_generate_seed_candidates(
         conn=conn,
         corpus=corpus,
         target=target,
+        include_corpus_seed_fallback=config.get("llm_seed_use_corpus_context", True),
     )
     prompt_text = _build_prompt(target=target, context=context, config=config)
     try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -361,6 +362,61 @@ class SeedCorpus:
 
         if shuffle and len(out) > 1:
             rng.shuffle(out)
+        return out
+
+    def synthetic_generation(
+        self,
+        target_or_family: str,
+        *,
+        needed: int,
+        conn: sqlite3.Connection,
+        config: dict[str, Any],
+        results_folder: str | Path,
+        ordinal_start: int = 1_000_000,
+    ) -> list[Seed]:
+        """
+        Generate additional seeds using the same LLM path as bootstrap fallback.
+
+        This does not mutate the corpus itself; it returns generated Seed objects
+        ready to be added to a scheduler.
+        """
+        if needed <= 0:
+            return []
+
+        from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
+
+        target_name = target_or_family
+        target_set = self.target(target_name)
+        requested_config = dict(config)
+        requested_config["llm_seed_fallback"] = True
+        requested_config["llm_seed_min_candidates"] = needed
+        requested_config["llm_seed_max_candidates"] = needed
+
+        generated = maybe_generate_seed_candidates(
+            conn=conn,
+            corpus=self,
+            target=target_name,
+            config=requested_config,  # type: ignore[arg-type]
+            results_folder=Path(results_folder),
+        )
+        if generated is None or not generated.seeds:
+            return []
+
+        out: list[Seed] = []
+        seen: set[str] = set()
+        next_ordinal = ordinal_start
+        for text in generated.seeds:
+            if text in seen:
+                continue
+            seen.add(text)
+            out.append(
+                make_generated_seed(
+                    text=text,
+                    family=target_set.family,
+                    ordinal=next_ordinal,
+                )
+            )
+            next_ordinal += 1
         return out
 
     def summary(self) -> dict[str, Any]:

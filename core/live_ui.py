@@ -209,7 +209,7 @@ class RunDashboard:
                 ),
             ),
             (
-                "Coverage",
+                "New Coverage",
                 Text(
                     str(self.new_coverage_events),
                     style="bold magenta" if self.new_coverage_events else "dim",
@@ -242,18 +242,18 @@ class RunDashboard:
         table.add_column("Errors", justify="right")
         table.add_column("Pending", justify="right")
         table.add_column("Elapsed", justify="right")
+        table.add_column("Budget", justify="right")
         table.add_column("Last Event", ratio=4)
 
         timeouts_style = "bold yellow" if self.timeouts_found else "green"
         errors_style = "bold red" if self.errors_found else "green"
         pending_style = "bold cyan" if self.pending_jobs else "dim"
-        limit = (
-            f"{self.max_hours}h"
-            if self.max_hours is not None
-            else str(self.max_iterations)
-            if self.max_iterations is not None
-            else "open"
-        )
+        if self.max_hours is not None:
+            budget_text = f"{self._elapsed_seconds():.1f}s / {self.max_hours:.1f}h"
+        elif self.max_iterations is not None:
+            budget_text = f"{self.total_results}/{self.max_iterations} iter"
+        else:
+            budget_text = "open"
         table.add_row(
             self.target,
             str(self.workers),
@@ -261,7 +261,8 @@ class RunDashboard:
             Text(str(self.timeouts_found), style=timeouts_style),
             Text(str(self.errors_found), style=errors_style),
             Text(str(self.pending_jobs), style=pending_style),
-            f"{self._elapsed_seconds():.1f}s / {limit}",
+            f"{self._elapsed_seconds():.1f}s",
+            budget_text,
             self.last_event,
         )
         return table

@@ -5,13 +5,14 @@ from __future__ import annotations
 
 from typing import Any, Type
 
-from . import base
+from . import base, llm_bootstrap
 
 # Type: class with load() classmethod returning SeedCorpus instance
 CorpusLoader = Type[Any]
 
 REGISTRY: dict[str, CorpusLoader] = {
     "base": base.SeedCorpus,
+    "llm_bootstrap": llm_bootstrap.SeedCorpus,
 }
 
 
