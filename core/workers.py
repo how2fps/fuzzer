@@ -91,6 +91,7 @@ def run_worker_process(
                     print_json=False,
                     seed_family=seed_family,
                     enable_open_coverage=config.get("enable_open_coverage", False),
+                    parser_config=config.get("parser_config"),  # type: ignore[arg-type]
                     closed_cwd_override=results_folder
                     / ".worker_cwd"
                     / f"w{worker_id}",

@@ -409,7 +409,52 @@ def _mutate_json_scalar(
     return _generate_json_value(grammar_spec=grammar_spec, max_depth=max_depth, rng=rng)
 
 
-def _mutate_json_value(
+def _change_json_container_type(
+    *,
+    value: object,
+    max_depth: int,
+    rng: random.Random,
+) -> object:
+    del max_depth
+    if isinstance(value, dict):
+        entries = [{"key": key, "value": item} for key, item in value.items()]
+        if rng.random() < 0.3:
+            return [{"entries": entries}]
+        return entries
+    if isinstance(value, list):
+        if rng.random() < 0.5:
+            return {"items": list(value)}
+        return {f"item_{index}": item for index, item in enumerate(value)}
+    if rng.random() < 0.5:
+        return [value]
+    return {"value": value}
+
+
+def _wrap_json_value_recursively(
+    *,
+    value: object,
+    max_depth: int,
+    rng: random.Random,
+) -> object:
+    wrapped = value
+    layer_count = rng.randint(1, max(1, min(3, max_depth + 1)))
+    for layer_index in range(layer_count):
+        if rng.random() < 0.5:
+            wrapped = [wrapped]
+            continue
+        wrapped = {f"layer_{layer_index + 1}": wrapped}
+    return wrapped
+
+
+def _promote_json_child(*, value: object, rng: random.Random) -> object:
+    if isinstance(value, dict) and value:
+        return rng.choice(list(value.values()))
+    if isinstance(value, list) and value:
+        return rng.choice(value)
+    return value
+
+
+def _recurse_json_value(
     *,
     value: object,
     grammar_spec: GrammarSpec,
@@ -426,9 +471,9 @@ def _mutate_json_value(
 
     if isinstance(value, dict):
         mutated = dict(value)
-        if mutated and rng.random() < 0.75:
+        if mutated and rng.random() < 0.8:
             target_key = rng.choice(list(mutated))
-            if len(mutated) > 1 and rng.random() < 0.25:
+            if len(mutated) > 1 and rng.random() < 0.2:
                 del mutated[target_key]
                 return mutated
             mutated[target_key] = _mutate_json_value(
@@ -448,9 +493,9 @@ def _mutate_json_value(
 
     if isinstance(value, list):
         mutated = list(value)
-        if mutated and rng.random() < 0.75:
+        if mutated and rng.random() < 0.8:
             target_index = rng.randrange(len(mutated))
-            if len(mutated) > 1 and rng.random() < 0.25:
+            if len(mutated) > 1 and rng.random() < 0.2:
                 mutated.pop(target_index)
                 return mutated
             mutated[target_index] = _mutate_json_value(
@@ -482,6 +527,52 @@ def _mutate_json_value(
     )
 
 
+def _mutate_json_value(
+    *,
+    value: object,
+    grammar_spec: GrammarSpec,
+    max_depth: int,
+    rng: random.Random,
+) -> object:
+    if max_depth < 1:
+        return _recurse_json_value(
+            value=value,
+            grammar_spec=grammar_spec,
+            max_depth=0,
+            rng=rng,
+        )
+
+    mutation_strategy = rng.choices(
+        population=(
+            "recurse",
+            "replace_subtree",
+            "wrap",
+            "change_container_type",
+            "promote_child",
+        ),
+        weights=(45, 22, 17, 12, 4),
+        k=1,
+    )[0]
+
+    if mutation_strategy == "replace_subtree":
+        return _generate_json_value(grammar_spec=grammar_spec, max_depth=max_depth, rng=rng)
+    if mutation_strategy == "wrap":
+        return _wrap_json_value_recursively(value=value, max_depth=max_depth, rng=rng)
+    if mutation_strategy == "change_container_type":
+        return _change_json_container_type(value=value, max_depth=max_depth, rng=rng)
+    if mutation_strategy == "promote_child":
+        promoted = _promote_json_child(value=value, rng=rng)
+        if promoted is not value:
+            return promoted
+
+    return _recurse_json_value(
+        value=value,
+        grammar_spec=grammar_spec,
+        max_depth=max_depth,
+        rng=rng,
+    )
+
+
 def _mutate_valid_json_text(
     *,
     original_text: str,
@@ -499,15 +590,13 @@ def _mutate_valid_json_text(
         return _mutate_text_from_original(original_text=original_text, fragment=fragment, rng=rng)
 
     for _ in range(8):
-        candidate = json.dumps(
-            _mutate_json_value(
-                value=parsed,
-                grammar_spec=grammar_spec,
-                max_depth=max_depth,
-                rng=rng,
-            ),
-            separators=(",", ":"),
+        mutated_value = _mutate_json_value(
+            value=parsed,
+            grammar_spec=grammar_spec,
+            max_depth=max_depth,
+            rng=rng,
         )
+        candidate = json.dumps(mutated_value, separators=(",", ":"))
         if candidate != original_text:
             return candidate
 
@@ -555,33 +644,314 @@ def _mutate_invalid_json_text(
     return original_text + '"'
 
 
-def _mutate_ipv4_address(*, address: ipaddress.IPv4Address, rng: random.Random) -> ipaddress.IPv4Address:
+def _mutate_prefix_length(
+    *,
+    prefix_length: int,
+    max_prefix_length: int,
+    rng: random.Random,
+) -> int:
+    candidate_prefixes = {
+        0,
+        max_prefix_length,
+        max(
+            0,
+            min(
+                max_prefix_length,
+                prefix_length + rng.choice((-16, -8, -4, -1, 1, 4, 8, 16)),
+            ),
+        ),
+        rng.randint(0, max_prefix_length),
+        min(max_prefix_length, max(0, prefix_length)),
+    }
+    return rng.choice(sorted(candidate_prefixes))
+
+
+def _format_ip_address_text(
+    *,
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    rng: random.Random,
+) -> str:
+    if isinstance(address, ipaddress.IPv6Address):
+        if rng.random() < 0.4:
+            return address.exploded
+        return str(address)
+    return str(address)
+
+
+def _format_ip_interface_text(
+    *,
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    prefix_length: int,
+    rng: random.Random,
+) -> str:
+    return f"{_format_ip_address_text(address=address, rng=rng)}/{prefix_length}"
+
+
+def _apply_host_mask(
+    *,
+    address_int: int,
+    prefix_length: int,
+    max_prefix_length: int,
+    host_int: int,
+) -> int:
+    if prefix_length <= 0:
+        return host_int & ((1 << max_prefix_length) - 1)
+    if prefix_length >= max_prefix_length:
+        return address_int
+
+    host_bits = max_prefix_length - prefix_length
+    host_mask = (1 << host_bits) - 1
+    network_mask = ((1 << max_prefix_length) - 1) ^ host_mask
+    network_part = address_int & network_mask
+    return network_part | (host_int & host_mask)
+
+
+def _randomize_host_bits(
+    *,
+    address_int: int,
+    prefix_length: int,
+    max_prefix_length: int,
+    rng: random.Random,
+) -> int:
+    if prefix_length >= max_prefix_length:
+        return address_int
+
+    host_bits = max_prefix_length - prefix_length
+    return _apply_host_mask(
+        address_int=address_int,
+        prefix_length=prefix_length,
+        max_prefix_length=max_prefix_length,
+        host_int=rng.randrange(1 << host_bits),
+    )
+
+
+def _mutate_ipv4_address_structural(
+    *,
+    address: ipaddress.IPv4Address,
+    prefix_length: int | None,
+    rng: random.Random,
+) -> ipaddress.IPv4Address:
+    effective_prefix = 24 if prefix_length is None else prefix_length
     octets = [int(part) for part in str(address).split(".")]
-    target_index = rng.randrange(4)
-    octets[target_index] = (octets[target_index] + rng.choice((-127, -31, -1, 1, 31, 127))) % 256
+    mutation_strategy = rng.choice(
+        (
+            "single_octet",
+            "multiple_octets",
+            "swap_octets",
+            "zero_suffix",
+            "randomize_suffix",
+            "preserve_prefix_change_host",
+        )
+    )
+
+    if mutation_strategy == "single_octet":
+        target_index = rng.randrange(4)
+        octets[target_index] = rng.randrange(256)
+        return ipaddress.IPv4Address(".".join(str(part) for part in octets))
+
+    if mutation_strategy == "multiple_octets":
+        for target_index in rng.sample(range(4), k=rng.randint(2, 4)):
+            octets[target_index] = rng.randrange(256)
+        return ipaddress.IPv4Address(".".join(str(part) for part in octets))
+
+    if mutation_strategy == "swap_octets":
+        left_index, right_index = rng.sample(range(4), k=2)
+        octets[left_index], octets[right_index] = octets[right_index], octets[left_index]
+        return ipaddress.IPv4Address(".".join(str(part) for part in octets))
+
+    address_int = int(address)
+    if mutation_strategy == "zero_suffix":
+        return ipaddress.IPv4Address(
+            _apply_host_mask(
+                address_int=address_int,
+                prefix_length=effective_prefix,
+                max_prefix_length=32,
+                host_int=0,
+            )
+        )
+
+    if mutation_strategy in {"randomize_suffix", "preserve_prefix_change_host"}:
+        return ipaddress.IPv4Address(
+            _randomize_host_bits(
+                address_int=address_int,
+                prefix_length=effective_prefix,
+                max_prefix_length=32,
+                rng=rng,
+            )
+        )
+
     return ipaddress.IPv4Address(".".join(str(part) for part in octets))
 
 
-def _mutate_ipv6_address(*, address: ipaddress.IPv6Address, rng: random.Random) -> ipaddress.IPv6Address:
-    hextets = address.exploded.split(":")
-    target_index = rng.randrange(8)
-    next_value = (int(hextets[target_index], 16) + rng.choice((-4096, -1, 1, 4096))) % 65536
-    hextets[target_index] = f"{next_value:x}"
-    return ipaddress.IPv6Address(":".join(hextets))
+def _mutate_ipv4_address(
+    *,
+    address: ipaddress.IPv4Address,
+    rng: random.Random,
+    prefix_length: int | None = None,
+) -> ipaddress.IPv4Address:
+    if rng.random() < 0.2:
+        octets = [int(part) for part in str(address).split(".")]
+        target_index = rng.randrange(4)
+        octets[target_index] = (octets[target_index] + rng.choice((-127, -31, -1, 1, 31, 127))) % 256
+        return ipaddress.IPv4Address(".".join(str(part) for part in octets))
+    return _mutate_ipv4_address_structural(
+        address=address,
+        prefix_length=prefix_length,
+        rng=rng,
+    )
+
+
+def _mutate_ipv6_address_structural(
+    *,
+    address: ipaddress.IPv6Address,
+    prefix_length: int | None,
+    rng: random.Random,
+) -> ipaddress.IPv6Address:
+    effective_prefix = 64 if prefix_length is None else prefix_length
+    hextets = [int(part, 16) for part in address.exploded.split(":")]
+    mutation_strategy = rng.choice(
+        (
+            "single_hextet",
+            "multiple_hextets",
+            "swap_hextets",
+            "zero_suffix",
+            "randomize_suffix",
+            "preserve_prefix_change_host",
+        )
+    )
+
+    if mutation_strategy == "single_hextet":
+        target_index = rng.randrange(8)
+        hextets[target_index] = rng.randrange(65536)
+        return ipaddress.IPv6Address(":".join(f"{part:x}" for part in hextets))
+
+    if mutation_strategy == "multiple_hextets":
+        for target_index in rng.sample(range(8), k=rng.randint(2, 4)):
+            hextets[target_index] = rng.randrange(65536)
+        return ipaddress.IPv6Address(":".join(f"{part:x}" for part in hextets))
+
+    if mutation_strategy == "swap_hextets":
+        left_index, right_index = rng.sample(range(8), k=2)
+        hextets[left_index], hextets[right_index] = hextets[right_index], hextets[left_index]
+        return ipaddress.IPv6Address(":".join(f"{part:x}" for part in hextets))
+
+    address_int = int(address)
+    if mutation_strategy == "zero_suffix":
+        return ipaddress.IPv6Address(
+            _apply_host_mask(
+                address_int=address_int,
+                prefix_length=effective_prefix,
+                max_prefix_length=128,
+                host_int=0,
+            )
+        )
+
+    if mutation_strategy in {"randomize_suffix", "preserve_prefix_change_host"}:
+        return ipaddress.IPv6Address(
+            _randomize_host_bits(
+                address_int=address_int,
+                prefix_length=effective_prefix,
+                max_prefix_length=128,
+                rng=rng,
+            )
+        )
+
+    return ipaddress.IPv6Address(":".join(f"{part:x}" for part in hextets))
+
+
+def _mutate_ipv6_address(
+    *,
+    address: ipaddress.IPv6Address,
+    rng: random.Random,
+    prefix_length: int | None = None,
+) -> ipaddress.IPv6Address:
+    if rng.random() < 0.2:
+        hextets = address.exploded.split(":")
+        target_index = rng.randrange(8)
+        next_value = (int(hextets[target_index], 16) + rng.choice((-4096, -1, 1, 4096))) % 65536
+        hextets[target_index] = f"{next_value:x}"
+        return ipaddress.IPv6Address(":".join(hextets))
+    return _mutate_ipv6_address_structural(
+        address=address,
+        prefix_length=prefix_length,
+        rng=rng,
+    )
 
 
 def _mutate_ip_address(
     *,
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
     rng: random.Random,
+    prefix_length: int | None = None,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     if isinstance(address, ipaddress.IPv4Address):
-        return _mutate_ipv4_address(address=address, rng=rng)
-    return _mutate_ipv6_address(address=address, rng=rng)
+        return _mutate_ipv4_address(address=address, rng=rng, prefix_length=prefix_length)
+    return _mutate_ipv6_address(address=address, rng=rng, prefix_length=prefix_length)
 
 
 def _generate_ip_text(*, grammar_spec: GrammarSpec, max_depth: int, rng: random.Random) -> str:
     return generate_from_grammar(grammar_spec=grammar_spec, max_depth=max_depth, rng=rng)
+
+
+def _mutate_ip_interface_text(
+    *,
+    interface: ipaddress.IPv4Interface | ipaddress.IPv6Interface,
+    rng: random.Random,
+) -> str:
+    max_prefix_length = 32 if interface.version == 4 else 128
+    mutation_strategy = rng.choice(
+        (
+            "mutate_address_only",
+            "mutate_prefix_only",
+            "preserve_network_change_host",
+            "snap_to_network_boundary",
+        )
+    )
+
+    if mutation_strategy == "mutate_address_only":
+        mutated_address = _mutate_ip_address(
+            address=interface.ip,
+            prefix_length=interface.network.prefixlen,
+            rng=rng,
+        )
+        return _format_ip_interface_text(
+            address=mutated_address,
+            prefix_length=interface.network.prefixlen,
+            rng=rng,
+        )
+
+    if mutation_strategy == "mutate_prefix_only":
+        mutated_prefix = _mutate_prefix_length(
+            prefix_length=interface.network.prefixlen,
+            max_prefix_length=max_prefix_length,
+            rng=rng,
+        )
+        return _format_ip_interface_text(
+            address=interface.ip,
+            prefix_length=mutated_prefix,
+            rng=rng,
+        )
+
+    if mutation_strategy == "snap_to_network_boundary":
+        return _format_ip_interface_text(
+            address=interface.network.network_address,
+            prefix_length=interface.network.prefixlen,
+            rng=rng,
+        )
+
+    mutated_address = type(interface.ip)(
+        _randomize_host_bits(
+            address_int=int(interface.ip),
+            prefix_length=interface.network.prefixlen,
+            max_prefix_length=max_prefix_length,
+            rng=rng,
+        )
+    )
+    return _format_ip_interface_text(
+        address=mutated_address,
+        prefix_length=interface.network.prefixlen,
+        rng=rng,
+    )
 
 
 def _mutate_valid_ip_text(
@@ -597,16 +967,36 @@ def _mutate_valid_ip_text(
     try:
         if "/" in original_text:
             interface = ipaddress.ip_interface(original_text)
-            mutated_address = _mutate_ip_address(address=interface.ip, rng=rng)
-            prefix_limit = 32 if interface.version == 4 else 128
-            mutated_prefix = min(
-                prefix_limit,
-                max(0, interface.network.prefixlen + rng.choice((-16, -8, -1, 1, 8, 16))),
+            for _ in range(8):
+                candidate = _mutate_ip_interface_text(interface=interface, rng=rng)
+                if candidate != original_text:
+                    return candidate
+            return _format_ip_interface_text(
+                address=interface.ip,
+                prefix_length=interface.network.prefixlen,
+                rng=rng,
             )
-            return f"{mutated_address}/{mutated_prefix}"
 
         address = ipaddress.ip_address(original_text)
-        return str(_mutate_ip_address(address=address, rng=rng))
+        for _ in range(8):
+            mutated_address = _mutate_ip_address(address=address, prefix_length=None, rng=rng)
+            if rng.random() < 0.2:
+                prefix_limit = 32 if mutated_address.version == 4 else 128
+                default_prefix = 24 if mutated_address.version == 4 else 64
+                candidate = _format_ip_interface_text(
+                    address=mutated_address,
+                    prefix_length=_mutate_prefix_length(
+                        prefix_length=default_prefix,
+                        max_prefix_length=prefix_limit,
+                        rng=rng,
+                    ),
+                    rng=rng,
+                )
+            else:
+                candidate = _format_ip_address_text(address=mutated_address, rng=rng)
+            if candidate != original_text:
+                return candidate
+        return _format_ip_address_text(address=address, rng=rng)
     except ValueError:
         fragment = _generate_ip_text(grammar_spec=grammar_spec, max_depth=max_depth, rng=rng)
         return _mutate_text_from_original(original_text=original_text, fragment=fragment, rng=rng)

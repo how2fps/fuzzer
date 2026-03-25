@@ -86,7 +86,11 @@ def run_fuzzer(
 
     results_folder.mkdir(parents=True, exist_ok=True)
     # Clear canonical target logs + per-worker scratch so bug_counts doesn't leak across runs.
-    clear_bug_counts_csv(target=effective_target, results_folder=results_folder)
+    clear_bug_counts_csv(
+        target=effective_target,
+        results_folder=results_folder,
+        parser_config=config.get("parser_config"),  # type: ignore[arg-type]
+    )
 
     # Save the config used for this run into the results folder
     config_dest = results_folder / "config.json"
@@ -228,6 +232,7 @@ def run_fuzzer(
                 results_folder=results_folder,
                 db_path=db_path,
                 target=effective_target,
+                parser_config=config.get("parser_config"),  # type: ignore[arg-type]
             )
             if original_sigint is not None:
                 try:

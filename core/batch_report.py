@@ -401,16 +401,27 @@ def _plot_grouped_bar(*, title: str, categories: list[str], series: list[tuple[s
     return fig
 
 
-def _plot_lines(*, title: str, x_label: str, y_label: str, lines: list[tuple[str, list[tuple[float, int]]]]) -> Any:
+def _plot_lines(
+    *,
+    title: str,
+    x_label: str,
+    y_label: str,
+    lines: list[tuple[str, list[tuple[float, int]]]],
+    extend_to_chart_end: bool = False,
+) -> Any:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(10, 4.8))
     drawn = 0
+    max_x = max((float(x) for _, points in lines for x, _ in points), default=None)
     for label, points in lines:
         if not points:
             continue
-        xs = [float(x) for x, _ in points]
-        ys = [int(y) for _, y in points]
+        plotted_points = [(float(x), int(y)) for x, y in points]
+        if extend_to_chart_end and max_x is not None and plotted_points[-1][0] < max_x:
+            plotted_points.append((max_x, plotted_points[-1][1]))
+        xs = [x for x, _ in plotted_points]
+        ys = [y for _, y in plotted_points]
         ax.step(xs, ys, where="post", label=label, alpha=0.9)
         drawn += 1
     ax.set_title(title if drawn else f"{title} (Data unavailable)")
@@ -468,6 +479,77 @@ def _load_baseline_rows(*, baseline_dir: Path, target: str) -> list[dict[str, An
         except (json.JSONDecodeError, OSError):
             return []
     return []
+
+
+def _baseline_timestamp_seconds(row: dict[str, Any]) -> float | None:
+    value = row.get("datetime_executed")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_baseline_runs(*, rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    if not rows:
+        return []
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            _baseline_timestamp_seconds(row) if _baseline_timestamp_seconds(row) is not None else float("inf"),
+            _safe_int(str(row.get("iteration") or "")) or 0,
+        ),
+    )
+    runs: list[list[dict[str, Any]]] = []
+    current_run: list[dict[str, Any]] = []
+    previous_iteration: int | None = None
+    for row in ordered:
+        iteration = _safe_int(str(row.get("iteration") or ""))
+        if current_run and iteration is not None and previous_iteration is not None and iteration < previous_iteration:
+            runs.append(current_run)
+            current_run = []
+        current_run.append(row)
+        if iteration is not None:
+            previous_iteration = iteration
+    if current_run:
+        runs.append(current_run)
+    return runs
+
+
+def _baseline_run_unique_bug_count(*, rows: list[dict[str, Any]]) -> int:
+    return len(
+        {
+            normalize_bug_signature({k: str(v) for k, v in row.items()})
+            for row in rows
+            if str(row.get("status", "")).lower() in BUG_STATUSES
+        }
+    )
+
+
+def _baseline_run_elapsed_seconds(*, rows: list[dict[str, Any]]) -> float | None:
+    timestamps = [ts for row in rows if (ts := _baseline_timestamp_seconds(row)) is not None]
+    if len(timestamps) < 2:
+        return 0.0 if timestamps else None
+    return max(timestamps) - min(timestamps)
+
+
+def _select_best_baseline_run(*, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    runs = _split_baseline_runs(rows=rows)
+    if not runs:
+        return []
+    return max(
+        runs,
+        key=lambda run: (
+            _baseline_run_unique_bug_count(rows=run),
+            -(
+                _baseline_run_elapsed_seconds(rows=run)
+                if _baseline_run_elapsed_seconds(rows=run) is not None
+                else float("inf")
+            ),
+            -max((_safe_int(str(row.get("iteration") or "")) or 0 for row in run), default=0),
+        ),
+    )
 
 
 def _to_str(value: Any) -> str:
@@ -932,8 +1014,10 @@ def render_rq3_baseline_ablation(
         our_runs = runs_by_target_config.get(target, {}).get(best_cfg, [])
 
         baseline = _load_baseline_rows(baseline_dir=baseline_results_dir, target=target)
-        baseline_interesting = _compute_cumulative_metrics_over_iteration(rows=[{k: str(v) for k, v in row.items()} for row in baseline], metric="interesting_tests")
-        baseline_bugs = _compute_cumulative_metrics_over_iteration(rows=[{k: str(v) for k, v in row.items()} for row in baseline], metric="unique_bugs")
+        selected_baseline = _select_best_baseline_run(rows=baseline)
+        selected_baseline_rows = [{k: str(v) for k, v in row.items()} for row in selected_baseline]
+        baseline_interesting = _compute_cumulative_metrics_over_iteration(rows=selected_baseline_rows, metric="interesting_tests")
+        baseline_bugs = _compute_cumulative_metrics_over_iteration(rows=selected_baseline_rows, metric="unique_bugs")
         our_interesting_lines = [
             (f"our/{run.run_id}", _compute_cumulative_metrics_over_iteration(rows=run.rows, metric="interesting_tests"))
             for run in our_runs
@@ -948,6 +1032,7 @@ def render_rq3_baseline_ablation(
             x_label="iteration",
             y_label="cumulative unique bugs",
             lines=our_bug_lines + [("AFL++ baseline", [(float(x), y) for x, y in baseline_bugs])],
+            extend_to_chart_end=True,
         )
         out_bugs = charts_dir / f"rq3_baseline_unique_bugs_vs_time_{_slug(target)}.png"
         save_chart_png(fig_bugs, out_bugs)
@@ -972,12 +1057,12 @@ def render_rq3_baseline_ablation(
                 "afl++_blackbox",
                 "baseline",
                 "1",
-                html.escape(str(len({normalize_bug_signature({k: str(v) for k, v in row.items()}) for row in baseline if str(row.get('status', '')).lower() in BUG_STATUSES}))),
+                html.escape(str(_baseline_run_unique_bug_count(rows=selected_baseline))),
                 html.escape(
                     str(
                         sum(
                             1
-                            for row in baseline
+                            for row in selected_baseline
                             if float(row.get("isinteresting_score", 0) or 0)
                             > INTERESTING_SCORE_THRESHOLD
                         )

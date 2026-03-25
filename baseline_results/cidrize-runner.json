@@ -1,0 +1,62 @@
+[
+  {
+    "exception": "AddrFormatError",
+    "line": 1045,
+    "file": "netaddr/ip/__init__.py",
+    "bug_type": "syntactic",
+    "mutated_input": "1..3.2.,.K\u0010",
+    "status": "bug",
+    "iteration": 5,
+    "datetime_executed": 1774178952.602077
+  },
+  {
+    "exception": "ValidityBug",
+    "line": 480,
+    "file": "buggy_cidrize/cidrize_stv.py",
+    "bug_type": "validity",
+    "mutated_input": "1.fe3.3.44\n",
+    "status": "bug",
+    "iteration": 2,
+    "datetime_executed": 1774178882.351814
+  },
+  {
+    "exception": "ReliabilityBug",
+    "line": 302,
+    "file": "buggy_cidrize/cidrize_stv.py",
+    "bug_type": "reliability",
+    "mutated_input": "0::1\n\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u0019\u00193,4\n",
+    "status": "bug",
+    "iteration": 1,
+    "datetime_executed": 1774178778.4000916
+  },
+  {
+    "exception": "CidrizeError",
+    "line": 411,
+    "file": "buggy_cidrize/cidrize_stv.py",
+    "bug_type": "handled",
+    "mutated_input": "1.2.BNN\n",
+    "status": "bug",
+    "iteration": 0,
+    "datetime_executed": 1774178769.9352238
+  },
+  {
+    "exception": "InvalidCidrFormatError",
+    "line": 254,
+    "file": "buggy_cidrize/cidrize_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "1..3-2.3-4\n",
+    "status": "bug",
+    "iteration": 13682,
+    "datetime_executed": 1774188226.9638484
+  },
+  {
+    "exception": "Unknown",
+    "line": 242,
+    "file": "buggy_cidrize/cidrize_stv.py",
+    "bug_type": "bonus",
+    "mutated_input": "1.2.(.)\n",
+    "status": "bug",
+    "iteration": 16070,
+    "datetime_executed": 1774189951.1440327
+  }
+]

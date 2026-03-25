@@ -1,0 +1,132 @@
+[
+  {
+    "exception": "JSONDecodeError",
+    "line": 185,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "{\u001da\":\"<\"}",
+    "status": "bug",
+    "iteration": 6,
+    "datetime_executed": 1774332213.6038063
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 384,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "'{}'",
+    "status": "bug",
+    "iteration": 0,
+    "datetime_executed": 1774332209.9695632
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 115,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "{\"a5}'\n\u00fc\u00fc\u00fc\u00fc\b\u00fc\u00fc'\".\"\n\"}",
+    "status": "bug",
+    "iteration": 16,
+    "datetime_executed": 1774332217.2505023
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 224,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "{\"a\":\"3\"\"a}",
+    "status": "bug",
+    "iteration": 5,
+    "datetime_executed": 1774332213.2728717
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 196,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "{\"a:\"\":\u0003\u00e8\"}",
+    "status": "bug",
+    "iteration": 3,
+    "datetime_executed": 1774332212.2965612
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 210,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "{\"a\":\b\u00cc\"}",
+    "status": "bug",
+    "iteration": 10,
+    "datetime_executed": 1774332215.2490234
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 369,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "\"a::\"3\"{\"a::\"3\"}",
+    "status": "bug",
+    "iteration": 17,
+    "datetime_executed": 1774332217.5791385
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 101,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "{\"a\":\"3'}",
+    "status": "bug",
+    "iteration": 28,
+    "datetime_executed": 1774332221.7637315
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 136,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "\"}{\\\u0004}'a\u00ff\u007f{\\\u0004}'a\u00ff\u007f.1\u00f1\u007f{\\\u0004}\u0004}'a\u00ff\u007f.1\u00f1\u0089{\\\u0004}'}'}",
+    "status": "bug",
+    "iteration": 2002,
+    "datetime_executed": 1774332979.1737516
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 267,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "[\"a\":\"333",
+    "status": "bug",
+    "iteration": 358,
+    "datetime_executed": 1774332347.515134
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 257,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "[#G\"\u00fe\f:\"o",
+    "status": "bug",
+    "iteration": 575,
+    "datetime_executed": 1774332428.3713744
+  },
+  {
+    "exception": "Unknown",
+    "line": 24,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/scanner_stv.py",
+    "bug_type": "bonus",
+    "mutated_input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[?[[[[[[[[[[[[[[[[[[[[\u0080[[[[r[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[a[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\u007f",
+    "status": "bug",
+    "iteration": 23751,
+    "datetime_executed": 1774341442.718424
+  },
+  {
+    "exception": "JSONDecodeError",
+    "line": 232,
+    "file": "/home/fgrgr5r/Documents/Weim/targets/json-decoder/buggy_json/decoder_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "{\"a\":\"3\",",
+    "status": "bug",
+    "iteration": 24707,
+    "datetime_executed": 1774341814.1400828
+  }
+]

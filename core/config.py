@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -8,7 +9,12 @@ from typing import TypedDict
 
 from isinteresting import list_versions as isinteresting_versions
 from mutator import list_versions as mutator_versions
-from parser import DEFAULT_TIMEOUT, TARGETS, list_versions as parser_versions
+from parser import (
+    DEFAULT_TIMEOUT,
+    TARGETS,
+    get_target_registry,
+    list_versions as parser_versions,
+)
 from power_scheduler import list_versions as power_scheduler_versions
 from seed_corpus import list_versions as seed_corpus_versions
 from seed_scheduler import list_versions as scheduler_versions
@@ -43,6 +49,7 @@ class FuzzConfig(TypedDict):
     seed_corpus_version: str
     llm_seed_candidates: int
     enable_open_coverage: bool
+    parser_config: dict[str, object]
 
 
 def get_default_config() -> FuzzConfig:
@@ -71,14 +78,56 @@ def get_default_config() -> FuzzConfig:
         "seed_corpus_version": "base",
         "llm_seed_candidates": 5,
         "enable_open_coverage": ENABLE_OPEN_COVERAGE,
+        "parser_config": {},
     }
+
+
+def _deep_merge_dicts(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)  # type: ignore[arg-type]
+            continue
+        merged[key] = copy.deepcopy(value)
+    return merged
 
 
 def _validate_config(config: FuzzConfig) -> None:
     """Validate config values against allowed choices; raise ValueError on invalid."""
-    if config["target"] not in TARGETS:
+    parser_config = config["parser_config"]
+    if not isinstance(parser_config, dict):
+        raise ValueError("parser_config must be an object.")
+    parser_targets = parser_config.get("targets")
+    if parser_targets is not None and not isinstance(parser_targets, dict):
+        raise ValueError("parser_config.targets must be an object when provided.")
+    parser_targets_base_dir = parser_config.get("targets_base_dir")
+    if parser_targets_base_dir is not None and (
+        not isinstance(parser_targets_base_dir, str) or not parser_targets_base_dir.strip()
+    ):
+        raise ValueError("parser_config.targets_base_dir must be a non-empty string when provided.")
+    if isinstance(parser_targets, dict):
+        for target_name, entry in parser_targets.items():
+            if not isinstance(target_name, str) or not target_name.strip():
+                raise ValueError("parser_config.targets keys must be non-empty strings.")
+            if not isinstance(entry, dict):
+                raise ValueError(f"parser_config.targets[{target_name!r}] must be an object.")
+            command = entry.get("command")
+            if command is not None and not isinstance(command, dict):
+                raise ValueError(
+                    f"parser_config.targets[{target_name!r}].command must be an object."
+                )
+            coverage = entry.get("coverage")
+            if coverage is not None and not isinstance(coverage, dict):
+                raise ValueError(
+                    f"parser_config.targets[{target_name!r}].coverage must be an object."
+                )
+
+    available_targets = get_target_registry(
+        parser_config=config["parser_config"]  # type: ignore[arg-type]
+    )
+    if config["target"] not in available_targets:
         raise ValueError(
-            f"Invalid target: {config['target']}. Must be one of: {sorted(TARGETS.keys())}"
+            f"Invalid target: {config['target']}. Must be one of: {sorted(available_targets.keys())}"
         )
     scheduler_choices = list(scheduler_versions())
     if config["scheduler_kind"] not in scheduler_choices:
@@ -154,12 +203,29 @@ def load_config_from_file(path: Path) -> FuzzConfig:
     merged: FuzzConfig = {**defaults}
     for key in merged:
         if key in data and data[key] is not None:
+            if (
+                key == "parser_config"
+                and isinstance(merged[key], dict)
+                and isinstance(data[key], dict)
+            ):
+                merged[key] = _deep_merge_dicts(  # type: ignore[literal-required]
+                    merged[key], data[key]
+                )
+                continue
             merged[key] = data[key]  # type: ignore[literal-required]
     if merged["grammar_path"] is not None:
         grammar_path = Path(merged["grammar_path"])
         if not grammar_path.is_absolute():
             grammar_path = (path.parent / grammar_path).resolve()
         merged["grammar_path"] = str(grammar_path)
+    parser_config = merged["parser_config"]
+    if isinstance(parser_config, dict):
+        raw_targets_base_dir = parser_config.get("targets_base_dir")
+        if isinstance(raw_targets_base_dir, str) and raw_targets_base_dir.strip():
+            targets_base_dir = Path(raw_targets_base_dir)
+            if not targets_base_dir.is_absolute():
+                targets_base_dir = (path.parent / targets_base_dir).resolve()
+            parser_config["targets_base_dir"] = str(targets_base_dir)
     # Normalize: if max_hours is set, clear max_iterations
     if merged.get("max_hours"):
         merged["max_iterations"] = None
@@ -417,6 +483,7 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "seed_corpus_version": args.seed_corpus_version,
         "llm_seed_candidates": args.llm_seed_candidates,
         "enable_open_coverage": args.enable_open_coverage,
+        "parser_config": {},
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "seed_corpus_initial_draw": None,
     }
@@ -479,3 +546,4 @@ def print_config(config: FuzzConfig) -> None:
     log.info("  seed_corpus_version: %s", config["seed_corpus_version"])
     log.info("  llm_seed_candidates: %s", config["llm_seed_candidates"])
     log.info("  enable_open_coverage: %s", config["enable_open_coverage"])
+    log.info("  parser_config: %s", config["parser_config"])
