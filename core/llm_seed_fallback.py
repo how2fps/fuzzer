@@ -14,7 +14,7 @@ from core.config import FuzzConfig
 from core.db_utils import get_seed_generation_context
 from core.fuzzer_logging import get_fuzzer_logger
 from core.paths import FUZZER_ROOT
-from parser import TARGETS
+from parser import get_target_registry
 from seed_corpus import Seed
 
 
@@ -77,8 +77,10 @@ def _load_dotenv_if_present() -> None:
     _DOTENV_LOADED = True
 
 
-def _target_type(target: str) -> str:
-    entry = TARGETS.get(target, {})
+def _target_type(*, target: str, config: FuzzConfig) -> str:
+    entry = get_target_registry(
+        parser_config=config.get("parser_config")  # type: ignore[arg-type]
+    ).get(target, {})
     if entry.get("oracle") is not None and target != "json-decoder":
         return "black_box_differential"
     if target == "json-decoder":
@@ -105,7 +107,7 @@ def _build_prompt(
     seed_count = config["llm_seed_candidates"]
     payload = {
         "target_name": target,
-        "target_type": _target_type(target),
+        "target_type": _target_type(target=target, config=config),
         "input_format": _input_format(target),
         "target_description": DEFAULT_TARGET_DESCRIPTIONS.get(
             target,

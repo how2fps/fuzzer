@@ -46,3 +46,17 @@ Example `configs/my_run.json` (only override what you care about):
   "workers": 4
 }
 ```
+
+## Adding a new parser target
+
+Use `parser_config` to define parser-only target metadata from JSON. The sample
+file `configs/_template_custom_target.json` shows the full shape.
+
+- `parser_config.targets_base_dir`: base directory that contains your target folders.
+- `parser_config.targets.<name>.path`: folder for the target, relative to `targets_base_dir`.
+- `parser_config.targets.<name>.command.argv`: fixed command list.
+- `parser_config.targets.<name>.command.argv_template`: command list with placeholders like `{platform}`, `{exe_suffix}`, `{python_executable}`, `{project_root}`, `{parser_dir}`, `{target_dir}`, `{seed_family}`, and `{ip_version}`.
+- `parser_config.targets.<name>.command.input_via_stdin`: if `true`, pass bytes on stdin.
+- `parser_config.targets.<name>.command.append_input_as_final_arg`: if `false`, do not append the input as the last CLI arg when not using stdin.
+- `parser_config.targets.<name>.oracle`: optional paired open/oracle target name.
+- `parser_config.targets.<name>.coverage.enabled`: set `true` only for open targets already supported by `parser/open_coverage_runner.py`.
