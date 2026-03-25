@@ -7,7 +7,7 @@ allowing the fuzzer to dynamically learn the best mix of techniques for the targ
 from __future__ import annotations
 
 import atexit
-import json
+import orjson as json
 import random
 from typing import Any, Callable
 
@@ -43,69 +43,79 @@ def _grammar_operator(grammar_spec):
         return mutate_text_with_grammar(original_text=text, grammar_spec=grammar_spec, max_depth=5, rng=rng)
     return wrapper
 
-# 3. Create the unified operator dictionaries
-ALL_JSON_OPS = dict(JSON_OPERATORS)
-ALL_JSON_OPS.update({
+# 3. Create the unified operator pool
+UNIFIED_OPS = {}
+
+def json_semantic_wrapper(op_func):
+    """Parses JSON text into dict/list and applies a JSON operator."""
+    def wrapper(text: str, rng: random.Random) -> str:
+        # JSON operators require parsed Python objects
+        data = json.loads(text)
+        mutated_data = op_func(data, rng)
+        # Prevent double-encoding if the operator returned raw JSON text (e.g. duplicate_keys)
+        if isinstance(mutated_data, str):
+            return mutated_data
+        return json.dumps(mutated_data).decode("utf-8", errors="ignore")
+    return wrapper
+
+# Add JSON operators with prefix
+for name, func in JSON_OPERATORS.items():
+    UNIFIED_OPS[f"json_{name}"] = json_semantic_wrapper(func)
+
+# Add IP operators with prefix
+for name, func in IP_OPERATORS.items():
+    UNIFIED_OPS[f"ip_{name}"] = func
+
+# Add Byte Havoc operators
+UNIFIED_OPS.update({
     "byte_bit_flip": _wrap_byte_mutator(bit_flip),
     "byte_arithmetic": _wrap_byte_mutator(arithmetic_mutation),
     "byte_interesting_val": _wrap_byte_mutator(interesting_value_mutation),
     "byte_delete_block": _wrap_byte_mutator(delete_block_mutation),
     "byte_clone_block": _wrap_byte_mutator(clone_block_mutation),
-    "grammar_splice": _grammar_operator(JSON_GRAMMAR),
 })
 
-ALL_IP_OPS = dict(IP_OPERATORS)
-ALL_IP_OPS.update({
-    "byte_bit_flip": _wrap_byte_mutator(bit_flip),
-    "byte_arithmetic": _wrap_byte_mutator(arithmetic_mutation),
-    "byte_interesting_val": _wrap_byte_mutator(interesting_value_mutation),
-    "byte_delete_block": _wrap_byte_mutator(delete_block_mutation),
-    "byte_clone_block": _wrap_byte_mutator(clone_block_mutation),
-    "grammar_splice": _grammar_operator(IP_GRAMMAR),
-})
+# Add Grammar Splices (explicitly distinguished)
+UNIFIED_OPS["json_grammar_cache"] = _grammar_operator(JSON_GRAMMAR)
+UNIFIED_OPS["ip_grammar_cache"] = _grammar_operator(IP_GRAMMAR)
 
-# 4. Create our own fuzzer instance that uses the unified pools
+# 4. Create our own fuzzer instance that uses the unified pool
 class AdaptiveAllFuzzer:
     def __init__(self):
-        self.strategies = {
-            "json": AdaptiveStrategy(list(ALL_JSON_OPS.keys())),
-            "ip": AdaptiveStrategy(list(ALL_IP_OPS.keys())),
-        }
-        self._pending: dict[str, tuple[str, str]] = {}
+        self.strategy = AdaptiveStrategy(list(UNIFIED_OPS.keys()))
+        # Maps mutated_text -> op_name for deferred feedback.
+        self._pending = {} 
+        self._counter = 0
 
     def mutate(self, text: str, grammar_type: str, rng: random.Random) -> str:
-        strategy = self.strategies.get(grammar_type)
-        if not strategy:
-            return text
-
-        op_name = strategy.select_operator(rng)
-        operators = ALL_JSON_OPS if grammar_type == "json" else ALL_IP_OPS
-        op_func = operators[op_name]
-
-        if grammar_type == "json":
-            try:
-                data = json.loads(text) if text else {}
-                mutated_data = op_func(data, rng)
-                result = mutated_data if isinstance(mutated_data, str) else json.dumps(mutated_data)
-            except json.JSONDecodeError:
-                # If we can't parse it, we must use a string-based operator
-                string_ops = [k for k in operators.keys() if k.startswith("byte_") or k == "grammar_splice"]
-                fallback_op = rng.choice(string_ops)
-                result = operators[fallback_op](text, rng)
-                op_name = fallback_op
-        else:
-            result = op_func(text, rng)
-
+        # We ignore grammar_type and just pick from the unified pool
+        op_name = self.strategy.select_operator(rng)
+        
+        # If the operator is byte-level, it expects bytes. 
+        # But wait, our wrappers already handle the text/json conversion.
+        # Let's ensure the input to the wrapper is consistent.
+        
+        try:
+            result = UNIFIED_OPS[op_name](text, rng)
+        except Exception:
+            # Fallback if an operator fails on weird input
+            result = mutate_text_with_grammar(
+                original_text=text, 
+                grammar_spec=JSON_GRAMMAR if "json" in op_name else IP_GRAMMAR,
+                rng=rng
+            )
+        
+        # Record which operator produced this output
         if len(self._pending) >= _MAX_PENDING:
             self._pending.pop(next(iter(self._pending)))
-        self._pending[result] = (grammar_type, op_name)
+        self._pending[result] = op_name
+        
         return result
 
     def record_coverage(self, mutated_text: str, gained_coverage: bool) -> None:
-        entry = self._pending.pop(mutated_text, None)
-        if entry is not None:
-            grammar_type, op_name = entry
-            self.strategies[grammar_type].update_score(op_name, gained_coverage)
+        op_name = self._pending.pop(mutated_text, None)
+        if op_name is not None:
+            self.strategy.update_score(op_name, gained_coverage)
 
 # Global instance for this version
 _ALL_FUZZER = AdaptiveAllFuzzer()
@@ -128,50 +138,48 @@ def mutate(
     return _ALL_FUZZER.mutate(text, mutator_kind, rng)
 
 def _print_final_probabilities():
-    print("\n" + "="*50)
-    print(" ADAPTIVE ALL: FINAL OPERATOR PROBABILITIES")
-    print("="*50)
+    print("\n" + "="*60)
+    print(" ADAPTIVE UNIFIED: FINAL OPERATOR PROBABILITIES")
+    print(" (Running EVERYTHING: JSON + IP + Grammar + Havoc)")
+    print("="*60)
 
-    # 1. Define which operator belongs to which study category
-    json_groups = {op: "Semantic" for op in JSON_OPERATORS}
-    json_groups["grammar_splice"] = "Grammar"
-    for op in ALL_JSON_OPS:
-        if op.startswith("byte_"):
-            json_groups[op] = "Byte Havoc"
-            
-    # 2. (Same logic for IP operators)
-    ip_groups = {op: "Semantic" for op in IP_OPERATORS}
-    ip_groups["grammar_splice"] = "Grammar"
-    for op in ALL_IP_OPS:
-        if op.startswith("byte_"):
-            ip_groups[op] = "Byte Havoc"
+    # Define operator categories for the ablation study
+    op_groups = {}
+    for op in UNIFIED_OPS:
+        if op.startswith("json_grammar"):
+            op_groups[op] = "Grammar (JSON)"
+        elif op.startswith("ip_grammar"):
+            op_groups[op] = "Grammar (IP)"
+        elif op.startswith("json_"):
+            op_groups[op] = "Semantic (JSON)"
+        elif op.startswith("ip_"):
+            op_groups[op] = "Semantic (IP)"
+        elif op.startswith("byte_"):
+            op_groups[op] = "Byte Havoc"
+        else:
+            op_groups[op] = "Other"
 
-    group_maps = {"json": json_groups, "ip": ip_groups}
+    strategy = _ALL_FUZZER.strategy
+    total_usage = sum(strategy.usage.values())
+    if total_usage == 0:
+        print("No mutations performed.")
+        return
 
-    # 3. Print the new "Ablation Study" section for each target kind (JSON/IP)
-    for kind, strategy in _ALL_FUZZER.strategies.items():
-        # Only print stats for the target kind that was actually used
-        total_usage = sum(strategy.usage.values())
-        if total_usage == 0:
-            continue
+    # 1. Category-level Ablation Study
+    group_stats = strategy.get_group_stats(op_groups)
+    print(f"\n[Ablation Study - Category Stats]")
+    print(f"  {'Category':20s} | {'Prob':6s} | {'Success Rate':12s}")
+    print(f"  {'-'*20}-+-{'-'*6}-+-{'-'*12}")
+    for group, s in sorted(group_stats.items(), key=lambda x: -x[1]["probability"]):
+        print(f"  {group:20s} | {s['probability']:6.1%} | {s['success_rate']:12.2%}")
 
-        # 1. Category-level Ablation Study
-        group_stats = strategy.get_group_stats(group_maps[kind])
-        print(f"\n[{kind.upper()} Ablation Study - Category Stats]")
-        print(f"  {'Category':15s} | {'Prob':6s} | {'Success Rate':12s}")
-        print(f"  {'-'*15}-+-{'-'*6}-+-{'-'*12}")
-        for group, s in sorted(group_stats.items(), key=lambda x: -x[1]["probability"]):
-            # Normalize display: Probability as percentage, Success Rate as percentage of tries
-            print(f"  {group:15s} | {s['probability']:6.1%} | {s['success_rate']:12.2%}")
-
-        # 2. Individual Top 10
-        probs = strategy.get_probabilities()
-        if not probs:
-            continue
-        print(f"\n[{kind.upper()} Operators - Top 10]")
-        # Sort by highest probability first
-        for op, p in sorted(probs.items(), key=lambda x: -x[1])[:10]:
-            print(f"  {op:25s}: {p:.4f}")
-    print("="*50 + "\n")
+    # 2. Individual Top 10 Operators
+    probs = strategy.get_probabilities()
+    print(f"\n[Top 10 Operators]")
+    print(f"  {'Operator':30s} | {'Prob':8s}")
+    print(f"  {'-'*30}-+-{'-'*8}")
+    for op, p in sorted(probs.items(), key=lambda x: -x[1])[:10]:
+        print(f"  {op:30s} | {p:.4f}")
+    print("="*60 + "\n")
 
 atexit.register(_print_final_probabilities)

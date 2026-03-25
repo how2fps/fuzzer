@@ -253,52 +253,118 @@ def ip_truncate(ip_str: str, rng: random.Random) -> str:
 
 class AdaptiveStrategy:
     def __init__(self, operators: list[str]):
+        # Initial weights (x_now)
         self.weights = {op: 1.0 for op in operators}
         self.usage = {op: 0 for op in operators}
         self.success = {op: 0 for op in operators}
-        self.alpha = 0.1 # Learning rate
+        
+        # --- PSO state (MOpt-AFL inspired) ---
+        self.velocities = {op: 0.0 for op in operators}
+        
+        # L_best is the POSITION (weight) that gave each operator its best efficiency
+        self.local_best_positions = {op: 1.0 for op in operators}
+        self.local_best_efficiencies = {op: 0.0 for op in operators} 
+        
+        # G_best is the POSITION (weight) of the operator that achieved the best overall efficiency
+        self.global_best_position = 1.0
+        self.global_best_efficiency = 0.0                           
+        
+        # Performance tracking in windows (cycles)
+        self.cycle_usage = {op: 0 for op in operators}
+        self.cycle_success = {op: 0 for op in operators}
+        self.cycle_count = 0
+        self.cycle_window = 50 # Reduced from 1000 so PSO can run in fast testing with 8 isolated workers (500 iters/worker)
+        
+        self.w = 0.4 # Inertia weight
+        self.epsilon = 0.05 # Exploration floor
 
     def select_operator(self, rng: random.Random) -> str:
         ops = list(self.weights.keys())
-        weights = list(self.weights.values())
-        op = rng.choices(ops, weights=weights, k=1)[0]
+        # Epsilon-greedy exploration: pick uniformly at random % of the time
+        if rng.random() < self.epsilon:
+            op = rng.choice(ops)
+        else:
+            weights = list(self.weights.values())
+            op = rng.choices(ops, weights=weights, k=1)[0]
+        
         self.usage[op] += 1
+        self.cycle_usage[op] += 1
         return op
 
     def update_score(self, operator: str, gained_new_coverage: bool):
         if gained_new_coverage:
             self.success[operator] += 1
-            # Aggressively reward finding new coverage (5x weight)
-            # This helps rare successes (Grammar) break through the noise
-            self.weights[operator] = self.weights[operator] * 4.0
-        else:
-            # Slightly decrease weight to avoid stagnation
-            self.weights[operator] = max(0.1, self.weights[operator] * (1 - self.alpha * 0.1))
+            self.cycle_success[operator] += 1
+            
+        self.cycle_count += 1
+        if self.cycle_count >= self.cycle_window:
+            self.pso_update()
+            self.cycle_count = 0
+            # Reset cycle stats
+            for op in self.cycle_usage:
+                self.cycle_usage[op] = 0
+                self.cycle_success[op] = 0
+
+    def pso_update(self):
+        """MOpt-AFL Formula tracking scaled efficiency targets."""
+        # 1. Update efficiencies for this cycle
+        for op in self.weights:
+            eff = self.cycle_success[op] / self.cycle_usage[op] if self.cycle_usage[op] > 0 else 0.0
+            
+            if eff > self.local_best_efficiencies[op]:
+                self.local_best_efficiencies[op] = eff
+                
+            if eff > self.global_best_efficiency:
+                self.global_best_efficiency = eff
+
+        # 2. Apply PSO update to each operator
+        for op in self.weights:
+            import random
+            r1 = random.random()
+            r2 = random.random()
+            
+            x_now = self.weights[op]
+            v_now = self.velocities[op]
+            
+            # We scale efficiencies so they serve directly as target weights in the PSO
+            # 1% efficiency (0.01) becomes target weight 5.0
+            l_target = self.local_best_efficiencies[op] * 500.0
+            g_target = self.global_best_efficiency * 500.0
+            
+            # The gravity pulls the current weight toward L_best and G_best targets
+            new_v = (self.w * v_now) + \
+                    (r1 * (l_target - x_now)) + \
+                    (r2 * (g_target - x_now))
+            
+            new_x = x_now + new_v
+            
+            # Apply constraints (weights must be strictly positive)
+            self.velocities[op] = new_v
+            self.weights[op] = max(0.1, new_x)
 
     def get_probabilities(self) -> dict[str, float]:
         total = sum(self.weights.values())
-        return {op: w / total for op, w in self.weights.items()}
+        if total <= 0: return {op: 1.0/len(self.weights) for op in self.weights}
+        n = len(self.weights)
+        # Reflect effective probability: (1 - epsilon) * weight_prob + epsilon_exploration_prob
+        return {op: (1 - self.epsilon) * (w / total) + (self.epsilon / n) for op, w in self.weights.items()}
 
     def get_group_stats(self, op_to_group: dict[str, str]) -> dict[str, dict[str, float]]:
         # 1. Initialize result dictionary
         stats: dict[str, dict[str, float]] = {}
+        probs = self.get_probabilities()
         
-        # 2. Iterate through the mapping we passed in (e.g. "bit_flip" -> "Byte Havoc")
+        # 2. Iterate through mapping
         for op, group in op_to_group.items():
-            if op not in self.weights: continue # Safety check
+            if op not in self.weights: continue 
             
-            # 3. Sum up the weights, usage count, and success count for all ops in this group
-            g = stats.setdefault(group, {"weight": 0.0, "usage": 0.0, "success": 0.0})
-            g["weight"] += self.weights[op]
+            g = stats.setdefault(group, {"probability": 0.0, "usage": 0.0, "success": 0.0})
+            g["probability"] += probs[op]
             g["usage"] += self.usage[op]
             g["success"] += self.success[op]
 
-        # 4. Calculate final percentages
-        total_weight = sum(s["weight"] for s in stats.values())
+        # 3. Calculate success rates
         for s in stats.values():
-            # Probability: The % of time the fuzzer picks this category
-            s["probability"] = s["weight"] / total_weight if total_weight > 0 else 0.0
-            # Success Rate: How often this category actually found code coverage
             s["success_rate"] = s["success"] / s["usage"] if s["usage"] > 0 else 0.0
         return stats
 
