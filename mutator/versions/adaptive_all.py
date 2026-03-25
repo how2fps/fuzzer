@@ -9,6 +9,9 @@ from __future__ import annotations
 import atexit
 import orjson as json
 import random
+import os
+import time
+from multiprocessing import current_process
 from typing import Any, Callable
 
 # Import everything we need from the core mutator
@@ -22,7 +25,8 @@ from ..mutator import (
     delete_block_mutation,
     clone_block_mutation,
     _GLOBAL_FUZZER,
-    _MAX_PENDING
+    _MAX_PENDING,
+    load_grammar_from_json
 )
 from ..operators import JSON_OPERATORS, IP_OPERATORS, AdaptiveStrategy
 
@@ -30,7 +34,11 @@ from ..operators import JSON_OPERATORS, IP_OPERATORS, AdaptiveStrategy
 def _wrap_byte_mutator(func: Callable[[bytes, random.Random], bytes]) -> Callable[[Any, random.Random], str]:
     def wrapper(data_or_text: Any, rng: random.Random) -> str:
         # If the input is already parsed JSON (dict/list), we need to serialize it first
-        text = json.dumps(data_or_text) if isinstance(data_or_text, (dict, list)) else str(data_or_text)
+        if isinstance(data_or_text, (dict, list)):
+            text = json.dumps(data_or_text).decode("utf-8", errors="ignore")
+        else:
+            text = str(data_or_text)
+            
         b = text.encode("utf-8", errors="replace")
         mutated_b = func(data=b, rng=rng)
         return mutated_b.decode("utf-8", errors="ignore")
@@ -39,7 +47,10 @@ def _wrap_byte_mutator(func: Callable[[bytes, random.Random], bytes]) -> Callabl
 # 2. Wrapper to make grammar mutation look like a string operator
 def _grammar_operator(grammar_spec):
     def wrapper(data_or_text: Any, rng: random.Random) -> str:
-        text = json.dumps(data_or_text) if isinstance(data_or_text, (dict, list)) else str(data_or_text)
+        if isinstance(data_or_text, (dict, list)):
+            text = json.dumps(data_or_text).decode("utf-8", errors="ignore")
+        else:
+            text = str(data_or_text)
         return mutate_text_with_grammar(original_text=text, grammar_spec=grammar_spec, max_depth=5, rng=rng)
     return wrapper
 
@@ -82,10 +93,19 @@ UNIFIED_OPS["ip_grammar_cache"] = _grammar_operator(IP_GRAMMAR)
 # 4. Create our own fuzzer instance that uses the unified pool
 class AdaptiveAllFuzzer:
     def __init__(self):
-        self.strategy = AdaptiveStrategy(list(UNIFIED_OPS.keys()))
+        self._init_strategy()
         # Maps mutated_text -> op_name for deferred feedback.
         self._pending = {} 
         self._counter = 0
+
+    def _init_strategy(self):
+        self.strategy = AdaptiveStrategy(list(UNIFIED_OPS.keys()))
+
+    def add_grammar_operator(self, name: str, grammar_spec: Any):
+        """Adds a new grammar-based operator to the pool and re-inits strategy."""
+        op_name = f"custom_grammar_{name}"
+        UNIFIED_OPS[op_name] = _grammar_operator(grammar_spec)
+        self._init_strategy()
 
     def mutate(self, text: str, grammar_type: str, rng: random.Random) -> str:
         # We ignore grammar_type and just pick from the unified pool
@@ -120,6 +140,26 @@ class AdaptiveAllFuzzer:
 # Global instance for this version
 _ALL_FUZZER = AdaptiveAllFuzzer()
 
+def configure(grammar_file: str | None = None):
+    """Configures the adaptive fuzzer with optional external grammar(s)."""
+    if not grammar_file:
+        return
+
+    import os
+    if os.path.isdir(grammar_file):
+        # Load all JSON grammars in the directory
+        for filename in os.listdir(grammar_file):
+            if filename.endswith(".json"):
+                path = os.path.join(grammar_file, filename)
+                name = filename.split('.')[0]
+                spec = load_grammar_from_json(path)
+                _ALL_FUZZER.add_grammar_operator(name, spec)
+    else:
+        # Load a single grammar file
+        name = os.path.basename(grammar_file).split('.')[0]
+        spec = load_grammar_from_json(grammar_file)
+        _ALL_FUZZER.add_grammar_operator(name, spec)
+
 # Provide an implementation of record_coverage that mutator/__init__.py can forward to
 def handle_coverage_feedback(mutated_text: str, gained_coverage: bool) -> bool:
     """Returns True if this fuzzer handled the feedback."""
@@ -138,48 +178,44 @@ def mutate(
     return _ALL_FUZZER.mutate(text, mutator_kind, rng)
 
 def _print_final_probabilities():
-    print("\n" + "="*60)
-    print(" ADAPTIVE UNIFIED: FINAL OPERATOR PROBABILITIES")
-    print(" (Running EVERYTHING: JSON + IP + Grammar + Havoc)")
-    print("="*60)
-
-    # Define operator categories for the ablation study
-    op_groups = {}
-    for op in UNIFIED_OPS:
-        if op.startswith("json_grammar"):
-            op_groups[op] = "Grammar (JSON)"
-        elif op.startswith("ip_grammar"):
-            op_groups[op] = "Grammar (IP)"
-        elif op.startswith("json_"):
-            op_groups[op] = "Semantic (JSON)"
-        elif op.startswith("ip_"):
-            op_groups[op] = "Semantic (IP)"
-        elif op.startswith("byte_"):
-            op_groups[op] = "Byte Havoc"
-        else:
-            op_groups[op] = "Other"
-
+    # Only print if we actually did work
+    proc_name = current_process().name
     strategy = _ALL_FUZZER.strategy
     total_usage = sum(strategy.usage.values())
-    if total_usage == 0:
-        print("No mutations performed.")
+    if total_usage < 10:
         return
 
-    # 1. Category-level Ablation Study
-    group_stats = strategy.get_group_stats(op_groups)
-    print(f"\n[Ablation Study - Category Stats]")
-    print(f"  {'Category':20s} | {'Prob':6s} | {'Success Rate':12s}")
-    print(f"  {'-'*20}-+-{'-'*6}-+-{'-'*12}")
-    for group, s in sorted(group_stats.items(), key=lambda x: -x[1]["probability"]):
-        print(f"  {group:20s} | {s['probability']:6.1%} | {s['success_rate']:12.2%}")
+    print("\n" + "="*60, flush=True)
+    print(f" ADAPTIVE UNIFIED: FINAL OPERATOR PROBABILITIES ({proc_name})", flush=True)
+    print(" (Running EVERYTHING: JSON + IP + Grammar + Havoc)", flush=True)
+    print("="*60, flush=True)
 
-    # 2. Individual Top 10 Operators
+    # Individual Operator Performance Table
     probs = strategy.get_probabilities()
-    print(f"\n[Top 10 Operators]")
-    print(f"  {'Operator':30s} | {'Prob':8s}")
-    print(f"  {'-'*30}-+-{'-'*8}")
-    for op, p in sorted(probs.items(), key=lambda x: -x[1])[:10]:
-        print(f"  {op:30s} | {p:.4f}")
-    print("="*60 + "\n")
+    
+    # Header
+    print(f"\n[Operator Performance Report]", flush=True)
+    print(f"  {'Operator':30s} | {'Usage':8s} | {'Success':8s} | {'Rate %':8s} | {'PSO Score':8s}", flush=True)
+    print(f"  {'-'*30}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}", flush=True)
+    
+    # Sort by success first, then by current probability/score
+    sorted_ops = sorted(
+        UNIFIED_OPS.keys(), 
+        key=lambda op: (strategy.success[op], probs[op]), 
+        reverse=True
+    )
+    
+    for op in sorted_ops:
+        usage = strategy.usage[op]
+        if usage == 0: continue
+        
+        success = strategy.success[op]
+        rate = (success / usage * 100) if usage > 0 else 0
+        score = probs[op]
+        
+        # Only show if it was used at least once or has some success
+        print(f"  {op:30s} | {usage:8d} | {success:8d} | {rate:7.2f}% | {score:8.4f}", flush=True)
+        
+    print("="*60 + "\n", flush=True)
 
 atexit.register(_print_final_probabilities)

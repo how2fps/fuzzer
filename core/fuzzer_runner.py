@@ -24,7 +24,7 @@ from seed_corpus import Seed, get_corpus_loader, get_version_spec
 from seed_scheduler import UCBTreeScheduler, make_scheduler
 from core.workers import run_fuzzer_multi_worker
 from core.target_artifacts import clear_bug_counts_csv
-from mutator.versions import grammar_ast
+from mutator.versions import grammar_ast, adaptive_all
 
 
 def run_fuzzer(
@@ -41,6 +41,8 @@ def run_fuzzer(
     corpus_loader = corpus_version.loader
     corpus = corpus_loader.load()
     grammar_ast.configure(grammar_rules_file=config["grammar_rules_file"])
+    if config["mutator_version"] == "adaptive_all":
+        adaptive_all.configure(grammar_file=config["grammar_rules_file"])
 
     parser_api = get_parser(config["parser_version"])
     mutate_fn = get_mutator(config["mutator_version"])

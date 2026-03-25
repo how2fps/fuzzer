@@ -203,6 +203,36 @@ def _expand_symbol(
     return "".join(parts)
 
 
+def load_grammar_from_json(path: str) -> GrammarSpec:
+    """Loads a GrammarSpec from a JSON file.
+    
+    JSON format should be:
+    {
+      "start": "<start_symbol>",
+      "recursive_symbols": ["<symbol1>", ...],
+      "rules": {
+        "<symbol1>": ["production1", "production2"],
+        ...
+      }
+    }
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    # Validation
+    if "start" not in data or "rules" not in data:
+        raise ValueError(f"Invalid grammar JSON at {path}: must have 'start' and 'rules'")
+    
+    # Convert recursive_symbols list to a set (required by generate_from_grammar)
+    recursive_symbols = set(data.get("recursive_symbols", []))
+    
+    return {
+        "start": data["start"],
+        "recursive_symbols": recursive_symbols,
+        "rules": data["rules"]
+    }
+
+
 def generate_from_grammar(
     *,
     grammar_spec: GrammarSpec,

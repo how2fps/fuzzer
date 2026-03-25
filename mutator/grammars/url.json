@@ -1,0 +1,22 @@
+{
+  "start": "<url>",
+  "recursive_symbols": ["<path>", "<query>", "<value>"],
+  "rules": {
+    "<url>": ["<scheme>://<authority><path><query><fragment>"],
+    "<scheme>": ["http", "https", "ftp", "mailto", "file", "git", "ssh"],
+    "<authority>": ["<userinfo>@<host>:<port>", "<host>:<port>", "<host>"],
+    "<userinfo>": ["admin:admin", "user:pass", "root", ""],
+    "<host>": ["google.com", "localhost", "127.0.0.1", "[::1]", "example.test", "my-server_123"],
+    "<port>": ["80", "443", "8080", "1", "65535", "0"],
+    "<path>": ["/", "/index.html", "/api/v1/<resource>", "/<resource>/<resource>"],
+    "<resource>": ["users", "posts", "login", "admin", "..", "%2e%2e"],
+    "<query>": ["", "?<pair>", "?<pair>&<pair>"],
+    "<pair>": ["<key>=<value>"],
+    "<key>": ["id", "q", "token", "redirect_to", "utm_source"],
+    "<value>": ["123", "abc", "true", "http%3A%2F%2Fother.com", "<query>"],
+    "<fragment>": ["", "#top", "#section-<number>", "#<a><b>"],
+    "<a>": ["1", "2"],
+    "<b>": ["3", "4"],
+    "<number>": ["0", "1", "999"]
+  }
+}
