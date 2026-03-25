@@ -24,6 +24,7 @@ from seed_corpus import get_corpus_loader
 from seed_scheduler import UCBTreeScheduler, make_scheduler
 from core.workers import run_fuzzer_multi_worker
 from core.target_artifacts import clear_bug_counts_csv
+from mutator import configure_runtime_grammar
 
 
 def run_fuzzer(
@@ -49,6 +50,10 @@ def run_fuzzer(
     effective_mutator = infer_mutator_kind(
         mutator_kind=config["mutator_kind"],
         target=effective_target,
+    )
+    configure_runtime_grammar(
+        kind=effective_mutator,
+        grammar_path=config["grammar_path"],
     )
 
     rng = random.Random(

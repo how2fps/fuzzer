@@ -23,6 +23,7 @@ class FuzzConfig(TypedDict):
     target: str
     scheduler_kind: str
     mutator_kind: str
+    grammar_path: str | None
     debug_mode: bool
     seed_preload_mode: str
     seed_preload_total: int
@@ -50,6 +51,7 @@ def get_default_config() -> FuzzConfig:
         "target": "json-decoder",
         "scheduler_kind": "heap",
         "mutator_kind": "auto",
+        "grammar_path": None,
         "debug_mode": False,
         "seed_preload_mode": "full",
         "seed_preload_total": 50,
@@ -87,6 +89,12 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto, json, or ip."
         )
+    grammar_path = config["grammar_path"]
+    if grammar_path is not None:
+        if not isinstance(grammar_path, str) or not grammar_path.strip():
+            raise ValueError("grammar_path must be a non-empty string or null.")
+        if not Path(grammar_path).is_file():
+            raise ValueError(f"grammar_path does not exist: {grammar_path}")
     if config["seed_preload_mode"] not in ("full", "ratio_batch", "sample"):
         raise ValueError(
             f"Invalid seed_preload_mode: {config['seed_preload_mode']}. "
@@ -147,6 +155,11 @@ def load_config_from_file(path: Path) -> FuzzConfig:
     for key in merged:
         if key in data and data[key] is not None:
             merged[key] = data[key]  # type: ignore[literal-required]
+    if merged["grammar_path"] is not None:
+        grammar_path = Path(merged["grammar_path"])
+        if not grammar_path.is_absolute():
+            grammar_path = (path.parent / grammar_path).resolve()
+        merged["grammar_path"] = str(grammar_path)
     # Normalize: if max_hours is set, clear max_iterations
     if merged.get("max_hours"):
         merged["max_iterations"] = None
@@ -213,6 +226,14 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         default="auto",
         choices=["auto", "json", "ip"],
         help="Mutation mode: auto-detect from target, or force json/ip.",
+    )
+    parser.add_argument(
+        "--grammar-file",
+        dest="grammar_path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional JSON grammar file used by the base grammar mutator for the active input family.",
     )
     parser.add_argument(
         "--debug",
@@ -366,12 +387,19 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         parser.error(f"--config path is not a file: {args.config}")
     if args.configs_dir is not None and not args.configs_dir.is_dir():
         parser.error(f"--configs-dir is not a directory: {args.configs_dir}")
+    if args.grammar_path is not None and not args.grammar_path.is_file():
+        parser.error(f"--grammar-file path is not a file: {args.grammar_path}")
 
     max_iterations: int | None = None if args.max_hours is not None else args.max_iterations
     from_args: FuzzConfig = {
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
         "mutator_kind": args.mutator_kind,
+        "grammar_path": (
+            str(args.grammar_path.resolve())
+            if args.grammar_path is not None
+            else None
+        ),
         "debug_mode": args.debug_mode,
         "seed_preload_mode": args.seed_preload_mode,
         "seed_preload_total": args.seed_preload_total,
@@ -431,6 +459,7 @@ def print_config(config: FuzzConfig) -> None:
     log.info("  target: %s", config["target"])
     log.info("  scheduler_kind: %s", config["scheduler_kind"])
     log.info("  mutator_kind: %s", config["mutator_kind"])
+    log.info("  grammar_path: %s", config["grammar_path"])
     log.info("  debug_mode: %s", config["debug_mode"])
     log.info("  seed_corpus_initial_draw: %s", config["seed_corpus_initial_draw"])
     log.info("  seed_preload_mode: %s", config["seed_preload_mode"])

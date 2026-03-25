@@ -38,13 +38,21 @@ class HeapScheduler(BaseSeedScheduler):
         """Wrap a seed, compute its base priority, and push it onto the heap."""
         self._seq += 1
         item_id = f"h{self._seq:06d}"
+        metadata_dict = dict(metadata or {})
         base_priority = float(self._bucket_prior.get(seed.bucket, 0.0))
         item = ScheduledSeed(
             item_id=item_id,
             seed=seed,
             priority=base_priority,
-            metadata=dict(metadata or {}),
+            metadata=metadata_dict,
         )
+        initial_score = metadata_dict.get("initial_isinteresting_score")
+        if initial_score is not None:
+            score = float(initial_score)
+            item.updates = 1
+            item.total_isinteresting_score = score
+            item.last_isinteresting_score = score
+            item.priority = self._compute_priority(item)
         self._items[item_id] = item
         self._push_heap(item)
         return item

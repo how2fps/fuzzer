@@ -1,0 +1,10 @@
+{
+  "start": "<ipv4_input>",
+  "recursive_symbols": [],
+  "rules": {
+    "<ipv4_input>": ["<ipv4>", "<ipv4>/<prefix4>"],
+    "<ipv4>": ["<octet>.<octet>.<octet>.<octet>"],
+    "<octet>": ["0", "1", "10", "127", "192", "223", "254", "255"],
+    "<prefix4>": ["0", "8", "16", "24", "30", "32"]
+  }
+}

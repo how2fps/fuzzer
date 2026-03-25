@@ -193,22 +193,22 @@ def _new_edges_score(conn: sqlite3.Connection, edges: set[tuple[str, int, int]])
                 new_count += 1
     except sqlite3.OperationalError:
         return 0.0
-    if new_count <= 0:
-        return 0.0
     new_ratio = new_count / float(len(edges))
-    return 0.5 + 0.5 * min(new_ratio, 1.0)
+    new_edge_presence = min(float(new_count), 1.0)
+    return (0.5 * new_edge_presence) + (0.5 * min(new_ratio, 1.0))
 
 
-def _rare_bug_score(
+def _repeat_bug_count(
     conn: sqlite3.Connection,
     closed_status: str,
     closed_bug: Mapping[str, Any] | None,
     target: str,
-) -> float:
+) -> int | None:
     if closed_status not in {"bug", "crash", "timeout", "error"}:
-        return 0.0
+        return None
     if not closed_bug:
-        return 0.0
+        return None
+    bug_type = closed_bug.get("type") or ""
     exc = closed_bug.get("exception") or ""
     file_ = closed_bug.get("file") or ""
     line_raw = closed_bug.get("line")
@@ -222,18 +222,30 @@ def _rare_bug_score(
         cur = conn.execute(
             """
             SELECT COUNT(*) FROM runs
-            WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+            WHERE target = ? AND status = ?
+              AND COALESCE(bug_type, '') = COALESCE(?, '')
               AND COALESCE(exception, '') = COALESCE(?, '')
               AND COALESCE(file, '') = COALESCE(?, '')
               AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
             """,
-            (target, exc, file_, line, line),
+            (target, closed_status, bug_type, exc, file_, line, line),
         )
         row = cur.fetchone()
-        count = int(row[0]) if row else 0
+        return int(row[0]) if row else 0
     except sqlite3.OperationalError:
+        return None
+
+
+def _repeat_bug_factor(repeat_count: int | None) -> float:
+    if repeat_count is None or repeat_count <= 0:
+        return 1.0
+    return 1.0 / (1.0 + repeat_count)
+
+
+def _rare_bug_score(repeat_count: int | None) -> float:
+    if repeat_count is None:
         return 0.0
-    return 1.0 / (1.0 + count)
+    return 1.0 / (1.0 + repeat_count)
 
 
 def compute_interestingness(
@@ -291,18 +303,22 @@ def compute_interestingness(
         covered_branches=covered_branches,
         missing_branches=missing_branches,
     )
-    # Additive scoring: combine all available signals instead of taking only
-    # the strongest one. This makes cumulative evidence matter.
-    metric_sum = s_status + s_diff + s_cov
+    repeat_bug_count: int | None = None
+    s_new = 0.0
+    s_rare = 0.0
+    new_edge_weight = 2.0
+    rare_bug_weight = 0.9
     metric_max = 3.0
 
     if sqlite_conn is not None:
         try:
             edges = _get_covered_edges(coverage_source)
+            repeat_bug_count = _repeat_bug_count(
+                sqlite_conn, closed_status, closed_bug, target
+            )
             s_new = _new_edges_score(sqlite_conn, edges)
-            s_rare = _rare_bug_score(sqlite_conn, closed_status, closed_bug, target)
-            metric_sum += s_new + (s_rare * 0.9)
-            metric_max += 1.9
+            s_rare = _rare_bug_score(repeat_bug_count)
+            metric_max += new_edge_weight + rare_bug_weight
         except (sqlite3.Error, OSError):
             pass
     elif db_path and Path(db_path).exists():
@@ -311,16 +327,27 @@ def compute_interestingness(
             conn = open_results_db(path)
             try:
                 edges = _get_covered_edges(coverage_source)
+                repeat_bug_count = _repeat_bug_count(
+                    conn, closed_status, closed_bug, target
+                )
                 s_new = _new_edges_score(conn, edges)
-                s_rare = _rare_bug_score(conn, closed_status, closed_bug, target)
-                metric_sum += s_new + (s_rare * 0.9)
-                metric_max += 1.9
+                s_rare = _rare_bug_score(repeat_bug_count)
+                metric_max += new_edge_weight + rare_bug_weight
             finally:
                 conn.close()
         except (sqlite3.Error, OSError):
             pass
 
+    # Keep rewarding novel coverage signals, but damp bug-related rewards when
+    # the same bug signature has already been observed many times.
+    repeated_bug_factor = _repeat_bug_factor(repeat_bug_count)
+    metric_sum = ((s_status + s_diff) * repeated_bug_factor) + s_cov
+    metric_sum += (s_new * new_edge_weight) + (s_rare * rare_bug_weight)
+
     if metric_max <= 0.0:
         return 0.0
-    score = metric_sum / metric_max
+    weighted_score = metric_sum / metric_max
+    # Blend through s_new so any positive new-coverage signal becomes a lower
+    # bound on the final score instead of just another additive term.
+    score = s_new + ((1.0 - s_new) * weighted_score)
     return max(0.0, min(1.0, float(score)))

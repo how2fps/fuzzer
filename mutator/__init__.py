@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from .mutator import (
+    JSON_GRAMMAR_PATH,
     JSON_GRAMMAR,
+    IP_GRAMMAR_PATH,
     IP_GRAMMAR,
+    IPV4_GRAMMAR_PATH,
     IPV4_GRAMMAR,
+    IPV6_GRAMMAR_PATH,
     IPV6_GRAMMAR,
+    VALID_OUTPUT_PROBABILITY,
     arithmetic_mutation,
     bit_flip,
     clone_block_mutation,
+    configure_runtime_grammar,
     delete_block_mutation,
     generate_from_grammar,
     generate_ip_input,
@@ -15,22 +21,30 @@ from .mutator import (
     generate_ipv6_input,
     generate_json_input,
     interesting_value_mutation,
+    load_grammar_from_json,
     mutate_ip_input,
     mutate_ipv4_input,
     mutate_ipv6_input,
     mutate_json_input,
     mutate_text_with_grammar,
+    normalize_grammar_spec,
 )
 from .versions import get_mutator, list_versions
 
 __all__ = [
     "JSON_GRAMMAR",
+    "JSON_GRAMMAR_PATH",
     "IP_GRAMMAR",
+    "IP_GRAMMAR_PATH",
     "IPV4_GRAMMAR",
+    "IPV4_GRAMMAR_PATH",
     "IPV6_GRAMMAR",
+    "IPV6_GRAMMAR_PATH",
+    "VALID_OUTPUT_PROBABILITY",
     "arithmetic_mutation",
     "bit_flip",
     "clone_block_mutation",
+    "configure_runtime_grammar",
     "delete_block_mutation",
     "generate_from_grammar",
     "generate_ip_input",
@@ -40,10 +54,12 @@ __all__ = [
     "get_mutator",
     "interesting_value_mutation",
     "list_versions",
+    "load_grammar_from_json",
     "mutate_ip_input",
     "mutate_ipv4_input",
     "mutate_ipv6_input",
     "mutate_json_input",
     "mutate_text_with_grammar",
+    "normalize_grammar_spec",
 ]
 

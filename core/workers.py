@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import json
 import random
 import sqlite3
 import sys
@@ -719,6 +720,7 @@ def run_fuzzer_multi_worker(
                         candidate_metadata: dict[str, Any] = {
                             "bucket": candidate.bucket,
                             "parent_seed_id": result["seed_id"],
+                            "initial_isinteresting_score": result["isinteresting_score"],
                         }
                         if parent_signals:
                             candidate_metadata["signals"] = parent_signals
@@ -761,17 +763,18 @@ def run_fuzzer_multi_worker(
                         pending_jobs=pending_jobs,
                         queue_depth=queue_depth,
                         event=" | ".join(event_bits),
+                        mutated_input=result["mutated_input"],
                     )
 
-                # if parser_result is not None:
-                #     try:
-                #         log.info(
-                #             "%s",
-                #             json.dumps(parser_result, default=str, sort_keys=True),
-                #         )
-                #     except (TypeError, ValueError):
-                #         log.info("%s", repr(parser_result))
                 if debug_mode:
+                    if parser_result is not None:
+                        try:
+                            log.info(
+                                "%s",
+                                json.dumps(parser_result, default=str, sort_keys=True),
+                            )
+                        except (TypeError, ValueError):
+                            log.info("%s", repr(parser_result))
                     log.info(
                         "[iter %s] seed=%s score=%.3f status=%s input=%s mutated input=%s",
                         iteration,

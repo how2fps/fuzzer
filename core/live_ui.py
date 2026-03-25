@@ -133,6 +133,7 @@ class RunDashboard:
     llm_source: str = ""
     llm_generated_count: int = 0
     llm_seed_previews: list[str] = field(default_factory=list)
+    last_mutated_input: str = ""
     # Only treat a result as "interesting" when its score is sufficiently high.
     interesting_score_threshold: float = 0.5
 
@@ -191,6 +192,12 @@ class RunDashboard:
             return cleaned
         return cleaned[: limit - 3] + "..."
 
+    def _preview_input(self, value: str, *, limit: int = 240) -> str:
+        cleaned = " ".join(value.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 3] + "..."
+
     def record_schedule(self, *, pending_jobs: int, queue_depth: int, event: str) -> None:
         self.pending_jobs = pending_jobs
         self.queue_depth = queue_depth
@@ -206,13 +213,15 @@ class RunDashboard:
         pending_jobs: int,
         queue_depth: int,
         event: str,
+        mutated_input: str,
     ) -> None:
         self.total_results += 1
         self.pending_jobs = pending_jobs
         self.queue_depth = queue_depth
         self.last_event = event
+        self.last_mutated_input = self._preview_input(mutated_input)
 
-        if score > self.interesting_score_threshold:
+        if score >= self.interesting_score_threshold:
             self.interesting_results += 1
         if status == "crash":
             self.crashes_found += 1
@@ -341,6 +350,12 @@ class RunDashboard:
             table.add_row("previews", previews)
         return Panel(table, title="LLM Seeds", border_style="magenta")
 
+    def _last_mutation_panel(self) -> Panel | None:
+        if not self.last_mutated_input:
+            return None
+        text = Text(self.last_mutated_input, style="white")
+        return Panel(text, title="Last Mutated Input", border_style="yellow")
+
     def render(self) -> RenderableType:
         footer = Table.grid(padding=(0, 1))
         footer.add_row(
@@ -353,6 +368,9 @@ class RunDashboard:
             Panel(self._summary_table(), title="Run Summary", border_style="blue"),
             Panel(self._details_table(), title="Live Table", border_style="cyan"),
         ]
+        last_mutation_panel = self._last_mutation_panel()
+        if last_mutation_panel is not None:
+            panels.append(last_mutation_panel)
         llm_panel = self._llm_panel()
         if llm_panel is not None:
             panels.append(llm_panel)
