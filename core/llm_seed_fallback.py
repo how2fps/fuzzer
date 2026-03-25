@@ -102,6 +102,7 @@ def _build_prompt(
     context: dict[str, Any],
     config: FuzzConfig,
 ) -> str:
+    seed_count = config["llm_seed_candidates"]
     payload = {
         "target_name": target,
         "target_type": _target_type(target),
@@ -113,8 +114,7 @@ def _build_prompt(
         "top_interesting_seeds": context["top_interesting_seeds"],
         "not_interesting_seeds": context["not_interesting_seeds"],
         "already_fuzzed_seeds": context["already_fuzzed_seeds"],
-        "min_seeds": config["llm_seed_min_candidates"],
-        "max_seeds": config["llm_seed_max_candidates"],
+        "seed_count": seed_count,
     }
 
     return """You are helping a fuzzing system recover from seed exhaustion.
@@ -208,7 +208,7 @@ Return ONLY valid JSON with this exact schema:
 }}
 
 ## Hard constraints
-- Output between `{min_seeds}` and `{max_seeds}` candidate seeds.
+- Output exactly `{seed_count}` candidate seeds.
 - Do not include markdown fences.
 - Do not include explanations outside the JSON.
 - Do not output any seed that exactly matches an already fuzzed seed.
@@ -384,21 +384,22 @@ def maybe_generate_seed_candidates(
     target: str,
     config: FuzzConfig,
     results_folder: Path,
+    include_corpus_context: bool = True,
 ) -> LLMSeedFallbackResult | None:
     log = get_fuzzer_logger()
-    if not config["llm_seed_fallback"]:
+    requested = int(config["llm_seed_candidates"])
+    if requested <= 0:
         return None
-
     ready, provider_status = _llm_seed_provider_status()
     if not ready:
-        log.warning("LLM seed fallback is enabled but %s.", provider_status)
+        log.warning("LLM seed generation is unavailable because %s.", provider_status)
         return None
 
     context = get_seed_generation_context(
         conn=conn,
         corpus=corpus,
         target=target,
-        include_corpus_seed_fallback=config.get("llm_seed_use_corpus_context", True),
+        include_corpus_seed_fallback=include_corpus_context,
     )
     prompt_text = _build_prompt(target=target, context=context, config=config)
     try:

@@ -66,6 +66,7 @@ Behavior:
 
 - `base`: normal manifest-backed seed corpus
 - `llm_bootstrap`: skip startup preload and let the runner bootstrap initial seeds from the LLM for the chosen target
+- `regex-noseed`: skip startup preload and let the runner bootstrap initial seeds from the grammar_ast generator (seedless mode)
 
 ## AFL loop integration (minimal)
 
@@ -89,9 +90,7 @@ corpus = SeedCorpus.load()
 conn = sqlite3.connect("runs.db")
 
 config = {
-    "llm_seed_fallback": True,
-    "llm_seed_min_candidates": 5,
-    "llm_seed_max_candidates": 5,
+    "llm_seed_candidates": 5,
 }
 
 generated = corpus.synthetic_generation(

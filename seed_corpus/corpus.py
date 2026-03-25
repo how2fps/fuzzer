@@ -388,9 +388,7 @@ class SeedCorpus:
         target_name = target_or_family
         target_set = self.target(target_name)
         requested_config = dict(config)
-        requested_config["llm_seed_fallback"] = True
-        requested_config["llm_seed_min_candidates"] = needed
-        requested_config["llm_seed_max_candidates"] = needed
+        requested_config["llm_seed_candidates"] = needed
 
         generated = maybe_generate_seed_candidates(
             conn=conn,
@@ -398,6 +396,7 @@ class SeedCorpus:
             target=target_name,
             config=requested_config,  # type: ignore[arg-type]
             results_folder=Path(results_folder),
+            include_corpus_context=True,
         )
         if generated is None or not generated.seeds:
             return []

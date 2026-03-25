@@ -52,8 +52,10 @@ def render_config_panel(
         ("interestingness", config["isinteresting_version"]),
         ("power scheduler", config["power_scheduler_version"]),
         ("seed corpus", config["seed_corpus_version"]),
-        ("LLM fallback", _fmt_bool(config["llm_seed_fallback"])),
     ]
+    grammar_rules_file = config.get("grammar_rules_file")
+    if grammar_rules_file:
+        rows.append(("grammar rules", str(grammar_rules_file)))
     for label, value in rows:
         table.add_row(label, value)
 
@@ -130,6 +132,10 @@ class RunDashboard:
     pending_jobs: int = 0
     last_event: str = "warming up"
     status: str = "RUNNING"
+    llm_state: str = "idle"
+    llm_source: str = ""
+    llm_generated_count: int = 0
+    llm_seed_previews: list[str] = field(default_factory=list)
     # Only treat a result as "interesting" when its score is sufficiently high.
     interesting_score_threshold: float = 0.5
 
@@ -137,7 +143,9 @@ class RunDashboard:
         return max(0.0, time.monotonic() - self.started_at)
 
     def _fmt_elapsed(self) -> str:
-        seconds = self._elapsed_seconds()
+        return self._fmt_duration(self._elapsed_seconds())
+
+    def _fmt_duration(self, seconds: float) -> str:
         if seconds < 60:
             return f"{seconds:.1f}s"
 
@@ -158,6 +166,33 @@ class RunDashboard:
         self.status = status
         if event:
             self.last_event = event
+
+    def start_llm_generation(self, *, source: str, requested: int) -> None:
+        self.llm_state = "generating"
+        self.llm_source = source
+        self.llm_generated_count = requested
+        self.status = "GENERATING"
+        self.last_event = f"{source} requesting {requested} seeds"
+
+    def finish_llm_generation(self, *, source: str, seeds: list[str]) -> None:
+        self.llm_state = "ready"
+        self.llm_source = source
+        self.llm_generated_count = len(seeds)
+        self.llm_seed_previews = [self._preview_seed(seed) for seed in seeds[:3]]
+        self.status = "RUNNING"
+        self.last_event = f"{source} added {len(seeds)} seeds"
+
+    def fail_llm_generation(self, *, source: str, event: str) -> None:
+        self.llm_state = "failed"
+        self.llm_source = source
+        self.status = "RUNNING"
+        self.last_event = event
+
+    def _preview_seed(self, seed: str, *, limit: int = 56) -> str:
+        cleaned = " ".join(seed.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 3] + "..."
 
     def record_schedule(self, *, pending_jobs: int, queue_depth: int, event: str) -> None:
         self.pending_jobs = pending_jobs
@@ -196,6 +231,7 @@ class RunDashboard:
     def _status_text(self) -> Text:
         styles = {
             "RUNNING": "bold cyan",
+            "GENERATING": "bold magenta",
             "DONE": "bold green",
             "STOPPING": "bold yellow",
             "FAILED": "bold red",
@@ -263,7 +299,11 @@ class RunDashboard:
         errors_style = "bold red" if self.errors_found else "green"
         pending_style = "bold cyan" if self.pending_jobs else "dim"
         if self.max_hours is not None:
-            budget_text = f"{self._elapsed_seconds():.1f}s / {self.max_hours:.1f}h"
+            total_budget_seconds = self.max_hours * 3600
+            budget_text = (
+                f"{self._fmt_duration(self._elapsed_seconds())} / "
+                f"{self._fmt_duration(total_budget_seconds)}"
+            )
         elif self.max_iterations is not None:
             budget_text = f"{self.total_results}/{self.max_iterations} iter"
         else:
@@ -275,11 +315,34 @@ class RunDashboard:
             Text(str(self.timeouts_found), style=timeouts_style),
             Text(str(self.errors_found), style=errors_style),
             Text(str(self.pending_jobs), style=pending_style),
-            f"{self._elapsed_seconds():.1f}s",
+            self._fmt_elapsed(),
             budget_text,
             self.last_event,
         )
         return table
+
+    def _llm_panel(self) -> Panel | None:
+        if self.llm_state == "idle" and not self.llm_seed_previews:
+            return None
+
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column(style="bold cyan", justify="right")
+        table.add_column(style="white")
+        state_style = {
+            "generating": "bold magenta",
+            "ready": "bold green",
+            "failed": "bold yellow",
+        }.get(self.llm_state, "white")
+        table.add_row("state", Text(self.llm_state.upper(), style=state_style))
+        if self.llm_source:
+            table.add_row("source", self.llm_source)
+        table.add_row("count", str(self.llm_generated_count))
+        if self.llm_seed_previews:
+            previews = "\n".join(
+                f"{idx + 1}. {seed}" for idx, seed in enumerate(self.llm_seed_previews)
+            )
+            table.add_row("previews", previews)
+        return Panel(table, title="Generated Seeds", border_style="magenta")
 
     def render(self) -> RenderableType:
         footer = Table.grid(padding=(0, 1))
@@ -289,9 +352,13 @@ class RunDashboard:
             Text("Queue depth", style="dim"),
             Text(str(self.queue_depth), style="white"),
         )
-        group = Group(
+        panels: list[RenderableType] = [
             Panel(self._summary_table(), title="Run Summary", border_style="blue"),
             Panel(self._details_table(), title="Live Table", border_style="cyan"),
-            Panel(footer, border_style="dim"),
-        )
+        ]
+        llm_panel = self._llm_panel()
+        if llm_panel is not None:
+            panels.append(llm_panel)
+        panels.append(Panel(footer, border_style="dim"))
+        group = Group(*panels)
         return group

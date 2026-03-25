@@ -169,6 +169,8 @@ def run_fuzzer_multi_worker(
     shutdown_requested: list[bool],
     mutate_fn: Callable[..., str],
     rng: random.Random,
+    startup_generated_seeds: list[str] | None = None,
+    startup_generated_source: str = "",
 ) -> None:
     scheduler_uses_feedback = scheduler.supports_feedback_updates()
     request_queue: Queue = Queue()
@@ -194,8 +196,8 @@ def run_fuzzer_multi_worker(
     added_seed_inputs_holder: list[set[str]] = [set()]
     next_discovered_ordinal_holder: list[int] = [DISCOVERED_SEED_ORDINAL_BASE]
     results_received_count: list[int] = [0]
-    consecutive_non_novel_results: list[int] = [0]
     llm_refill_attempts: list[int] = [0]
+    last_low_value_signature: list[tuple[str, ...] | None] = [None]
     worker_shutdown_grace_seconds = max(5.0, float(config["timeout"]) * 2.0)
     log = get_fuzzer_logger()
     max_iterations = config["max_iterations"]
@@ -209,6 +211,21 @@ def run_fuzzer_multi_worker(
         max_iterations=max_iterations,
         max_hours=max_hours,
     )
+    if use_live_ui and startup_generated_seeds:
+        dashboard.finish_llm_generation(
+            source=startup_generated_source or "startup bootstrap",
+            seeds=startup_generated_seeds,
+        )
+
+    def _low_value_ready_signature(*, threshold: float = 0.1) -> tuple[str, ...] | None:
+        ready_items = scheduler.ready_items()
+        if not ready_items:
+            return None
+        if any(item.updates <= 0 for item in ready_items):
+            return None
+        if any(item.avg_isinteresting_score > threshold for item in ready_items):
+            return None
+        return tuple(sorted(item.seed.seed_id for item in ready_items))
 
     def _bug_key(result: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
         status = str(result.get("status") or "").strip().lower()
@@ -226,8 +243,14 @@ def run_fuzzer_multi_worker(
         )
 
     def _try_refill_scheduler_from_llm() -> bool:
-        if not config.get("llm_seed_fallback"):
+        requested = int(config["llm_seed_candidates"])
+        if requested <= 0:
             return False
+        if use_live_ui:
+            dashboard.start_llm_generation(
+                source="runtime refill",
+                requested=requested,
+            )
         conn_thread = open_results_db(db_path)
         try:
             generated = maybe_generate_seed_candidates(
@@ -236,10 +259,16 @@ def run_fuzzer_multi_worker(
                 target=effective_target,
                 config=config,
                 results_folder=results_folder,
+                include_corpus_context=True,
             )
         finally:
             conn_thread.close()
         if generated is None or not generated.seeds:
+            if use_live_ui:
+                dashboard.fail_llm_generation(
+                    source="runtime refill",
+                    event="runtime refill returned no LLM seeds",
+                )
             return False
 
         added_any = False
@@ -264,16 +293,22 @@ def run_fuzzer_multi_worker(
             added_any = True
         if added_any:
             llm_refill_attempts[0] += 1
+            last_low_value_signature[0] = None
             log.info(
                 "LLM seed fallback added %s candidate seeds (attempt %s).",
                 len(generated.seeds),
                 llm_refill_attempts[0],
             )
             if use_live_ui:
-                dashboard.update_status(
-                    "RUNNING",
-                    event=f"LLM refill added {len(generated.seeds)} candidate seeds",
+                dashboard.finish_llm_generation(
+                    source="runtime refill",
+                    seeds=generated.seeds,
                 )
+        elif use_live_ui:
+            dashboard.fail_llm_generation(
+                source="runtime refill",
+                event="runtime refill produced only duplicate LLM seeds",
+            )
         return added_any
 
     def request_handler() -> None:
@@ -343,6 +378,14 @@ def run_fuzzer_multi_worker(
                             nones_sent += 1
                             break
                         if not scheduler.empty():
+                            low_value_signature = _low_value_ready_signature()
+                            if (
+                                low_value_signature is not None
+                                and low_value_signature != last_low_value_signature[0]
+                            ):
+                                last_low_value_signature[0] = low_value_signature
+                                if _try_refill_scheduler_from_llm():
+                                    cond.notify_all()
                             if current_mutations_left[0] <= 0:
                                 conn_thread = open_results_db(db_path)
                                 try:
@@ -688,31 +731,12 @@ def run_fuzzer_multi_worker(
                         scheduler.add(candidate, metadata=candidate_metadata)
                         added_seed_inputs_holder[0].add(result["mutated_input"])
                         next_discovered_ordinal_holder[0] += 1
+                        last_low_value_signature[0] = None
                         cond.notify()
-                if any(
-                    bool((result.get("signals") or {}).get(key))
-                    for key in (
-                        "new_coverage",
-                        "new_bug",
-                        "new_differential_behavior",
-                    )
-                ):
-                    consecutive_non_novel_results[0] = 0
-                else:
-                    consecutive_non_novel_results[0] += 1
-                if (
-                    config.get("llm_seed_fallback")
-                    and config.get("llm_seed_stagnation_threshold", 0) > 0
-                    and consecutive_non_novel_results[0]
-                    >= config["llm_seed_stagnation_threshold"]
-                ):
-                    with cond:
-                        if _try_refill_scheduler_from_llm():
-                            consecutive_non_novel_results[0] = 0
-                            cond.notify_all()
                 results_received += 1
                 last_result_time = time.time()
                 with cond:
+                    last_low_value_signature[0] = None
                     results_received_count[0] = results_received
                     pending_jobs = len(pending)
                     queue_depth = len(batch_expected) + len(pending)

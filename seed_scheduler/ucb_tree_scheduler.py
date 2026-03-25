@@ -423,6 +423,14 @@ class UCBTreeScheduler(BaseSeedScheduler):
             "max_seeds_per_leaf": self._max_seeds_per_leaf,
         }
 
+    def ready_items(self) -> list[ScheduledSeed]:
+        """Return ready items across all leaves without mutating traversal state."""
+        items: list[ScheduledSeed] = []
+        for cov_node in self._root.children.values():
+            for bug_node in cov_node.children.values():
+                items.extend(bug_node.seeds)
+        return items
+
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
         """Return a leaf-oriented snapshot ordered by current average reward."""
         leaves: list[dict[str, Any]] = []

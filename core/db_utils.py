@@ -11,6 +11,8 @@ from power_scheduler import SeedStats
 
 from core.sqlite_conn import open_results_db
 
+INTERESTING_SCORE_THRESHOLD = 0.5
+
 
 def get_seed_stats_from_db(
     conn: sqlite3.Connection,
@@ -280,8 +282,8 @@ def get_run_summary(
     )
     interesting_results = int(
         conn.execute(
-            "SELECT COUNT(*) FROM runs WHERE target = ? AND COALESCE(isinteresting_score, 0) > 0",
-            (target,),
+            "SELECT COUNT(*) FROM runs WHERE target = ? AND COALESCE(isinteresting_score, 0) > ?",
+            (target, INTERESTING_SCORE_THRESHOLD),
         ).fetchone()[0]
     )
 
