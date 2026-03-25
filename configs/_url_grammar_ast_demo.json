@@ -4,7 +4,7 @@
   "mutator_kind": "json",
   "debug_mode": false,
   "seed_preload_mode": "sample",
-  "seed_preload_total": 0,
+  "seed_preload_total": 5,
   "seed_preload_bucket_ratios": {
     "valid": 1.0,
     "string_stress": 0.0,
@@ -22,7 +22,7 @@
   "mutator_version": "grammar_ast",
   "parser_version": "base",
   "power_scheduler_version": "base",
-  "seed_corpus_version": "regex-noseed",
+  "seed_corpus_version": "base",
   "grammar_rules_file": "examples/url_rules.txt",
   "llm_seed_candidates": 0,
   "enable_open_coverage": false
