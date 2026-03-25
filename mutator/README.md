@@ -135,4 +135,34 @@ You can adapt the same pattern for `generate_ip_input`/`mutate_ip_input` (or the
 - `base`: grammar-shaped JSON/IP mutation
 - `byte_havoc`: AFL-style byte-level mutations
 - `json_walk`: JSON-structure walk + havoc strategy
-- `grammar_ast`: mutates a small grammar AST, generates a candidate, then optionally splices it with the incoming seed
+- `grammar_ast`: generalized grammar-AST mutator inspired by `mutator_test.py`; mutates generic grammar node classes (`Sequence`, `Alternation`, `Repeat`, `Literal`, `Ref`, etc.), supports extra DSL rules via `-g/--grammar-rules-file`, and can now parse a seed into an exact derivation tree under an explicit grammar start rule via `parse_from_rule(...)` / `mutate_from_rule(...)`
+
+### `grammar_ast` exact seed parsing
+
+For built-in `json` and `ip` fuzzing, `grammar_ast.mutate(...)` first tries to parse
+the seed into a mutable seed tree, mutate that tree, and then serialize it back to
+text.
+
+For external grammar files, you can also use the generic exact parser directly when
+you know the start rule:
+
+```python
+from mutator.versions import grammar_ast
+import random
+
+grammar_ast.configure(grammar_rules_file="examples/url_rules.txt")
+seed = "https://openai.com/docs?id=42"
+
+tree = grammar_ast.parse_from_rule(text=seed, start_rule="url_start")
+mutated = grammar_ast.mutate_from_rule(
+    seed,
+    start_rule="url_start",
+    rng=random.Random(7),
+    blend_with_seed=False,
+)
+```
+
+That path is what makes new grammar files extensible without adding new
+format-specific mutator code first: once a seed can be parsed under a rule, the
+same generic tree mutations can add, delete, duplicate, swap, or replace nodes in
+the matched derivation tree.

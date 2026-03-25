@@ -66,6 +66,7 @@ Behavior:
 
 - `base`: normal manifest-backed seed corpus
 - `llm_bootstrap`: skip startup preload and let the runner bootstrap initial seeds from the LLM for the chosen target
+- `regex-noseed`: skip startup preload and let the runner bootstrap initial seeds from the grammar_ast generator (seedless mode)
 
 ## AFL loop integration (minimal)
 

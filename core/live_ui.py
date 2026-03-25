@@ -53,6 +53,9 @@ def render_config_panel(
         ("power scheduler", config["power_scheduler_version"]),
         ("seed corpus", config["seed_corpus_version"]),
     ]
+    grammar_rules_file = config.get("grammar_rules_file")
+    if grammar_rules_file:
+        rows.append(("grammar rules", str(grammar_rules_file)))
     for label, value in rows:
         table.add_row(label, value)
 
@@ -170,7 +173,7 @@ class RunDashboard:
         self.llm_source = source
         self.llm_generated_count = requested
         self.status = "GENERATING"
-        self.last_event = f"{source} requesting {requested} LLM seeds"
+        self.last_event = f"{source} requesting {requested} seeds"
 
     def finish_llm_generation(self, *, source: str, seeds: list[str]) -> None:
         self.llm_state = "ready"
@@ -178,7 +181,7 @@ class RunDashboard:
         self.llm_generated_count = len(seeds)
         self.llm_seed_previews = [self._preview_seed(seed) for seed in seeds[:3]]
         self.status = "RUNNING"
-        self.last_event = f"{source} added {len(seeds)} LLM seeds"
+        self.last_event = f"{source} added {len(seeds)} seeds"
 
     def fail_llm_generation(self, *, source: str, event: str) -> None:
         self.llm_state = "failed"
@@ -348,7 +351,7 @@ class RunDashboard:
                 f"{idx + 1}. {seed}" for idx, seed in enumerate(self.llm_seed_previews)
             )
             table.add_row("previews", previews)
-        return Panel(table, title="LLM Seeds", border_style="magenta")
+        return Panel(table, title="Generated Seeds", border_style="magenta")
 
     def _last_mutation_panel(self) -> Panel | None:
         if not self.last_mutated_input:

@@ -3,8 +3,7 @@
   "scheduler_kind": "heap",
   "mutator_kind": "auto",
   "debug_mode": false,
-  "seed_preload_mode": "sample",
-  "seed_preload_total": 0,
+  "seed_preload_total": 5,
   "seed_preload_bucket_ratios": {
     "valid": 1.0,
     "string_stress": 0.0,
@@ -19,11 +18,11 @@
   "rng_seed": 42,
   "workers": 1,
   "isinteresting_version": "base",
-  "mutator_version": "base",
+  "mutator_version": "grammar_ast",
   "parser_version": "base",
-  "power_scheduler_version": "annealing",
-  "seed_corpus_version": "llm_bootstrap",
+  "power_scheduler_version": "base",
+  "seed_corpus_version": "regex-noseed",
   "grammar_rules_file": null,
-  "llm_seed_candidates": 20,
+  "llm_seed_candidates": 0,
   "enable_open_coverage": false
 }

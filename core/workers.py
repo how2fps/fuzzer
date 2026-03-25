@@ -170,7 +170,8 @@ def run_fuzzer_multi_worker(
     shutdown_requested: list[bool],
     mutate_fn: Callable[..., str],
     rng: random.Random,
-    startup_llm_seeds: list[str] | None = None,
+    startup_generated_seeds: list[str] | None = None,
+    startup_generated_source: str = "",
 ) -> None:
     scheduler_uses_feedback = scheduler.supports_feedback_updates()
     request_queue: Queue = Queue()
@@ -211,10 +212,10 @@ def run_fuzzer_multi_worker(
         max_iterations=max_iterations,
         max_hours=max_hours,
     )
-    if use_live_ui and startup_llm_seeds:
+    if use_live_ui and startup_generated_seeds:
         dashboard.finish_llm_generation(
-            source="startup bootstrap",
-            seeds=startup_llm_seeds,
+            source=startup_generated_source or "startup bootstrap",
+            seeds=startup_generated_seeds,
         )
 
     def _low_value_ready_signature(*, threshold: float = 0.1) -> tuple[str, ...] | None:
@@ -243,7 +244,9 @@ def run_fuzzer_multi_worker(
         )
 
     def _try_refill_scheduler_from_llm() -> bool:
-        requested = max(1, int(config["llm_seed_candidates"]))
+        requested = int(config["llm_seed_candidates"])
+        if requested <= 0:
+            return False
         if use_live_ui:
             dashboard.start_llm_generation(
                 source="runtime refill",

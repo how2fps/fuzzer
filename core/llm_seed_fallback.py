@@ -389,6 +389,9 @@ def maybe_generate_seed_candidates(
     include_corpus_context: bool = True,
 ) -> LLMSeedFallbackResult | None:
     log = get_fuzzer_logger()
+    requested = int(config["llm_seed_candidates"])
+    if requested <= 0:
+        return None
     ready, provider_status = _llm_seed_provider_status()
     if not ready:
         log.warning("LLM seed generation is unavailable because %s.", provider_status)
