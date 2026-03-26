@@ -345,6 +345,13 @@ class UCBTreeScheduler(BaseSeedScheduler):
         item.metadata["_ucb_last_leaf"] = (path[-2].key, path[-1].key)
         return item
 
+    def begin_batch(self, item: ScheduledSeed, *, batch_size: int) -> None:
+        """Track how many batch results must arrive before the item becomes ready again."""
+        if item.item_id not in self._items:
+            raise KeyError(f"unknown item_id {item.item_id!r}")
+        stored = self._items[item.item_id]
+        stored.metadata["_ucb_pending_batch_results"] = max(1, int(batch_size))
+
     def update(
         self,
         item: ScheduledSeed,
@@ -397,8 +404,12 @@ class UCBTreeScheduler(BaseSeedScheduler):
                 bug_key,
                 trace_summary,
             )
-        leaf = self._ensure_leaf(cov_key, bug_key)
-        self._insert_into_leaf(leaf, stored)
+        remaining = int(stored.metadata.get("_ucb_pending_batch_results", 1))
+        remaining = max(remaining - 1, 0)
+        stored.metadata["_ucb_pending_batch_results"] = remaining
+        if remaining == 0:
+            leaf = self._ensure_leaf(cov_key, bug_key)
+            self._insert_into_leaf(leaf, stored)
         return stored
 
     def empty(self) -> bool:

@@ -405,13 +405,8 @@ def run_fuzzer_multi_worker(
                                             schedule["seed_energies"]
                                         )
                                     current_scheduled[0] = scheduler.next()
-
-                                    energy = (
-                                        1
-                                        if scheduler_uses_feedback
-                                        else seed_energies_holder[0].get(
-                                            current_scheduled[0].seed.ordinal, 1
-                                        )
+                                    energy = seed_energies_holder[0].get(
+                                        current_scheduled[0].seed.ordinal, 1
                                     )
 
                                     n = (
@@ -419,18 +414,6 @@ def run_fuzzer_multi_worker(
                                         if remaining_budget is not None
                                         else max(1, energy)
                                     )
-                                    # Keep at least one mutation per in-flight worker when the power
-                                    # schedule assigns low energy, so we do not drain the scheduler's
-                                    # ready set (heap/queue) with one next() per worker before results
-                                    # arrive and starve the rest.
-                                    if not scheduler_uses_feedback and workers > 1:
-                                        parallel_floor = (
-                                            min(workers, remaining_budget[0])
-                                            if remaining_budget is not None
-                                            else workers
-                                        )
-                                        if parallel_floor >= 1:
-                                            n = max(n, parallel_floor)
                                     current_batch.clear()
                                     current_batch.extend(
                                         generate_unique_mutations(
@@ -444,6 +427,10 @@ def run_fuzzer_multi_worker(
                                         )
                                     )
                                     current_mutations_left[0] = len(current_batch)
+                                    scheduler.begin_batch(
+                                        current_scheduled[0],
+                                        batch_size=current_mutations_left[0],
+                                    )
                                     batch_expected[current_scheduled[0].item_id] = len(
                                         current_batch
                                     )

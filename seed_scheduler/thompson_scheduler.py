@@ -220,6 +220,13 @@ class ThompsonFeatureScheduler(BaseSeedScheduler):
         item.priority = best_score if best_score >= 0.0 else 0.0
         return item
 
+    def begin_batch(self, item: ScheduledSeed, *, batch_size: int) -> None:
+        """Track how many feedback updates should arrive before the item is ready again."""
+        if item.item_id not in self._items:
+            raise KeyError(f"unknown item_id {item.item_id!r}")
+        stored = self._items[item.item_id]
+        stored.metadata["_ts_pending_batch_results"] = max(1, int(batch_size))
+
     def update(
         self,
         item: ScheduledSeed,
@@ -251,7 +258,11 @@ class ThompsonFeatureScheduler(BaseSeedScheduler):
         if signals:
             stored.metadata["last_signals"] = signals
         stored.metadata["_ts_last_feature_ids"] = feature_ids
-        self._ready.add(stored.item_id)
+        remaining = int(stored.metadata.get("_ts_pending_batch_results", 1))
+        remaining = max(remaining - 1, 0)
+        stored.metadata["_ts_pending_batch_results"] = remaining
+        if remaining == 0:
+            self._ready.add(stored.item_id)
         return stored
 
     def empty(self) -> bool:

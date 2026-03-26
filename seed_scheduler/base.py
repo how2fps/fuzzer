@@ -52,6 +52,15 @@ class BaseSeedScheduler(ABC):
         """Return True for schedulers that expect per-mutation `update(...)` calls."""
         return False
 
+    def begin_batch(self, item: ScheduledSeed, *, batch_size: int) -> None:
+        """
+        Notify the scheduler that a leased item is about to run a mutation batch.
+
+        Batch schedulers can ignore this. Feedback schedulers may use it to defer
+        re-queuing until the full power-scheduled batch has completed.
+        """
+        return
+
     def complete_batch(
         self, item: ScheduledSeed, *, batch_scores: Sequence[float]
     ) -> None:
