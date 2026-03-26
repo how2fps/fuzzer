@@ -721,6 +721,96 @@ def _match_repeat_node(
     return results
 
 
+def _referenced_rule_names(node: Node) -> set[str]:
+    """Return all rule names reachable by Ref nodes inside one grammar AST."""
+    if isinstance(node, Ref):
+        return {node.name}
+    if isinstance(node, Sequence):
+        names: set[str] = set()
+        for child in node.nodes:
+            names.update(_referenced_rule_names(child))
+        return names
+    if isinstance(node, Alternation):
+        names: set[str] = set()
+        for option in node.options:
+            names.update(_referenced_rule_names(option))
+        return names
+    if isinstance(node, Repeat):
+        return _referenced_rule_names(node.node)
+    return set()
+
+
+def _rule_complexity(node: Node) -> int:
+    """Estimate how structurally rich a rule is for tie-breaking among matches."""
+    if isinstance(node, (Literal, CharClass, NumberRange, Ref)):
+        return 1
+    if isinstance(node, Sequence):
+        return 1 + sum(_rule_complexity(child) for child in node.nodes)
+    if isinstance(node, Alternation):
+        return 1 + sum(_rule_complexity(option) for option in node.options)
+    if isinstance(node, Repeat):
+        return 1 + _rule_complexity(node.node)
+    return 1
+
+
+def _start_rule_priority(
+    *,
+    candidate: str,
+    requested: str,
+    inbound_ref_counts: dict[str, int],
+    grammar: Grammar,
+) -> tuple[int, int, int, str]:
+    """Rank fallback start-rule candidates using grammar-graph heuristics.
+
+    Lower tuples are tried first. The ordering prefers:
+    1. the requested rule itself
+    2. obvious requested-rule aliases like foo <-> foo_start
+    3. explicit *_start top-level rules
+    4. rules not referenced by other rules
+    5. structurally richer rules over tiny helper rules
+    """
+    if candidate == requested:
+        family_rank = 0
+    elif candidate == f"{requested}_start" or (
+        requested.endswith("_start") and candidate == requested[:-6]
+    ):
+        family_rank = 1
+    elif candidate.endswith("_start"):
+        family_rank = 2
+    elif inbound_ref_counts.get(candidate, 0) == 0:
+        family_rank = 3
+    else:
+        family_rank = 4
+    inbound_rank = inbound_ref_counts.get(candidate, 0)
+    complexity_rank = -_rule_complexity(grammar.rules[candidate])
+    return (family_rank, inbound_rank, complexity_rank, candidate)
+
+
+def _candidate_start_rules(grammar: Grammar, start_rule: str) -> list[str]:
+    """Infer likely top-level fallback rules directly from the grammar graph.
+
+    This avoids hardcoding JSON/IP-specific rule sets. New grammar files can
+    participate automatically as long as they define sensible top-level rules
+    such as ``foo_start`` or rules that are not only referenced as helpers.
+    """
+    inbound_ref_counts: dict[str, int] = {name: 0 for name in grammar.rules}
+    for node in grammar.rules.values():
+        for ref_name in _referenced_rule_names(node):
+            if ref_name in inbound_ref_counts:
+                inbound_ref_counts[ref_name] += 1
+
+    candidates = sorted(
+        grammar.rules,
+        key=lambda candidate: _start_rule_priority(
+            candidate=candidate,
+            requested=start_rule,
+            inbound_ref_counts=inbound_ref_counts,
+            grammar=grammar,
+        ),
+    )
+    return candidates
+
+
 def parse_from_rule(*, text: str, start_rule: str) -> ParseTreeNode | None:
     """Parse seed text into a derivation tree under one explicit grammar rule.
 
@@ -731,7 +821,19 @@ def parse_from_rule(*, text: str, start_rule: str) -> ParseTreeNode | None:
     grammar = _base_grammar()
     if start_rule not in grammar.rules:
         raise KeyError(f"unknown grammar start rule {start_rule!r}")
-    return _match_exact_node(node=grammar.rules[start_rule], text=text, grammar=grammar)
+    for candidate_rule in _candidate_start_rules(grammar, start_rule):
+        matched = _match_exact_node(node=grammar.rules[candidate_rule], text=text, grammar=grammar)
+        if matched is not None:
+            if candidate_rule == start_rule:
+                return matched
+            return ParseTreeNode(
+                kind="ref",
+                text=text,
+                children=[matched],
+                ref_name=candidate_rule,
+                grammar_node=Ref(candidate_rule),
+            )
+    return None
 
 
 @dataclass
