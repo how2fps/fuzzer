@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import json
 import random
 import sqlite3
 import sys
@@ -91,6 +92,7 @@ def run_worker_process(
                     print_json=False,
                     seed_family=seed_family,
                     enable_open_coverage=config.get("enable_open_coverage", False),
+                    parser_config=config.get("parser_config"),  # type: ignore[arg-type]
                     closed_cwd_override=results_folder
                     / ".worker_cwd"
                     / f"w{worker_id}",
@@ -192,7 +194,7 @@ def run_fuzzer_multi_worker(
     iteration_counter: list[int] = [0]
     seed_energies_holder: list[dict[int, int]] = [seed_energies]
     batch_expected: dict[str, int] = {}
-    family = corpus.target(effective_target).family
+    family = corpus.resolve_family_or_target(effective_target)
     added_seed_inputs_holder: list[set[str]] = [set()]
     next_discovered_ordinal_holder: list[int] = [DISCOVERED_SEED_ORDINAL_BASE]
     results_received_count: list[int] = [0]
@@ -723,6 +725,7 @@ def run_fuzzer_multi_worker(
                         candidate_metadata: dict[str, Any] = {
                             "bucket": candidate.bucket,
                             "parent_seed_id": result["seed_id"],
+                            "initial_isinteresting_score": result["isinteresting_score"],
                         }
                         if parent_signals:
                             candidate_metadata["signals"] = parent_signals
@@ -768,17 +771,18 @@ def run_fuzzer_multi_worker(
                         pending_jobs=pending_jobs,
                         queue_depth=queue_depth,
                         event=" | ".join(event_bits),
+                        mutated_input=result["mutated_input"],
                     )
 
-                # if parser_result is not None:
-                #     try:
-                #         log.info(
-                #             "%s",
-                #             json.dumps(parser_result, default=str, sort_keys=True),
-                #         )
-                #     except (TypeError, ValueError):
-                #         log.info("%s", repr(parser_result))
                 if debug_mode:
+                    if parser_result is not None:
+                        try:
+                            log.info(
+                                "%s",
+                                json.dumps(parser_result, default=str, sort_keys=True),
+                            )
+                        except (TypeError, ValueError):
+                            log.info("%s", repr(parser_result))
                     log.info(
                         "[iter %s] seed=%s score=%.3f status=%s input=%s mutated input=%s",
                         iteration,

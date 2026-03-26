@@ -223,6 +223,18 @@ class SeedCorpus:
             )
         return family
 
+    def resolve_family_or_target(self, target_or_family: str) -> str:
+        family = self._aliases.get(target_or_family, target_or_family)
+        if family in self._targets or family in self._target_groups:
+            return family
+        return target_or_family
+
+    def maybe_target(self, target_or_family: str) -> TargetSeedSet | None:
+        try:
+            return self.target(target_or_family)
+        except KeyError:
+            return None
+
     def target(self, target_or_family: str) -> TargetSeedSet:
         resolved = self.resolve_family(target_or_family)
         if resolved in self._group_targets:

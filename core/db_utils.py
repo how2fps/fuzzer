@@ -18,13 +18,15 @@ def get_seed_stats_from_db(
     conn: sqlite3.Connection,
     corpus: Any,
     target: str,
+    scheduler_seeds: list[Any] | None = None,
 ) -> list[SeedStats]:
     """
     Aggregate runs by seed_id from the DB and return SeedStats keyed by ordinal.
     Includes fuzz_count (times this seed was used), avg_isinteresting_score, bug_count.
     """
-    target_set = corpus.target(target)
-    seed_id_to_ordinal = {s.seed_id: s.ordinal for s in target_set.seeds}
+    target_set = corpus.maybe_target(target)
+    seeds = list(target_set.seeds) if target_set is not None else list(scheduler_seeds or [])
+    seed_id_to_ordinal = {s.seed_id: s.ordinal for s in seeds}
     cur = conn.execute(
         """
         SELECT seed_id,
@@ -46,7 +48,7 @@ def get_seed_stats_from_db(
             "bug_count": bug_count or 0,
         }
     stats: list[SeedStats] = []
-    for seed in target_set.seeds:
+    for seed in seeds:
         row = by_seed_id.get(seed.seed_id, {})
         stat: SeedStats = {
             "id": seed.ordinal,
@@ -65,12 +67,19 @@ def seed_stats_for_power_schedule(
     corpus: Any,
     target: str,
     conn: sqlite3.Connection | None = None,
+    scheduler_seeds: list[Any] | None = None,
 ) -> list[SeedStats]:
     """Build SeedStats for the power scheduler; use DB aggregates when conn is provided."""
-    target_set = corpus.target(target)
+    target_set = corpus.maybe_target(target)
+    seeds = list(target_set.seeds) if target_set is not None else list(scheduler_seeds or [])
     if conn is None:
-        return [{"id": seed.ordinal, "fuzz_count": 0} for seed in target_set.seeds]
-    return get_seed_stats_from_db(conn=conn, corpus=corpus, target=target)
+        return [{"id": seed.ordinal, "fuzz_count": 0} for seed in seeds]
+    return get_seed_stats_from_db(
+        conn=conn,
+        corpus=corpus,
+        target=target,
+        scheduler_seeds=scheduler_seeds,
+    )
 
 
 def warmup_power_schedule(
@@ -79,9 +88,14 @@ def warmup_power_schedule(
     target: str,
     power_scheduler_module: Any,
     conn: sqlite3.Connection | None = None,
+    scheduler_seeds: list[Any] | None = None,
 ) -> dict[int, int]:
     stats = seed_stats_for_power_schedule(
-        corpus=corpus, target=target, conn=conn)
+        corpus=corpus,
+        target=target,
+        conn=conn,
+        scheduler_seeds=scheduler_seeds,
+    )
     if not stats:
         return {}
     schedule = power_scheduler_module.compute_power_schedule(seeds=stats)
@@ -373,7 +387,7 @@ def get_seed_generation_context(
     not_interesting_limit: int = 10,
     fuzzed_limit: int = 20,
 ) -> dict[str, list[str]]:
-    target_set = corpus.target(target)
+    target_set = corpus.maybe_target(target)
     top_interesting_rows = conn.execute(
         """
         SELECT mutated_input
@@ -412,14 +426,14 @@ def get_seed_generation_context(
     )
     already_fuzzed = _dedupe_text_rows(already_fuzzed_rows, limit=fuzzed_limit)
 
-    if include_corpus_seed_fallback and len(already_fuzzed) < fuzzed_limit:
+    if include_corpus_seed_fallback and target_set is not None and len(already_fuzzed) < fuzzed_limit:
         for seed in target_set.seeds:
             if seed.text not in already_fuzzed:
                 already_fuzzed.append(seed.text)
             if len(already_fuzzed) >= fuzzed_limit:
                 break
 
-    if include_corpus_seed_fallback and not top_interesting:
+    if include_corpus_seed_fallback and target_set is not None and not top_interesting:
         for seed in target_set.seeds[:interesting_limit]:
             top_interesting.append(seed.text)
 

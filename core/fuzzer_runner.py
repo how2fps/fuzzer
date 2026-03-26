@@ -14,16 +14,15 @@ from core.live_ui import console, render_run_summary_panel
 from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
 from core.sqlite_conn import open_results_db
-from isinteresting import get_compute_interestingness
 from core.mutation_utils import initial_scheduler_seeds
 from mutator import get_mutator
-from parser import get_parser
 from power_scheduler import get_power_scheduler
 from core.results_export import export_results
 from seed_corpus import Seed, get_corpus_loader, get_version_spec
 from seed_scheduler import UCBTreeScheduler, make_scheduler
 from core.workers import run_fuzzer_multi_worker
 from core.target_artifacts import clear_bug_counts_csv
+from mutator import configure_runtime_grammar
 from mutator.versions import grammar_ast, adaptive_all
 
 
@@ -44,10 +43,7 @@ def run_fuzzer(
     if config["mutator_version"] == "adaptive_all":
         adaptive_all.configure(grammar_file=config["grammar_rules_file"])
 
-    parser_api = get_parser(config["parser_version"])
     mutate_fn = get_mutator(config["mutator_version"])
-    compute_interestingness_fn = get_compute_interestingness(
-        config["isinteresting_version"])
     power_scheduler_module = get_power_scheduler(
         config["power_scheduler_version"])
 
@@ -55,6 +51,10 @@ def run_fuzzer(
     effective_mutator = infer_mutator_kind(
         mutator_kind=config["mutator_kind"],
         target=effective_target,
+    )
+    configure_runtime_grammar(
+        kind=effective_mutator,
+        grammar_path=config["grammar_path"],
     )
 
     rng = random.Random(
@@ -101,7 +101,11 @@ def run_fuzzer(
 
     results_folder.mkdir(parents=True, exist_ok=True)
     # Clear canonical target logs + per-worker scratch so bug_counts doesn't leak across runs.
-    clear_bug_counts_csv(target=effective_target, results_folder=results_folder)
+    clear_bug_counts_csv(
+        target=effective_target,
+        results_folder=results_folder,
+        parser_config=config.get("parser_config"),  # type: ignore[arg-type]
+    )
 
     # Save the config used for this run into the results folder
     config_dest = results_folder / "config.json"
@@ -118,7 +122,7 @@ def run_fuzzer(
     startup_regex_seeds: list[str] = []
 
     if scheduler.empty() and use_regex_noseed:
-        family = corpus.target(effective_target).family
+        family = corpus.resolve_family_or_target(effective_target)
         requested = max(1, int(config["seed_preload_total"]))
         with console.status(
             f"Generating {requested} grammar seeds for {effective_target}...",
@@ -158,7 +162,7 @@ def run_fuzzer(
             )
 
     if scheduler.empty() and use_llm_bootstrap:
-        family = corpus.target(effective_target).family
+        family = corpus.resolve_family_or_target(effective_target)
         llm_bootstrap_config = dict(config)
         requested = int(llm_bootstrap_config["llm_seed_candidates"])
         if requested > 0:
@@ -208,8 +212,8 @@ def run_fuzzer(
         log.warning(
             "No schedulable seeds available after preload%s.",
             (
-                " and startup LLM bootstrap"
-                if use_llm_bootstrap
+                " and startup seed bootstrap"
+                if use_llm_bootstrap or use_regex_noseed
                 else ""
             ),
         )
@@ -220,6 +224,7 @@ def run_fuzzer(
         target=effective_target,
         power_scheduler_module=power_scheduler_module,
         conn=conn,
+        scheduler_seeds=[item.seed for item in scheduler.ready_items()],
     )
 
     shutdown_requested: list[bool] = [False]
@@ -294,6 +299,7 @@ def run_fuzzer(
                 results_folder=results_folder,
                 db_path=db_path,
                 target=effective_target,
+                parser_config=config.get("parser_config"),  # type: ignore[arg-type]
             )
             if original_sigint is not None:
                 try:

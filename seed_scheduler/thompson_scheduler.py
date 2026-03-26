@@ -82,7 +82,7 @@ def _extract_feature_ids(signals: dict[str, Any] | None) -> list[str]:
     Extract feature ids from one execution result.
 
     Preference order:
-    1. explicit `feature_ids`
+    1. flat coverage / bug keys
     2. coverage edges (grey-box targets)
     3. differential behavior tuple (oracle-backed targets)
     4. bug signature
@@ -90,9 +90,6 @@ def _extract_feature_ids(signals: dict[str, Any] | None) -> list[str]:
     """
     if not isinstance(signals, dict):
         return []
-    explicit = signals.get("feature_ids")
-    if isinstance(explicit, list) and explicit:
-        return [str(feature_id) for feature_id in explicit]
 
     flat_features: list[str] = []
     coverage_key = signals.get("coverage_key")

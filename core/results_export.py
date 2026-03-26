@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from typing import Any
 
 from core.db_utils import get_inputs_for_unique_error_line_pairs
 from core.fuzzer_logging import get_fuzzer_logger
@@ -15,6 +16,7 @@ def export_results(
     db_path: Path,
     target: str,
     copy_bug_counts: bool = True,
+    parser_config: dict[str, Any] | None = None,
 ) -> None:
     get_fuzzer_logger().info("Exporting results to %s", results_folder)
     conn = open_results_db(db_path)
@@ -66,5 +68,9 @@ def export_results(
         conn.close()
 
     if copy_bug_counts:
-        copy_bug_counts_csv_if_present(target=target, results_folder=results_folder)
+        copy_bug_counts_csv_if_present(
+            target=target,
+            results_folder=results_folder,
+            parser_config=parser_config,
+        )
 

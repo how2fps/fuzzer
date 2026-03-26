@@ -6,15 +6,18 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from core.paths import TARGETS_DIR
-from parser import TARGETS
+from parser import get_target_registry, resolve_target_dir as parser_resolve_target_dir
 
 
-def resolve_target_dir(*, target: str) -> Path:
-    meta = TARGETS.get(target)
-    if not meta:
-        return TARGETS_DIR / target
-    return TARGETS_DIR / str(meta.get("path", target))
+def resolve_target_dir(
+    *,
+    target: str,
+    parser_config: dict[str, Any] | None = None,
+) -> Path:
+    registry = get_target_registry(parser_config=parser_config)
+    if target not in registry:
+        return parser_resolve_target_dir(target=target, parser_config=parser_config)
+    return parser_resolve_target_dir(target=target, parser_config=parser_config)
 
 
 def _merge_worker_bug_counts_csvs(
@@ -81,9 +84,12 @@ def _merge_worker_bug_counts_csvs(
 
 
 def clear_bug_counts_csv(
-    *, target: str, results_folder: Path | None = None
+    *,
+    target: str,
+    results_folder: Path | None = None,
+    parser_config: dict[str, Any] | None = None,
 ) -> None:
-    target_dir = resolve_target_dir(target=target)
+    target_dir = resolve_target_dir(target=target, parser_config=parser_config)
     logs_dir = target_dir / "logs"
     csv_path = logs_dir / "bug_counts.csv"
     if csv_path.is_file():
@@ -94,7 +100,12 @@ def clear_bug_counts_csv(
             shutil.rmtree(scratch, ignore_errors=True)
 
 
-def copy_bug_counts_csv_if_present(*, target: str, results_folder: Path) -> bool:
+def copy_bug_counts_csv_if_present(
+    *,
+    target: str,
+    results_folder: Path,
+    parser_config: dict[str, Any] | None = None,
+) -> bool:
     """
     Prefer merged worker scratch bug_counts under results_folder/.worker_cwd/w*/logs/,
     else copy from the canonical target logs/bug_counts.csv.
@@ -103,7 +114,7 @@ def copy_bug_counts_csv_if_present(*, target: str, results_folder: Path) -> bool
     dest = results_folder / "bug_counts.csv"
     if worker_csvs and _merge_worker_bug_counts_csvs(worker_csvs, dest):
         return True
-    target_dir = resolve_target_dir(target=target)
+    target_dir = resolve_target_dir(target=target, parser_config=parser_config)
     src = target_dir / "logs" / "bug_counts.csv"
     if not src.is_file():
         return False

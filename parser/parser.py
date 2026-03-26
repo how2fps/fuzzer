@@ -7,6 +7,7 @@ status and bug signature.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -38,15 +39,21 @@ JSON_OPEN_SCRIPT = Path(__file__).resolve().parent / "json_open_runner.py"
 _JSON_DECODER_ISOLATED_MAIN = Path(__file__).resolve().parent / "json_decoder_isolated_main.py"
 
 # Target name -> path, run command, and optional oracle target.
-# cmd: argv list (relative paths resolved against target dir). Input is appended as final arg
-#      unless input_via_stdin is True (then input is passed via stdin).
-# From READMEs: cidrize-runner/README, IPv4-IPv6-parser/README, cidrize/README+CLAUDE, json-decoder/README, ipyparse (library).
+# New config-file driven targets can override or extend this registry via
+# `parser_config.targets`.
 TARGETS: dict[str, dict[str, Any]] = {
     "cidrize-runner": {
         "path": "cidrize-runner",
         "oracle": "cidrize",
-        "cmd_resolver": "_cmd_cidrize_runner",
-        "input_via_stdin": False,
+        "command": {
+            "argv_template": [
+                "bin/{platform}-cidrize-runner{exe_suffix}",
+                "--func",
+                "cidrize",
+                "--ipstr",
+            ],
+            "input_via_stdin": False,
+        },
         "open": False,
         # Windows binary startup is slow; give it extra headroom.
         "timeout": 25.0,
@@ -54,24 +61,35 @@ TARGETS: dict[str, dict[str, Any]] = {
     "IPv4-IPv6-parser": {
         "path": "IPv4-IPv6-parser",
         "oracle": "ipyparse",
-        "cmd_resolver": "_cmd_ipv4_ipv6_parser",
-        "input_via_stdin": False,
+        "command": {
+            "argv_template": [
+                "bin/{platform}-{ip_version}-parser{exe_suffix}",
+                "--ipstr",
+            ],
+            "input_via_stdin": False,
+        },
         "open": False,
     },
     "cidrize": {
         "path": "cidrize",
-        "cmd": ["uv", "run", "cidr"],
-        "input_via_stdin": False,
+        "command": {
+            "argv": ["uv", "run", "cidr"],
+            "input_via_stdin": False,
+        },
+        "coverage": {"enabled": True},
         "open": False,
     },
     "ipyparse": {
         "path": "ipyparse",
-        "cmd": [
-            sys.executable,
-            "-c",
-            "import sys; sys.path.insert(0, 'src'); from ipyparse.ipv4 import parse; print(parse(sys.stdin.read().strip()))",
-        ],
-        "input_via_stdin": True,
+        "command": {
+            "argv": [
+                sys.executable,
+                "-c",
+                "import sys; sys.path.insert(0, 'src'); from ipyparse.ipv4 import parse; print(parse(sys.stdin.read().strip()))",
+            ],
+            "input_via_stdin": True,
+        },
+        "coverage": {"enabled": True},
         "open": False,
     },
     "json-decoder": {
@@ -82,11 +100,14 @@ TARGETS: dict[str, dict[str, Any]] = {
     },
     "json_open": {
         "path": "json-decoder",
-        "cmd": [
-            sys.executable,
-            str(JSON_OPEN_SCRIPT),
-        ],
-        "input_via_stdin": True,
+        "command": {
+            "argv": [
+                sys.executable,
+                str(JSON_OPEN_SCRIPT),
+            ],
+            "input_via_stdin": True,
+        },
+        "coverage": {"enabled": True},
         "open": False,
     },
 }
@@ -132,20 +153,139 @@ def _infer_ip_version(*, input_data: bytes) -> str:
     return "ipv6" if ":" in input_str else "ipv4"
 
 
-def _cmd_cidrize_runner(*, input_data: bytes, seed_family: str | None = None) -> list[str]:
-    slug = _platform_slug()
-    exe = f"{slug}-cidrize-runner.exe" if slug == "win" else f"{slug}-cidrize-runner"
-    return [f"bin/{exe}", "--func", "cidrize", "--ipstr"]
+def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+            continue
+        merged[key] = copy.deepcopy(value)
+    return merged
 
 
-def _cmd_ipv4_ipv6_parser(*, input_data: bytes, seed_family: str | None = None) -> list[str]:
-    slug = _platform_slug()
-    if seed_family in {"ipv4", "ipv6"}:
-        ip_version = seed_family
-    else:
-        ip_version = _infer_ip_version(input_data=input_data)
-    exe_name = f"{slug}-{ip_version}-parser.exe" if slug == "win" else f"{slug}-{ip_version}-parser"
-    return [f"bin/{exe_name}", "--ipstr"]
+def _get_targets_base_dir(*, parser_config: dict[str, Any] | None = None) -> Path:
+    if isinstance(parser_config, dict):
+        configured_base = parser_config.get("targets_base_dir")
+        if isinstance(configured_base, str) and configured_base.strip():
+            return Path(configured_base).expanduser().resolve()
+    return _TARGETS_BASE.resolve()
+
+
+def get_target_registry(*, parser_config: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    registry = copy.deepcopy(TARGETS)
+    if not isinstance(parser_config, dict):
+        return registry
+    raw_targets = parser_config.get("targets")
+    if not isinstance(raw_targets, dict):
+        return registry
+    for target_name, raw_entry in raw_targets.items():
+        if not isinstance(target_name, str) or not target_name.strip():
+            continue
+        if not isinstance(raw_entry, dict):
+            continue
+        base_entry = registry.get(target_name, {})
+        if isinstance(base_entry, dict):
+            registry[target_name] = _deep_merge_dicts(base_entry, raw_entry)
+            continue
+        registry[target_name] = copy.deepcopy(raw_entry)
+    return registry
+
+
+def _get_target_path_fragment(*, target_name: str, entry: dict[str, Any]) -> str:
+    raw_path = entry.get("path", entry.get("directory", target_name))
+    if isinstance(raw_path, str) and raw_path.strip():
+        return raw_path
+    return target_name
+
+
+def resolve_target_dir(
+    *,
+    target: str,
+    parser_config: dict[str, Any] | None = None,
+) -> Path:
+    registry = get_target_registry(parser_config=parser_config)
+    entry = registry.get(target, {})
+    path_fragment = (
+        _get_target_path_fragment(target_name=target, entry=entry)
+        if isinstance(entry, dict)
+        else target
+    )
+    return (_get_targets_base_dir(parser_config=parser_config) / path_fragment).resolve()
+
+
+def _handler_name(entry: dict[str, Any]) -> str | None:
+    raw_handler = entry.get("handler")
+    if isinstance(raw_handler, str) and raw_handler.strip():
+        return raw_handler
+    if isinstance(raw_handler, dict):
+        handler_kind = raw_handler.get("kind")
+        if isinstance(handler_kind, str) and handler_kind.strip():
+            return handler_kind
+    return None
+
+
+def _coverage_enabled(entry: dict[str, Any]) -> bool:
+    coverage = entry.get("coverage")
+    if isinstance(coverage, dict):
+        return bool(coverage.get("enabled", False))
+    return bool(entry.get("supports_open_coverage", False))
+
+
+def _command_config(entry: dict[str, Any]) -> dict[str, Any]:
+    configured = entry.get("command")
+    if isinstance(configured, dict):
+        return configured
+
+    legacy: dict[str, Any] = {}
+    for key in ("cmd", "argv", "argv_template", "cmd_resolver", "input_via_stdin"):
+        if key in entry:
+            legacy[key] = entry[key]
+    if "append_input_as_final_arg" in entry:
+        legacy["append_input_as_final_arg"] = entry["append_input_as_final_arg"]
+    return legacy
+
+
+def _template_context(
+    *,
+    input_data: bytes,
+    seed_family: str | None,
+    target_dir: Path,
+) -> dict[str, str]:
+    platform_slug = _platform_slug()
+    ip_version = (
+        seed_family
+        if seed_family in {"ipv4", "ipv6"}
+        else _infer_ip_version(input_data=input_data)
+    )
+    return {
+        "exe_suffix": ".exe" if platform_slug == "win" else "",
+        "ip_version": ip_version,
+        "parser_dir": str(Path(__file__).resolve().parent),
+        "platform": platform_slug,
+        "platform_slug": platform_slug,
+        "project_root": str(Path(__file__).resolve().parent.parent),
+        "python_executable": sys.executable,
+        "seed_family": seed_family or "",
+        "target_dir": str(target_dir),
+    }
+
+
+def _format_argv_template(
+    *,
+    argv_template: list[str],
+    input_data: bytes,
+    seed_family: str | None,
+    target_dir: Path,
+) -> list[str]:
+    context = _template_context(
+        input_data=input_data,
+        seed_family=seed_family,
+        target_dir=target_dir,
+    )
+    out: list[str] = []
+    for part in argv_template:
+        out.append(part.format_map(context))
+    return out
 
 
 def _print_run_target_debug(*, target_name: str, argv: list[str], returncode: int | None, stdout: str, stderr: str) -> None:
@@ -216,21 +356,74 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
     return out
 
 
-def _resolve_argv(cmd: list[str], target_dir: Path, input_str: str | None, input_via_stdin: bool) -> list[str]:
-    """Build argv from hardcoded cmd; resolve relative paths; append input unless input_via_stdin."""
+def _resolve_argv(
+    cmd: list[str],
+    target_dir: Path,
+    input_arg: str | None,
+    append_input_as_final_arg: bool,
+) -> list[str]:
+    """Resolve relative argv entries against target_dir and append input when configured."""
     argv: list[str] = []
     for part in cmd:
         if not Path(part).is_absolute() and (target_dir / part).exists():
             argv.append(str((target_dir / part).resolve()))
         else:
             argv.append(part)
-    if not input_via_stdin and input_str is not None:
-        argv.append(input_str)
+    if append_input_as_final_arg and input_arg is not None:
+        argv.append(input_arg)
     return argv
+
+
+def _resolve_command(
+    *,
+    target_name: str,
+    entry: dict[str, Any],
+    target_dir: Path,
+    input_data: bytes,
+    seed_family: str | None,
+) -> tuple[list[str], bool]:
+    command = _command_config(entry)
+    input_via_stdin = bool(command.get("input_via_stdin", False))
+    append_input_as_final_arg = bool(
+        command.get("append_input_as_final_arg", not input_via_stdin)
+    )
+
+    cmd: list[str] | None = None
+    raw_template = command.get("argv_template")
+    if isinstance(raw_template, list) and all(isinstance(part, str) for part in raw_template):
+        try:
+            cmd = _format_argv_template(
+                argv_template=raw_template,
+                input_data=input_data,
+                seed_family=seed_family,
+                target_dir=target_dir,
+            )
+        except KeyError as exc:
+            raise ValueError(
+                f"unknown command template field {exc.args[0]!r} for target {target_name!r}"
+            ) from exc
+
+    if cmd is None:
+        raw_argv = command.get("argv", command.get("cmd"))
+        if isinstance(raw_argv, list) and all(isinstance(part, str) for part in raw_argv):
+            cmd = list(raw_argv)
+
+    if cmd is None:
+        raise ValueError(f"no runnable command configured for target: {target_name}")
+
+    input_arg = None if input_via_stdin else input_data.decode("utf-8", errors="replace")
+    argv = _resolve_argv(
+        cmd,
+        target_dir,
+        input_arg=input_arg,
+        append_input_as_final_arg=append_input_as_final_arg,
+    )
+    return (argv, input_via_stdin)
 
 
 def run_target(
     target_name: str,
+    entry: dict[str, Any],
     target_dir: Path,
     input_data: bytes,
     timeout: float = DEFAULT_TIMEOUT,
@@ -241,36 +434,22 @@ def run_target(
     """
     Run one target with the given input. Return result dict with status and
     bug signature.
-    Uses hardcoded TARGETS[target_name]["cmd"]; no README parsing.
     """
-    entry = TARGETS.get(target_name)
-    if not entry:
+    try:
+        argv, input_via_stdin = _resolve_command(
+            target_name=target_name,
+            entry=entry,
+            target_dir=target_dir,
+            input_data=input_data,
+            seed_family=seed_family,
+        )
+    except ValueError as exc:
         return {
             "target": target_name,
             "status": "error",
-            "error": f"no hardcoded cmd for target: {target_name}",
+            "error": str(exc),
             "bug_signature": None,
         }
-
-    cmd: list[str] | None = None
-    cmd_resolver_name = entry.get("cmd_resolver")
-    if isinstance(cmd_resolver_name, str):
-        resolver = globals().get(cmd_resolver_name)
-        if callable(resolver):
-            cmd = resolver(input_data=input_data, seed_family=seed_family)
-    if cmd is None:
-        cmd = entry.get("cmd")
-    if not isinstance(cmd, list):
-        return {
-            "target": target_name,
-            "status": "error",
-            "error": f"no hardcoded cmd for target: {target_name}",
-            "bug_signature": None,
-        }
-
-    input_via_stdin = entry.get("input_via_stdin", False)
-    input_str = input_data.decode("utf-8", errors="replace") if not input_via_stdin else None
-    argv = _resolve_argv(cmd, target_dir, input_str, input_via_stdin)
     if not argv:
         argv = [sys.executable, "-c", "pass"]
 
@@ -473,13 +652,14 @@ def run_parser(
     seed_family: str | None = None,
     enable_open_coverage: bool = False,
     closed_cwd_override: Path | str | None = None,
+    parser_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Run fuzzer input against the selected target and return (and optionally print) JSON results.
 
     Provide exactly one of input_data or input_path. If neither is provided, stdin is read.
-    target is the target name (key in TARGETS). For closed targets (cidrize-runner, IPv4-IPv6-parser),
-    the equivalent open target is also run and its output is returned separately.
+    target is the target name. Built-in targets come from `TARGETS`, and config
+    files can override or extend that registry via `parser_config["targets"]`.
 
     closed_cwd_override: If set, the closed target subprocess uses this directory as cwd (created if
     needed) so each worker can write logs/bug_counts.csv under a separate tree instead of sharing
@@ -506,17 +686,18 @@ def run_parser(
     else:
         data = sys.stdin.buffer.read()
 
-    if target not in TARGETS:
-        out = {"error": f"Unknown target: {target}", "known_targets": list(TARGETS)}
+    target_registry = get_target_registry(parser_config=parser_config)
+    if target not in target_registry:
+        out = {"error": f"Unknown target: {target}", "known_targets": list(target_registry)}
         wrapped = {"closed_result": out}
         if print_json:
             print(json.dumps(wrapped), file=sys.stderr)
         return wrapped
 
-    entry = TARGETS[target]
+    entry = target_registry[target]
 
     # Special handling for json-decoder target using internal helper
-    handler = entry.get("handler")
+    handler = _handler_name(entry)
     if handler == "json_decoder":
         input_str = data.decode("utf-8", errors="replace")
         json_log_dir: str | None = None
@@ -536,8 +717,7 @@ def run_parser(
         base_result.update(json_decoder_info)
         result = base_result
     else:
-        target_dir = _TARGETS_BASE / entry["path"]
-        target_dir = target_dir.resolve()
+        target_dir = resolve_target_dir(target=target, parser_config=parser_config)
         if not target_dir.is_dir():
             out = {"error": f"Target directory not found: {target_dir}"}
             wrapped = {"closed_result": out}
@@ -547,6 +727,7 @@ def run_parser(
 
         result = run_target(
             target,
+            entry,
             target_dir,
             data,
             timeout=timeout,
@@ -557,12 +738,12 @@ def run_parser(
     # For closed targets, also run the oracle target
     open_name = entry.get("oracle")
     if open_name is not None:
-        open_entry = TARGETS.get(open_name)
-        open_dir = _TARGETS_BASE / (open_entry["path"] if open_entry and "path" in open_entry else open_name)
-        open_dir = open_dir.resolve()
+        open_entry = target_registry.get(open_name)
+        open_dir = resolve_target_dir(target=open_name, parser_config=parser_config)
         if open_dir.is_dir():
             open_result = run_target(
                 open_name,
+                open_entry or {},
                 open_dir,
                 data,
                 timeout=timeout,
@@ -570,7 +751,12 @@ def run_parser(
             )
             # json-decoder closed path already runs buggy_json under coverage; skip
             # a second coverage subprocess for the json_open oracle.
-            if enable_open_coverage and handler != "json_decoder":
+            if (
+                enable_open_coverage
+                and handler != "json_decoder"
+                and isinstance(open_entry, dict)
+                and _coverage_enabled(open_entry)
+            ):
                 coverage_open_result = _run_open_target_with_coverage(
                     target_name=open_name,
                     target_dir=open_dir,
@@ -652,5 +838,5 @@ def example_print_json() -> None:
 if __name__ == "__main__":
 
     # example_from_bytes()
-    
+
     example_print_json()

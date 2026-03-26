@@ -9,6 +9,9 @@ query ::= "" | "?id=" <digit>{1,4}
 url ::= <scheme> "://" <host> <path> <query>
 url_start ::= <url>
 
-# Optional mutation overlays:
-host_mut ::= "localhost" | "127.0.0.1" | "999.999.999.999"
-segment_mut ::= ".." | "%2e%2e" | "admin" | "////"
+# Second demo format: email addresses.
+mail_atom ::= (<letter>|<digit>|"."|"_"|"-"){1,12}
+mail_label ::= (<letter>|<digit>|"-"){1,10}
+mail_domain ::= <mail_label> "." <mail_label>
+email ::= <mail_atom> "@" <mail_domain>
+email_start ::= <email>

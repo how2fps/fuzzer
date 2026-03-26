@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -8,7 +9,12 @@ from typing import TypedDict
 
 from isinteresting import list_versions as isinteresting_versions
 from mutator import list_versions as mutator_versions
-from parser import DEFAULT_TIMEOUT, TARGETS, list_versions as parser_versions
+from parser import (
+    DEFAULT_TIMEOUT,
+    TARGETS,
+    get_target_registry,
+    list_versions as parser_versions,
+)
 from power_scheduler import list_versions as power_scheduler_versions
 from seed_corpus import canonicalize_version as canonicalize_seed_corpus_version
 from seed_corpus import list_versions as seed_corpus_versions
@@ -18,67 +24,207 @@ from core.mutation_utils import DEFAULT_PRELOAD_BUCKET_RATIOS
 from core.paths import CONFIGS_DIR
 
 ENABLE_OPEN_COVERAGE: bool = False
+CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("target", ("target",)),
+    (
+        "runtime",
+        (
+            "debug_mode",
+            "max_iterations",
+            "max_hours",
+            "timeout",
+            "rng_seed",
+            "workers",
+        ),
+    ),
+    ("seed_scheduler", ("scheduler_kind", "ucb_trace", "ucb_debug_tree")),
+    (
+        "seed_corpus",
+        (
+            "seed_corpus_version",
+            "seed_corpus_initial_draw",
+            "seed_preload_mode",
+            "seed_preload_total",
+            "seed_preload_bucket_ratios",
+            "llm_seed_candidates",
+        ),
+    ),
+    (
+        "mutator",
+        (
+            "mutator_kind",
+            "mutator_version",
+            "grammar_path",
+            "grammar_rules_file",
+        ),
+    ),
+    ("isinteresting", ("isinteresting_version",)),
+    ("parser", ("parser_version", "parser_config", "enable_open_coverage")),
+    ("power_scheduler", ("power_scheduler_version",)),
+)
+CONFIG_KEYS = {key for _, keys in CONFIG_MODULES for key in keys}
+NESTED_CONFIG_MODULE_NAMES = {
+    module_name for module_name, _ in CONFIG_MODULES if module_name != "target"
+}
 
 
 class FuzzConfig(TypedDict):
     target: str
-    scheduler_kind: str
-    mutator_kind: str
+
     debug_mode: bool
-    seed_preload_mode: str
-    seed_preload_total: int
-    seed_preload_bucket_ratios: dict[str, float]
-    seed_corpus_initial_draw: str | None
-    ucb_trace: bool
-    ucb_debug_tree: bool
     max_iterations: int | None
     max_hours: float | None
     timeout: float
     rng_seed: int | None
     workers: int
-    isinteresting_version: str
-    mutator_version: str
-    parser_version: str
-    power_scheduler_version: str
+
+    scheduler_kind: str
+    ucb_trace: bool
+    ucb_debug_tree: bool
+
     seed_corpus_version: str
-    grammar_rules_file: str | None
+    seed_corpus_initial_draw: str | None
+    seed_preload_mode: str
+    seed_preload_total: int
+    seed_preload_bucket_ratios: dict[str, float]
     llm_seed_candidates: int
+
+    mutator_kind: str
+    mutator_version: str
+    grammar_path: str | None
+    grammar_rules_file: str | None
+
+    isinteresting_version: str
+    parser_version: str
+    parser_config: dict[str, object]
     enable_open_coverage: bool
+
+    power_scheduler_version: str
 
 
 def get_default_config() -> FuzzConfig:
     """Return a FuzzConfig with all default values (for merging with file config)."""
     return {
         "target": "json-decoder",
-        "scheduler_kind": "heap",
-        "mutator_kind": "auto",
         "debug_mode": False,
-        "seed_preload_mode": "full",
-        "seed_preload_total": 50,
-        "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
-        "seed_corpus_initial_draw": None,
-        "ucb_trace": False,
-        "ucb_debug_tree": False,
         "max_iterations": 10,
         "max_hours": None,
         "timeout": DEFAULT_TIMEOUT,
         "rng_seed": None,
         "workers": 1,
-        "isinteresting_version": "base",
-        "mutator_version": "base",
-        "parser_version": "base",
-        "power_scheduler_version": "base",
+        "scheduler_kind": "heap",
+        "ucb_trace": False,
+        "ucb_debug_tree": False,
         "seed_corpus_version": "base",
-        "grammar_rules_file": None,
+        "seed_corpus_initial_draw": None,
+        "seed_preload_mode": "full",
+        "seed_preload_total": 50,
+        "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "llm_seed_candidates": 5,
+        "mutator_kind": "auto",
+        "mutator_version": "base",
+        "grammar_path": None,
+        "grammar_rules_file": None,
+        "isinteresting_version": "base",
+        "parser_version": "base",
+        "parser_config": {},
         "enable_open_coverage": ENABLE_OPEN_COVERAGE,
+        "power_scheduler_version": "base",
     }
+
+
+def _deep_merge_dicts(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)  # type: ignore[arg-type]
+            continue
+        merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _merge_config_values(
+    base: dict[str, object],
+    override: dict[str, object],
+) -> dict[str, object]:
+    for key, value in override.items():
+        if key not in CONFIG_KEYS or value is None:
+            continue
+        if (
+            key == "parser_config"
+            and isinstance(base.get(key), dict)
+            and isinstance(value, dict)
+        ):
+            base[key] = _deep_merge_dicts(base[key], value)  # type: ignore[arg-type]
+            continue
+        base[key] = copy.deepcopy(value)
+    return base
+
+
+def _normalize_config_data(data: object) -> dict[str, object]:
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a JSON object.")
+
+    normalized: dict[str, object] = {}
+    _merge_config_values(normalized, data)
+    for module_name in NESTED_CONFIG_MODULE_NAMES:
+        module_config = data.get(module_name)
+        if module_config is None:
+            continue
+        if not isinstance(module_config, dict):
+            raise ValueError(f"{module_name} must be an object when provided.")
+        _merge_config_values(normalized, module_config)
+    return normalized
+
+
+def _iter_grouped_config_values(config: FuzzConfig) -> list[tuple[str, dict[str, object]]]:
+    grouped: list[tuple[str, dict[str, object]]] = []
+    for module_name, keys in CONFIG_MODULES:
+        grouped.append(
+            (
+                module_name,
+                {key: copy.deepcopy(config[key]) for key in keys},
+            )
+        )
+    return grouped
+
 
 def _validate_config(config: FuzzConfig) -> None:
     """Validate config values against allowed choices; raise ValueError on invalid."""
-    if config["target"] not in TARGETS:
+    parser_config = config["parser_config"]
+    if not isinstance(parser_config, dict):
+        raise ValueError("parser_config must be an object.")
+    parser_targets = parser_config.get("targets")
+    if parser_targets is not None and not isinstance(parser_targets, dict):
+        raise ValueError("parser_config.targets must be an object when provided.")
+    parser_targets_base_dir = parser_config.get("targets_base_dir")
+    if parser_targets_base_dir is not None and (
+        not isinstance(parser_targets_base_dir, str) or not parser_targets_base_dir.strip()
+    ):
+        raise ValueError("parser_config.targets_base_dir must be a non-empty string when provided.")
+    if isinstance(parser_targets, dict):
+        for target_name, entry in parser_targets.items():
+            if not isinstance(target_name, str) or not target_name.strip():
+                raise ValueError("parser_config.targets keys must be non-empty strings.")
+            if not isinstance(entry, dict):
+                raise ValueError(f"parser_config.targets[{target_name!r}] must be an object.")
+            command = entry.get("command")
+            if command is not None and not isinstance(command, dict):
+                raise ValueError(
+                    f"parser_config.targets[{target_name!r}].command must be an object."
+                )
+            coverage = entry.get("coverage")
+            if coverage is not None and not isinstance(coverage, dict):
+                raise ValueError(
+                    f"parser_config.targets[{target_name!r}].coverage must be an object."
+                )
+
+    available_targets = get_target_registry(
+        parser_config=config["parser_config"]  # type: ignore[arg-type]
+    )
+    if config["target"] not in available_targets:
         raise ValueError(
-            f"Invalid target: {config['target']}. Must be one of: {sorted(TARGETS.keys())}"
+            f"Invalid target: {config['target']}. Must be one of: {sorted(available_targets.keys())}"
         )
     scheduler_choices = list(scheduler_versions())
     if config["scheduler_kind"] not in scheduler_choices:
@@ -89,6 +235,12 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto, json, or ip."
         )
+    grammar_path = config["grammar_path"]
+    if grammar_path is not None:
+        if not isinstance(grammar_path, str) or not grammar_path.strip():
+            raise ValueError("grammar_path must be a non-empty string or null.")
+        if not Path(grammar_path).is_file():
+            raise ValueError(f"grammar_path does not exist: {grammar_path}")
     if config["seed_preload_mode"] not in ("full", "ratio_batch", "sample"):
         raise ValueError(
             f"Invalid seed_preload_mode: {config['seed_preload_mode']}. "
@@ -149,9 +301,27 @@ def load_config_from_file(path: Path) -> FuzzConfig:
         data = json.load(f)
     defaults = get_default_config()
     merged: FuzzConfig = {**defaults}
-    for key in merged:
-        if key in data and data[key] is not None:
-            merged[key] = data[key]  # type: ignore[literal-required]
+    normalized_data = _normalize_config_data(data)
+    _merge_config_values(merged, normalized_data)
+    if merged["grammar_path"] is not None:
+        grammar_path = Path(merged["grammar_path"])
+        if not grammar_path.is_absolute():
+            grammar_path = (path.parent / grammar_path).resolve()
+        merged["grammar_path"] = str(grammar_path)
+    grammar_rules_file = merged["grammar_rules_file"]
+    if grammar_rules_file is not None:
+        grammar_rules_path = Path(grammar_rules_file)
+        if not grammar_rules_path.is_absolute():
+            grammar_rules_path = (path.parent / grammar_rules_path).resolve()
+        merged["grammar_rules_file"] = str(grammar_rules_path)
+    parser_config = merged["parser_config"]
+    if isinstance(parser_config, dict):
+        raw_targets_base_dir = parser_config.get("targets_base_dir")
+        if isinstance(raw_targets_base_dir, str) and raw_targets_base_dir.strip():
+            targets_base_dir = Path(raw_targets_base_dir)
+            if not targets_base_dir.is_absolute():
+                targets_base_dir = (path.parent / targets_base_dir).resolve()
+            parser_config["targets_base_dir"] = str(targets_base_dir)
     merged["seed_corpus_version"] = canonicalize_seed_corpus_version(
         merged["seed_corpus_version"]
     )
@@ -221,6 +391,23 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         default="auto",
         choices=["auto", "json", "ip"],
         help="Mutation mode: auto-detect from target, or force json/ip.",
+    )
+    parser.add_argument(
+        "--grammar-file",
+        dest="grammar_path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional JSON grammar file used by the base grammar mutator for the active input family.",
+    )
+    parser.add_argument(
+        "-g",
+        "--grammar-rules-file",
+        dest="grammar_rules_file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional text file with extra grammar rules for the grammar_ast mutator.",
     )
     parser.add_argument(
         "--debug",
@@ -322,14 +509,6 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         help="Seed corpus module version for ablation.",
     )
     parser.add_argument(
-        "-g",
-        "--grammar-rules-file",
-        dest="grammar_rules_file",
-        default=None,
-        metavar="PATH",
-        help="Optional text file with extra grammar rules for the grammar_ast mutator.",
-    )
-    parser.add_argument(
         "--llm-seed-candidates",
         type=int,
         default=5,
@@ -382,12 +561,21 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         parser.error(f"--config path is not a file: {args.config}")
     if args.configs_dir is not None and not args.configs_dir.is_dir():
         parser.error(f"--configs-dir is not a directory: {args.configs_dir}")
+    if args.grammar_path is not None and not args.grammar_path.is_file():
+        parser.error(f"--grammar-file path is not a file: {args.grammar_path}")
+    if args.grammar_rules_file is not None and not args.grammar_rules_file.is_file():
+        parser.error(f"--grammar-rules-file path is not a file: {args.grammar_rules_file}")
 
     max_iterations: int | None = None if args.max_hours is not None else args.max_iterations
     from_args: FuzzConfig = {
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
         "mutator_kind": args.mutator_kind,
+        "grammar_path": (
+            str(args.grammar_path.resolve())
+            if args.grammar_path is not None
+            else None
+        ),
         "debug_mode": args.debug_mode,
         "seed_preload_mode": args.seed_preload_mode,
         "seed_preload_total": args.seed_preload_total,
@@ -403,9 +591,14 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "parser_version": args.parser_version,
         "power_scheduler_version": args.power_scheduler_version,
         "seed_corpus_version": args.seed_corpus_version,
-        "grammar_rules_file": args.grammar_rules_file,
+        "grammar_rules_file": (
+            str(args.grammar_rules_file.resolve())
+            if args.grammar_rules_file is not None
+            else None
+        ),
         "llm_seed_candidates": args.llm_seed_candidates,
         "enable_open_coverage": args.enable_open_coverage,
+        "parser_config": {},
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "seed_corpus_initial_draw": None,
     }
@@ -448,26 +641,7 @@ def print_config(config: FuzzConfig) -> None:
 
     log = get_fuzzer_logger()
     log.info("Fuzzer configuration:")
-    log.info("  target: %s", config["target"])
-    log.info("  scheduler_kind: %s", config["scheduler_kind"])
-    log.info("  mutator_kind: %s", config["mutator_kind"])
-    log.info("  debug_mode: %s", config["debug_mode"])
-    log.info("  seed_corpus_initial_draw: %s", config["seed_corpus_initial_draw"])
-    log.info("  seed_preload_mode: %s", config["seed_preload_mode"])
-    log.info("  seed_preload_total: %s", config["seed_preload_total"])
-    log.info("  seed_preload_bucket_ratios: %s", config["seed_preload_bucket_ratios"])
-    log.info("  ucb_trace: %s", config["ucb_trace"])
-    log.info("  ucb_debug_tree: %s", config["ucb_debug_tree"])
-    log.info("  max_iterations: %s", config["max_iterations"])
-    log.info("  max_hours: %s", config["max_hours"])
-    log.info("  timeout: %s", config["timeout"])
-    log.info("  rng_seed: %s", config["rng_seed"])
-    log.info("  workers: %s", config["workers"])
-    log.info("  isinteresting_version: %s", config["isinteresting_version"])
-    log.info("  mutator_version: %s", config["mutator_version"])
-    log.info("  parser_version: %s", config["parser_version"])
-    log.info("  power_scheduler_version: %s", config["power_scheduler_version"])
-    log.info("  seed_corpus_version: %s", config["seed_corpus_version"])
-    log.info("  grammar_rules_file: %s", config["grammar_rules_file"])
-    log.info("  llm_seed_candidates: %s", config["llm_seed_candidates"])
-    log.info("  enable_open_coverage: %s", config["enable_open_coverage"])
+    for module_name, module_values in _iter_grouped_config_values(config):
+        log.info("  %s:", module_name)
+        for key, value in module_values.items():
+            log.info("    %s: %s", key, value)

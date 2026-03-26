@@ -1,0 +1,19 @@
+# Example IP grammar extensions for grammar_ast.
+#
+# This shows how to define a narrower IPv4/CIDR variant without changing
+# the mutator code. The new start rule points at IPv4 CIDRs with prefixes
+# limited to 24..30.
+
+cidr4_small ::= <number_range min=24 max=30>
+ipv4_cidr_small ::= <ipv4> <slash> <cidr4_small>
+ip_start ::= <ipv4_cidr_small>
+
+
+# Example JSON grammar extensions for grammar_ast.
+#
+# This shows how to define a new JSON-style top-level shape without changing
+# the mutator code. The new start rule points at an object with exactly
+# 5 key-value pairs.
+
+object_big ::= "{" <pair> ("," <pair>){4,4} "}"
+json_start ::= <object_big>
