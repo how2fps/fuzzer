@@ -1,6 +1,7 @@
 [project]
 name = "my_fuzzer"
 version = "0.1.0"
+requires-python = ">=3.11"
 dependencies = [
     "tqdm>=4.66.0",
     "coverage>=7.13.4",
@@ -9,6 +10,8 @@ dependencies = [
     "requests>=2.31.0",
     "pyparsing>=3.1.0",
     "rich>=14.0.0",
+    "orjson>=3.11.7",
+    "pillow==11.1.0",
 ]
 
 [project.scripts]
@@ -19,6 +22,9 @@ fuzz-now = "fuzzer.main:main"
 # Configure your linter for clean code
 line-length = 88
 
+[tool.uv]
+package = false
+
 [dependency-groups]
 dev = [
     "mypy>=1.19.1",
@@ -26,3 +32,12 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.15.2",
 ]
+
+[tool.setuptools.packages.find]
+# This tells setuptools to look for packages in the current directory
+where = ["."]
+# Only include your actual code folders (add/remove as needed)
+include = ["core*", "mutator*", "parser*", "seed_scheduler*", "isinteresting*"]
+# Exclude things that shouldn't be "installed" as code
+exclude = ["targets*", "configs*", "tests*", "targets_backup*"]
+namespaces = false

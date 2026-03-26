@@ -306,6 +306,7 @@ def compute_interestingness(
     repeat_bug_count: int | None = None
     s_new = 0.0
     s_rare = 0.0
+    # Novelty-focused weights
     new_edge_weight = 2.0
     rare_bug_weight = 0.9
     metric_max = 3.0

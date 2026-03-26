@@ -1,0 +1,6 @@
+{
+  "target": "json-decoder",
+  "max_iterations": 2000,
+  "workers": 4,
+  "mutator_version": "adaptive_all"
+}

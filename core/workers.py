@@ -26,6 +26,7 @@ from core.sqlite_conn import open_results_db
 from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
 from isinteresting import get_compute_interestingness
 from core.mutation_utils import generate_unique_mutations, make_discovered_seed
+from mutator import record_operator_coverage
 from parser import get_parser
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
 from rich.live import Live
@@ -739,6 +740,9 @@ def run_fuzzer_multi_worker(
                 if bug_key is not None and bug_key not in seen_bug_keys:
                     seen_bug_keys.add(bug_key)
                     new_bug = True
+
+                # Feed the real coverage signal back to the adaptive operator strategy.
+                record_operator_coverage(result["mutated_input"], new_coverage)
 
                 event_bits = [f"iter {iteration}", status]
                 if new_bug:

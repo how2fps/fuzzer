@@ -22,12 +22,15 @@ from .mutator import (
     generate_json_input,
     interesting_value_mutation,
     load_grammar_from_json,
+    mutate_ip,
     mutate_ip_input,
     mutate_ipv4_input,
     mutate_ipv6_input,
+    mutate_json,
     mutate_json_input,
     mutate_text_with_grammar,
     normalize_grammar_spec,
+    record_operator_coverage,
 )
 from .versions import get_mutator, list_versions
 
@@ -55,11 +58,14 @@ __all__ = [
     "interesting_value_mutation",
     "list_versions",
     "load_grammar_from_json",
+    "mutate_ip",
     "mutate_ip_input",
     "mutate_ipv4_input",
     "mutate_ipv6_input",
+    "mutate_json",
     "mutate_json_input",
     "mutate_text_with_grammar",
     "normalize_grammar_spec",
+    "record_operator_coverage",
 ]
 

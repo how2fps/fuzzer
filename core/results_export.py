@@ -40,6 +40,9 @@ def export_results(
                         "isinteresting_score",
                         "datetime_executed",
                     ],
+                    quoting=csv.QUOTE_ALL,
+                    escapechar='\\',
+                    doublequote=True,
                 )
                 w.writeheader()
                 w.writerows(pairs)

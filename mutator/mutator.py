@@ -5,7 +5,8 @@ import json
 import random
 import re
 from pathlib import Path
-from typing import TypeAlias
+from typing import TypeAlias, Any
+from .operators import AdaptiveStrategy, JSON_OPERATORS, IP_OPERATORS
 
 GrammarRules: TypeAlias = dict[str, list[str]]
 GrammarSpec: TypeAlias = dict[str, object]
@@ -38,7 +39,6 @@ def _normalize_recursive_symbols(
             )
         normalized_symbols.add(symbol)
     return normalized_symbols
-
 
 def _normalize_rules(*, value: object, source: str) -> GrammarRules:
     if not isinstance(value, dict):
@@ -106,7 +106,6 @@ _DEFAULT_GRAMMARS: dict[str, GrammarSpec] = {
     "ipv6": IPV6_GRAMMAR,
 }
 _ACTIVE_GRAMMARS: dict[str, GrammarSpec] = dict(_DEFAULT_GRAMMARS)
-
 
 def configure_runtime_grammar(
     *, kind: str, grammar_path: str | Path | None = None
@@ -192,6 +191,36 @@ def _expand_symbol(
 
     parts.append(production[last_idx:])
     return "".join(parts)
+
+
+def load_grammar_from_json(path: str) -> GrammarSpec:
+    """Loads a GrammarSpec from a JSON file.
+    
+    JSON format should be:
+    {
+      "start": "<start_symbol>",
+      "recursive_symbols": ["<symbol1>", ...],
+      "rules": {
+        "<symbol1>": ["production1", "production2"],
+        ...
+      }
+    }
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    # Validation
+    if "start" not in data or "rules" not in data:
+        raise ValueError(f"Invalid grammar JSON at {path}: must have 'start' and 'rules'")
+    
+    # Convert recursive_symbols list to a set (required by generate_from_grammar)
+    recursive_symbols = set(data.get("recursive_symbols", []))
+    
+    return {
+        "start": data["start"],
+        "recursive_symbols": recursive_symbols,
+        "rules": data["rules"]
+    }
 
 
 def generate_from_grammar(
@@ -1070,6 +1099,140 @@ def mutate_text_with_grammar(
 
     fragment = generate_from_grammar(grammar_spec=grammar_spec, max_depth=max_depth, rng=random_engine)
     return _mutate_text_from_original(original_text=original_text, fragment=fragment, rng=random_engine)
+
+_MAX_PENDING = 10_000
+
+_MAX_PENDING = 10_000
+
+
+class GrammarFuzzer:
+    def __init__(self):
+        self.strategies = {
+            "json": AdaptiveStrategy(list(JSON_OPERATORS.keys())),
+            "ip": AdaptiveStrategy(list(IP_OPERATORS.keys())),
+        }
+        # Maps mutated_text -> (grammar_type, op_name) for deferred feedback.
+        # Populated when an operator is chosen; cleared when coverage signal arrives.
+        self._pending: dict[str, tuple[str, str]] = {}
+
+    def mutate(
+        self,
+        text: str,
+        grammar_type: str,
+        grammar_spec: GrammarSpec,
+        max_depth: int = 5,
+        rng: random.Random | None = None,
+    ) -> str:
+        rng = rng or random.Random()
+        strategy = self.strategies.get(grammar_type)
+
+        # Decide whether to use a semantic operator, standard grammar mutation, or byte-level
+        choice = rng.random()
+
+        if choice < 0.4 and strategy:
+            # 40% chance: Use a semantic operator   
+            # 40% — "smart" mutations
+            # Knows what the data means
+            # JSON: parse it, run a semantic operator (mutate_keys, numeric_edge_case, etc.)
+            # IP:   run an IP-aware operator (leading_zeros, zone_id, etc.)
+            # Adaptive: learns which operators find more bugs over time
+            op_name = strategy.select_operator(rng)
+            operators = JSON_OPERATORS if grammar_type == "json" else IP_OPERATORS
+            op_func = operators[op_name]
+
+            if grammar_type == "json":
+                try:
+                    data = json.loads(text) if text else {}
+                    mutated_data = op_func(data, rng)
+                    # Handle cases where op_func returns a string (like duplicate_keys)
+                    if isinstance(mutated_data, str):
+                        result = mutated_data
+                    else:
+                        result = json.dumps(mutated_data)
+                except json.JSONDecodeError:
+                    result = mutate_text_with_grammar(original_text=text, grammar_spec=grammar_spec, rng=rng)
+            else:
+                result = op_func(text, rng)
+
+            # Record which operator produced this output so the fuzzer loop can
+            # call record_coverage() with the real new_coverage signal later.
+            if len(self._pending) >= _MAX_PENDING:
+                # Evict the oldest entry to keep memory bounded.
+                self._pending.pop(next(iter(self._pending)))
+            self._pending[result] = (grammar_type, op_name)
+            return result
+
+        elif choice < 0.7:
+            # 30% — "structural" mutations
+            # Knows it's text with grammar rules
+            # Cuts the input apart and splices in grammar-generated fragments
+            # Still produces mostly valid-looking inputs
+            return mutate_text_with_grammar(
+                original_text=text,
+                grammar_spec=grammar_spec,
+                max_depth=max_depth,
+                rng=rng
+            )
+        else:
+            # 30% — "dumb" mutations
+            # Treats input as raw bytes, doesn't care what it means
+            # Flips bits, increments bytes, deletes/clones chunks
+            # Finds low-level memory/encoding bugs
+            data = text.encode('utf-8', errors='replace')
+            mutators = [bit_flip, arithmetic_mutation, interesting_value_mutation, delete_block_mutation, clone_block_mutation]
+            func = rng.choice(mutators)
+            return func(data=data, rng=rng).decode('utf-8', errors='ignore')
+
+    def record_coverage(self, mutated_text: str, gained_coverage: bool) -> None:
+        """Update the operator weight based on real coverage feedback.
+
+        Call this after the interestingness check for a mutated input.
+        If the text was not produced by a semantic operator (e.g. it came from
+        grammar or byte-havoc), this is a no-op.
+        """
+        entry = self._pending.pop(mutated_text, None)
+        if entry is not None:
+            grammar_type, op_name = entry
+            strategy = self.strategies.get(grammar_type)
+            if strategy is not None:
+                strategy.update_score(op_name, gained_coverage)
+
+
+# Global fuzzer instance
+_GLOBAL_FUZZER = GrammarFuzzer()
+
+
+def mutate_json(original_text: str = "", rng: random.Random = None) -> str:
+    return _GLOBAL_FUZZER.mutate(
+        text=original_text,
+        grammar_type="json",
+        grammar_spec=JSON_GRAMMAR,
+        rng=rng
+    )
+
+
+def mutate_ip(original_text: str = "", rng: random.Random = None) -> str:
+    return _GLOBAL_FUZZER.mutate(
+        text=original_text,
+        grammar_type="ip",
+        grammar_spec=IP_GRAMMAR,
+        rng=rng
+    )
+
+
+def record_operator_coverage(mutated_text: str, gained_coverage: bool) -> None:
+    """Call this after the interestingness check to give the adaptive strategy real feedback.
+
+    If mutated_text was produced by a semantic operator, the operator's weight
+    is updated based on whether it discovered new coverage.
+    Non-operator mutations (grammar / byte-havoc) are silently ignored.
+    """
+    _GLOBAL_FUZZER.record_coverage(mutated_text, gained_coverage)
+    try:
+        from .versions.adaptive_all import handle_coverage_feedback
+        handle_coverage_feedback(mutated_text, gained_coverage)
+    except ImportError:
+        pass
 
 
 def mutate_json_input(

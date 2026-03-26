@@ -1,0 +1,13 @@
+{
+    "start": "email",
+    "recursive_symbols": [],
+    "rules": {
+        "email": ["<addr-spec>"],
+        "addr-spec": ["<local-part>@<domain>"],
+        "local-part": ["<dot-atom>", "<quoted-string>"],
+        "dot-atom": ["<atom>", "<dot-atom>.<atom>"],
+        "atom": ["admin", "root", "user", "test", "info", "mail"],
+        "domain": ["example.com", "google.com", "github.com", "testing.org", "internal.local"],
+        "quoted-string": ["\"admin\"", "\"root\"", "\"user.test\""]
+    }
+}
