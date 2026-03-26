@@ -4,7 +4,7 @@ import random
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -62,7 +62,7 @@ def _print_table(title: str, rows: list[tuple[str, str, str]]) -> None:
 
 def main() -> None:
     rng = random.Random(42)
-    rules_path = Path(__file__).with_name("url_rules.txt")
+    rules_path = REPO_ROOT / "configs" / "examples" / "url_rules.txt"
 
     grammar_ast.configure(grammar_rules_file=str(rules_path))
 

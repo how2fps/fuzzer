@@ -120,7 +120,7 @@ def run_fuzzer(
     startup_regex_seeds: list[str] = []
 
     if scheduler.empty() and use_regex_noseed:
-        family = corpus.target(effective_target).family
+        family = corpus.resolve_family_or_target(effective_target)
         requested = max(1, int(config["seed_preload_total"]))
         with console.status(
             f"Generating {requested} grammar seeds for {effective_target}...",
@@ -160,7 +160,7 @@ def run_fuzzer(
             )
 
     if scheduler.empty() and use_llm_bootstrap:
-        family = corpus.target(effective_target).family
+        family = corpus.resolve_family_or_target(effective_target)
         llm_bootstrap_config = dict(config)
         requested = int(llm_bootstrap_config["llm_seed_candidates"])
         if requested > 0:
@@ -222,6 +222,7 @@ def run_fuzzer(
         target=effective_target,
         power_scheduler_module=power_scheduler_module,
         conn=conn,
+        scheduler_seeds=[item.seed for item in scheduler.ready_items()],
     )
 
     shutdown_requested: list[bool] = [False]

@@ -193,7 +193,7 @@ def run_fuzzer_multi_worker(
     iteration_counter: list[int] = [0]
     seed_energies_holder: list[dict[int, int]] = [seed_energies]
     batch_expected: dict[str, int] = {}
-    family = corpus.target(effective_target).family
+    family = corpus.resolve_family_or_target(effective_target)
     added_seed_inputs_holder: list[set[str]] = [set()]
     next_discovered_ordinal_holder: list[int] = [DISCOVERED_SEED_ORDINAL_BASE]
     results_received_count: list[int] = [0]

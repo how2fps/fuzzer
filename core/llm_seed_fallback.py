@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,31 +229,99 @@ Return ONLY valid JSON with this exact schema:
 """.format(**payload)
 
 
-def _extract_seed_candidates(response_text: str) -> list[str]:
-    cleaned = response_text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
+def _strip_markdown_fences(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned.startswith("```"):
+        return cleaned
+    lines = cleaned.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError:
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _extract_seed_candidates_from_payload(payload: Any) -> list[str]:
+    if isinstance(payload, dict):
+        candidates = payload.get("candidate_seeds")
+        if not isinstance(candidates, list):
+            candidates = payload.get("seeds")
+        if not isinstance(candidates, list):
+            return []
+    elif isinstance(payload, list):
+        candidates = payload
+    else:
         return []
-    candidates = payload.get("candidate_seeds")
-    if not isinstance(candidates, list):
-        return []
+
     out: list[str] = []
     for item in candidates:
+        if isinstance(item, str):
+            out.append(item)
+            continue
         if not isinstance(item, dict):
             continue
         seed = item.get("seed")
-        if isinstance(seed, str) and seed.strip():
+        if isinstance(seed, str):
             out.append(seed)
+    return _dedupe_preserve_order(out)
+
+
+def _extract_quoted_seed_matches(*, text: str, quote: str) -> list[str]:
+    pattern = re.compile(
+        rf"{quote}seed{quote}\s*:\s*{quote}((?:\\.|[^{quote}\\])*){quote}",
+        re.DOTALL,
+    )
+    out: list[str] = []
+    for match in pattern.finditer(text):
+        escaped_value = match.group(1)
+        try:
+            value = json.loads(f'"{escaped_value}"')
+        except json.JSONDecodeError:
+            value = escaped_value.encode("utf-8").decode("unicode_escape")
+        out.append(value)
     return out
+
+
+def _extract_seed_candidates_from_text(text: str) -> list[str]:
+    out = _extract_quoted_seed_matches(text=text, quote='"')
+    out.extend(_extract_quoted_seed_matches(text=text, quote="'"))
+    if out:
+        return _dedupe_preserve_order(out)
+
+    lines = [line.strip() for line in text.splitlines()]
+    candidate_lines = [
+        line
+        for line in lines
+        if line
+        and not line.startswith(("```", "{", "}", "[", "]"))
+        and ":" not in line[:32]
+    ]
+    return _dedupe_preserve_order(candidate_lines)
+
+
+def _extract_seed_candidates(response_text: str) -> list[str]:
+    cleaned = _strip_markdown_fences(response_text)
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        payload = None
+
+    if payload is not None:
+        parsed = _extract_seed_candidates_from_payload(payload)
+        if parsed:
+            return parsed
+    return _extract_seed_candidates_from_text(cleaned)
 
 
 def _llm_seed_provider_status() -> tuple[bool, str]:
