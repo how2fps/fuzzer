@@ -41,7 +41,10 @@ def run_fuzzer(
     corpus = corpus_loader.load()
     grammar_ast.configure(grammar_rules_file=config["grammar_rules_file"])
     if config["mutator_version"] == "adaptive_all":
-        adaptive_all.configure(grammar_file=config["grammar_rules_file"])
+        adaptive_all.configure(
+            grammar_file=config["grammar_rules_file"],
+            debug_mode=config["debug_mode"],
+        )
 
     mutate_fn = get_mutator(config["mutator_version"])
     power_scheduler_module = get_power_scheduler(

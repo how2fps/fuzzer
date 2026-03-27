@@ -89,6 +89,7 @@ UNIFIED_OPS.update({
 # Add Grammar Splices (explicitly distinguished)
 UNIFIED_OPS["json_grammar_cache"] = _grammar_operator(JSON_GRAMMAR)
 UNIFIED_OPS["ip_grammar_cache"] = _grammar_operator(IP_GRAMMAR)
+_DEBUG_MODE = False
 
 # 4. Create our own fuzzer instance that uses the unified pool
 class AdaptiveAllFuzzer:
@@ -140,8 +141,15 @@ class AdaptiveAllFuzzer:
 # Global instance for this version
 _ALL_FUZZER = AdaptiveAllFuzzer()
 
-def configure(grammar_file: str | None = None):
+def configure(
+    grammar_file: str | None = None,
+    *,
+    debug_mode: bool = False,
+):
     """Configures the adaptive fuzzer with optional external grammar(s)."""
+    global _DEBUG_MODE
+    _DEBUG_MODE = debug_mode
+
     if not grammar_file:
         return
 
@@ -178,6 +186,9 @@ def mutate(
     return _ALL_FUZZER.mutate(text, mutator_kind, rng)
 
 def _print_final_probabilities():
+    if not _DEBUG_MODE:
+        return
+
     # Only print if we actually did work
     proc_name = current_process().name
     strategy = _ALL_FUZZER.strategy
