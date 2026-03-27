@@ -110,6 +110,8 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             seed_id TEXT NOT NULL,
             seed_text TEXT,
             mutated_input TEXT NOT NULL,
+            generation_time_seconds REAL,
+            run_time_seconds REAL,
             status TEXT,
             bug_type TEXT,
             exception TEXT,
@@ -135,6 +137,14 @@ def init_results_db(conn: sqlite3.Connection) -> None:
         ON runs (mutated_input, target)
         """
     )
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+    }
+    if "generation_time_seconds" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN generation_time_seconds REAL")
+    if "run_time_seconds" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN run_time_seconds REAL")
     conn.commit()
 
 
@@ -145,6 +155,8 @@ def insert_run(
     seed_id: str,
     seed_text: str,
     mutated_input: str,
+    generation_time_seconds: float | None,
+    run_time_seconds: float | None,
     status: str | None,
     bug_signature: dict[str, Any] | None,
     isinteresting_score: float,
@@ -159,14 +171,17 @@ def insert_run(
         line_raw).isdigit() else None
     conn.execute(
         """INSERT INTO runs (
-            iteration, seed_id, seed_text, mutated_input, status, bug_type,
-            exception, message, file, line, isinteresting_score, target, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            iteration, seed_id, seed_text, mutated_input, generation_time_seconds,
+            run_time_seconds, status, bug_type, exception, message, file, line,
+            isinteresting_score, target, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             iteration,
             seed_id,
             seed_text or "",
             mutated_input,
+            generation_time_seconds,
+            run_time_seconds,
             status,
             bug_type,
             exc,

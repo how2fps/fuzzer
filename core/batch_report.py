@@ -242,27 +242,34 @@ def compute_run_metrics(*, run: RunData) -> dict[str, Any]:
             first_bug_time = max((min(bug_times) - start).total_seconds(), 0.0)
 
     avg_execution = None
-    # Estimate per-test execution time from sequential created_at timestamps in runs.csv.
-    # TODO: if explicit execution-duration field is added, prefer that direct metric.
-    ordered_with_time = sorted(
-        (
-            (_safe_int(row.get("iteration")) or 0, _parse_iso8601(row.get("created_at")))
-            for row in rows
-        ),
-        key=lambda item: (item[0], item[1] or datetime.max),
-    )
-    execution_deltas: list[float] = []
-    prev_time: datetime | None = None
-    for _, dt in ordered_with_time:
-        if dt is None:
-            continue
-        if prev_time is not None:
-            delta = (dt - prev_time).total_seconds()
-            if delta >= 0:
-                execution_deltas.append(delta)
-        prev_time = dt
-    if execution_deltas:
-        avg_execution = sum(execution_deltas) / len(execution_deltas)
+    explicit_execution_times = [
+        float(value)
+        for value in (row.get("run_time_seconds") for row in rows)
+        if value not in (None, "")
+    ]
+    if explicit_execution_times:
+        avg_execution = sum(explicit_execution_times) / len(explicit_execution_times)
+    else:
+        # Estimate per-test execution time from sequential created_at timestamps in runs.csv.
+        ordered_with_time = sorted(
+            (
+                (_safe_int(row.get("iteration")) or 0, _parse_iso8601(row.get("created_at")))
+                for row in rows
+            ),
+            key=lambda item: (item[0], item[1] or datetime.max),
+        )
+        execution_deltas: list[float] = []
+        prev_time: datetime | None = None
+        for _, dt in ordered_with_time:
+            if dt is None:
+                continue
+            if prev_time is not None:
+                delta = (dt - prev_time).total_seconds()
+                if delta >= 0:
+                    execution_deltas.append(delta)
+            prev_time = dt
+        if execution_deltas:
+            avg_execution = sum(execution_deltas) / len(execution_deltas)
 
     missing: list[str] = []
     if avg_execution is None:

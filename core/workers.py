@@ -18,6 +18,7 @@ from core.config import FuzzConfig, is_debug_run
 from core.fuzzer_logging import get_fuzzer_logger
 from core.live_ui import RunDashboard, console
 from core.db_utils import (
+    input_already_run,
     insert_run,
     insert_seen_branches_into_conn,
     seed_stats_for_power_schedule,
@@ -25,7 +26,7 @@ from core.db_utils import (
 from core.sqlite_conn import open_results_db
 from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
 from isinteresting import get_compute_interestingness
-from core.mutation_utils import generate_unique_mutations, make_discovered_seed
+from core.mutation_utils import make_discovered_seed
 from parser import get_parser
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
 from rich.live import Live
@@ -82,8 +83,10 @@ def run_worker_process(
             seed_family = work.get("seed_family")
             bucket = work["bucket"]
             mutated_text = work["mutated_text"]
+            generation_time_seconds = float(work.get("generation_time_seconds") or 0.0)
 
             try:
+                run_started_at = time.perf_counter()
                 result = parser_api.run_parser(
                     input_data=mutated_text.encode("utf-8"),
                     target=effective_target,
@@ -96,12 +99,14 @@ def run_worker_process(
                     / ".worker_cwd"
                     / f"w{worker_id}",
                 )
+                run_time_seconds = time.perf_counter() - run_started_at
             except KeyboardInterrupt:
                 # Treat a KeyboardInterrupt inside a worker as a request to stop
                 # processing further work; break out of the loop so the process can
                 # be joined or terminated by the parent.
                 break
             except Exception as exc:
+                run_time_seconds = time.perf_counter() - run_started_at
                 wlog.exception(
                     "Worker w%s: run_parser crashed (job_id=%s): %s",
                     worker_id,
@@ -143,6 +148,8 @@ def run_worker_process(
                     "seed_id": seed_id,
                     "seed_text": seed_text,
                     "mutated_input": mutated_text,
+                    "generation_time_seconds": generation_time_seconds,
+                    "run_time_seconds": run_time_seconds,
                     "status": closed.get("status"),
                     "bug_signature": closed.get("bug_signature"),
                     "isinteresting_score": score,
@@ -189,7 +196,7 @@ def run_fuzzer_multi_worker(
     )
     current_scheduled: list[ScheduledSeed | None] = [None]
     current_mutations_left: list[int] = [0]
-    current_batch: list[str] = []
+    current_batch: list[tuple[str, float]] = []
     job_id_counter: list[int] = [0]
     iteration_counter: list[int] = [0]
     seed_energies_holder: list[dict[int, int]] = [seed_energies]
@@ -218,6 +225,51 @@ def run_fuzzer_multi_worker(
             source=startup_generated_source or "startup bootstrap",
             seeds=startup_generated_seeds,
         )
+
+    def _generate_timed_mutation_batch(
+        *,
+        n: int,
+        seed_text: str,
+        conn_thread: sqlite3.Connection,
+        max_attempts: int = 200,
+    ) -> list[tuple[str, float]]:
+        reject_nul_for_kinds = {"ip", "ipv4", "ipv6"}
+
+        def _is_rejected_candidate(candidate: str) -> bool:
+            return effective_mutator in reject_nul_for_kinds and "\x00" in candidate
+
+        seen: set[str] = set()
+        batch: list[tuple[str, float]] = []
+        for _ in range(n):
+            started_at = time.perf_counter()
+            candidate = mutate_fn(
+                seed_text,
+                mutator_kind=effective_mutator,
+                rng=rng,
+            )
+            for _attempt in range(max_attempts):
+                if _is_rejected_candidate(candidate):
+                    candidate = mutate_fn(
+                        seed_text,
+                        mutator_kind=effective_mutator,
+                        rng=rng,
+                    )
+                    continue
+                if candidate not in seen and not input_already_run(
+                    conn_thread, candidate, effective_target
+                ):
+                    seen.add(candidate)
+                    batch.append((candidate, time.perf_counter() - started_at))
+                    break
+                candidate = mutate_fn(
+                    seed_text,
+                    mutator_kind=effective_mutator,
+                    rng=rng,
+                )
+            else:
+                seen.add(candidate)
+                batch.append((candidate, time.perf_counter() - started_at))
+        return batch
 
     def _low_value_ready_signature(*, threshold: float = 0.1) -> tuple[str, ...] | None:
         ready_items = scheduler.ready_items()
@@ -417,14 +469,10 @@ def run_fuzzer_multi_worker(
                                     )
                                     current_batch.clear()
                                     current_batch.extend(
-                                        generate_unique_mutations(
-                                            n,
-                                            current_scheduled[0].seed.text,
-                                            mutate_fn,
-                                            effective_mutator,
-                                            rng,
-                                            conn_thread,
-                                            effective_target,
+                                        _generate_timed_mutation_batch(
+                                            n=n,
+                                            seed_text=current_scheduled[0].seed.text,
+                                            conn_thread=conn_thread,
                                         )
                                     )
                                     current_mutations_left[0] = len(current_batch)
@@ -467,7 +515,7 @@ def run_fuzzer_multi_worker(
                             iteration_counter[0] += 1
                             job_id = job_id_counter[0]
                             iteration = iteration_counter[0] - 1
-                            mutated_text = current_batch.pop(0)
+                            mutated_text, generation_time_seconds = current_batch.pop(0)
                             work = {
                                 "job_id": job_id,
                                 "item_id": scheduled.item_id,
@@ -478,6 +526,7 @@ def run_fuzzer_multi_worker(
                                 "bucket": scheduled.seed.bucket,
                                 "target": effective_target,
                                 "mutated_text": mutated_text,
+                                "generation_time_seconds": generation_time_seconds,
                             }
                             pending[job_id] = (scheduled, iteration)
                             reply_queues[wid].put(work)
@@ -689,6 +738,8 @@ def run_fuzzer_multi_worker(
                     seed_id=result["seed_id"],
                     seed_text=result["seed_text"],
                     mutated_input=result["mutated_input"],
+                    generation_time_seconds=result.get("generation_time_seconds", 0.0),
+                    run_time_seconds=result.get("run_time_seconds", 0.0),
                     status=result["status"],
                     bug_signature=result["bug_signature"],
                     isinteresting_score=result["isinteresting_score"],

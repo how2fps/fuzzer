@@ -228,8 +228,9 @@ def export_results(
 
         runs_path = results_folder / "runs.csv"
         cur = conn.execute(
-            "SELECT iteration, seed_id, seed_text, mutated_input, status, bug_type, "
-            "exception, message, file, line, isinteresting_score, target, created_at FROM runs"
+            "SELECT iteration, seed_id, seed_text, mutated_input, generation_time_seconds, "
+            "run_time_seconds, status, bug_type, exception, message, file, line, "
+            "isinteresting_score, target, created_at FROM runs"
         )
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
