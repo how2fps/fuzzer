@@ -7,7 +7,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable
 
-from ..mutator import (
+from .lib import (
     arithmetic_mutation,
     bit_flip,
     clone_block_mutation,

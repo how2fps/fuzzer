@@ -15,7 +15,7 @@ from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_cand
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
 from core.sqlite_conn import open_results_db
 from core.mutation_utils import initial_scheduler_seeds
-from mutator import get_mutator
+from mutator import get_feedback_handler, get_mutator
 from power_scheduler import get_power_scheduler
 from core.results_export import export_results
 from seed_corpus import Seed, get_corpus_loader, get_version_spec
@@ -42,6 +42,7 @@ def run_fuzzer(
     grammar_ast.configure(grammar_rules_file=config["grammar_rules_file"])
 
     mutate_fn = get_mutator(config["mutator_version"])
+    mutator_feedback_fn = get_feedback_handler(config["mutator_version"])
     power_scheduler_module = get_power_scheduler(
         config["power_scheduler_version"])
 
@@ -272,6 +273,7 @@ def run_fuzzer(
                 if startup_regex_seeds
                 else ""
             ),
+            mutator_feedback_fn=mutator_feedback_fn,
         )
         console.print(
             render_run_summary_panel(

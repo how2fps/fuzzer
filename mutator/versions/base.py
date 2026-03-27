@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import random
 
-from ..mutator import mutate_ip_input, mutate_json_input
+from .lib import mutate_ip_input, mutate_json_input
 
 
 def mutate(

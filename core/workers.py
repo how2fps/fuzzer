@@ -169,6 +169,7 @@ def run_fuzzer_multi_worker(
     workers: int,
     shutdown_requested: list[bool],
     mutate_fn: Callable[..., str],
+    mutator_feedback_fn: Callable[..., bool] | None,
     rng: random.Random,
     startup_generated_seeds: list[str] | None = None,
     startup_generated_source: str = "",
@@ -734,6 +735,11 @@ def run_fuzzer_multi_worker(
                 status = str(result.get("status") or "").strip().lower() or "unknown"
                 signals = result.get("signals") or {}
                 new_coverage = bool(signals.get("new_coverage"))
+                if mutator_feedback_fn is not None:
+                    mutator_feedback_fn(
+                        mutated_text=result["mutated_input"],
+                        gained_coverage=new_coverage,
+                    )
                 new_bug = bool(signals.get("new_bug"))
                 bug_key = _bug_key(result)
                 if bug_key is not None and bug_key not in seen_bug_keys:

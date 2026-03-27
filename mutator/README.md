@@ -7,7 +7,7 @@ This package contains grammar‑aware generators and byte‑level mutators that 
 - **As a package inside this repo**:
 
 ```python
-from mutator.mutator import (
+from mutator.versions.lib import (
     generate_json_input,
     generate_ip_input,
     generate_ipv4_input,
@@ -115,7 +115,7 @@ All mutators are pure functions: they return new `bytes` and never modify the or
 
 ```python
 import random
-from mutator.mutator import generate_json_input, mutate_json_input, bit_flip
+from mutator.versions.lib import generate_json_input, mutate_json_input, bit_flip
 
 def fuzz_one_iteration(previous_seed: str | None) -> bytes:
     if previous_seed is None:
@@ -134,7 +134,6 @@ You can adapt the same pattern for `generate_ip_input`/`mutate_ip_input` (or the
 
 - `base`: grammar-shaped JSON/IP mutation
 - `byte_havoc`: AFL-style byte-level mutations
-- `json_walk`: JSON-structure walk + havoc strategy
 - `grammar_ast`: generalized grammar-AST mutator inspired by `mutator_test.py`; mutates generic grammar node classes (`Sequence`, `Alternation`, `Repeat`, `Literal`, `Ref`, etc.), supports extra DSL rules via `-g/--grammar-rules-file`, and can now parse a seed into an exact derivation tree under an explicit grammar start rule via `parse_from_rule(...)` / `mutate_from_rule(...)`
 
 ### `grammar_ast` exact seed parsing
