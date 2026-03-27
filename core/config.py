@@ -161,6 +161,70 @@ def _merge_config_values(
     return base
 
 
+CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
+    "target": ("--target",),
+    "scheduler_kind": ("--scheduler",),
+    "mutator_kind": ("--mutator",),
+    "grammar_path": ("--grammar-file",),
+    "grammar_rules_file": ("-g", "--grammar-rules-file"),
+    "debug_mode": ("--debug",),
+    "seed_preload_mode": ("--seed-preload-mode",),
+    "seed_preload_total": ("--seed-preload-total",),
+    "ucb_trace": ("--ucb-trace",),
+    "ucb_debug_tree": ("--ucb-debug-tree",),
+    "max_iterations": ("--iterations",),
+    "max_hours": ("--hours",),
+    "timeout": ("--timeout",),
+    "rng_seed": ("--seed",),
+    "workers": ("--workers",),
+    "isinteresting_version": ("--isinteresting-version",),
+    "mutator_version": ("--mutator-version",),
+    "parser_version": ("--parser-version",),
+    "power_scheduler_version": ("--power-scheduler-version",),
+    "seed_corpus_version": ("--seed-corpus-version",),
+    "llm_seed_candidates": ("--llm-seed-candidates",),
+    "enable_open_coverage": ("--enable-open-coverage",),
+}
+
+
+def _cli_option_present(argv: list[str], option_strings: tuple[str, ...]) -> bool:
+    return any(
+        arg == option or arg.startswith(f"{option}=")
+        for arg in argv
+        for option in option_strings
+    )
+
+
+def _get_cli_override_keys(argv: list[str]) -> set[str]:
+    return {
+        key
+        for key, option_strings in CLI_OVERRIDE_FLAGS.items()
+        if _cli_option_present(argv, option_strings)
+    }
+
+
+def _apply_cli_overrides(
+    config: FuzzConfig,
+    cli_values: FuzzConfig,
+    override_keys: set[str],
+) -> FuzzConfig:
+    merged: FuzzConfig = copy.deepcopy(config)
+    _merge_config_values(merged, {key: cli_values[key] for key in override_keys})
+
+    if "seed_preload_mode" in override_keys:
+        merged["seed_corpus_initial_draw"] = None
+    if "max_hours" in override_keys:
+        merged["max_iterations"] = None
+    elif "max_iterations" in override_keys:
+        merged["max_hours"] = None
+
+    merged["seed_corpus_version"] = canonicalize_seed_corpus_version(
+        merged["seed_corpus_version"]
+    )
+    _validate_config(merged)
+    return merged
+
+
 def _normalize_config_data(data: object) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError("Config file must contain a JSON object.")
@@ -543,9 +607,11 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         help="Enable optional coverage collection for open_result targets.",
     )
 
+    argv = sys.argv[1:]
     args = parser.parse_args()
+    cli_override_keys = _get_cli_override_keys(argv)
 
-    if args.max_hours is not None and "--iterations" in sys.argv:
+    if args.max_hours is not None and "--iterations" in argv:
         parser.error(
             "Cannot specify both --iterations and --hours; use exactly one.")
     if args.max_hours is not None:
@@ -607,13 +673,27 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
     )
 
     if args.config is not None:
-        config = load_config_from_file(args.config)
+        config = _apply_cli_overrides(
+            load_config_from_file(args.config),
+            from_args,
+            cli_override_keys,
+        )
         return ([ (args.config, config) ], args.runs)
     if args.configs_dir is not None:
         paths = list_config_files(args.configs_dir)
         if not paths:
             parser.error(f"No .json config files found in {args.configs_dir} (skip names starting with _).")
-        entries = [ (p, load_config_from_file(p)) for p in paths ]
+        entries = [
+            (
+                p,
+                _apply_cli_overrides(
+                    load_config_from_file(p),
+                    from_args,
+                    cli_override_keys,
+                ),
+            )
+            for p in paths
+        ]
         return (entries, args.runs)
     return ([ (None, from_args) ], 1)
 
