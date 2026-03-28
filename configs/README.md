@@ -30,6 +30,8 @@ Defaults shown below match `core.config.get_default_config()`.
 | `runtime` | `max_iterations` | integer or `null` | `10` |
 | `runtime` | `max_hours` | float or `null` | `null` |
 | `runtime` | `timeout` | float | `10.0` |
+| `runtime` | `memory_telemetry_seconds` | float `>= 0` | `0.0` |
+| `runtime` | `worker_max_jobs` | integer `>= 0` (`0` disables recycling) | `500` |
 | `runtime` | `rng_seed` | integer or `null` | `null` |
 | `runtime` | `workers` | integer | `1` |
 | `seed_scheduler` | `scheduler_kind` | `queue`, `heap`, `ucb_tree`, `thompson` | `heap` |

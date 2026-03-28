@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 from typing import Any
 
@@ -9,6 +10,8 @@ from seed_corpus import Seed
 
 from .base import BaseSeedScheduler
 from .types import ScheduledSeed
+
+RECENT_NOVELTY_WINDOW = 16
 
 
 def _stable_hash(payload: Any) -> str:
@@ -152,6 +155,54 @@ def _is_success(
     return bool(isinteresting_score > 0)
 
 
+def _track_item_recency(
+    item: ScheduledSeed,
+    signals: dict[str, Any] | None,
+) -> tuple[float, int]:
+    history = item.metadata.get("_recent_novelty_history")
+    if not isinstance(history, list):
+        history = []
+
+    last_cov_key = item.metadata.get("_last_coverage_key")
+    same_coverage_streak = max(0, int(item.metadata.get("_same_coverage_streak", 0)))
+
+    coverage_key = None
+    novelty = False
+    if isinstance(signals, dict):
+        raw_coverage_key = signals.get("coverage_key")
+        if raw_coverage_key not in (None, "", [], {}):
+            coverage_key = str(raw_coverage_key)
+        novelty = any(
+            bool(signals.get(key))
+            for key in ("new_coverage", "new_bug", "new_differential_behavior")
+        )
+
+    if novelty:
+        same_coverage_streak = 0
+    elif coverage_key is None:
+        same_coverage_streak = 0
+    elif coverage_key == last_cov_key:
+        same_coverage_streak += 1
+    else:
+        same_coverage_streak = 1
+
+    if coverage_key is not None:
+        item.metadata["_last_coverage_key"] = coverage_key
+    history.append(1 if novelty else 0)
+    if len(history) > RECENT_NOVELTY_WINDOW:
+        history = history[-RECENT_NOVELTY_WINDOW:]
+    item.metadata["_recent_novelty_history"] = history
+    item.metadata["_same_coverage_streak"] = same_coverage_streak
+
+    recent_novelty_rate = (
+        sum(history) / float(len(history))
+        if history
+        else 0.0
+    )
+    item.metadata["_recent_novelty_rate"] = recent_novelty_rate
+    return recent_novelty_rate, same_coverage_streak
+
+
 class ThompsonFeatureScheduler(BaseSeedScheduler):
     """
     Thompson Sampling scheduler over target-dependent execution features.
@@ -171,12 +222,16 @@ class ThompsonFeatureScheduler(BaseSeedScheduler):
 
     def add(self, seed: Seed, *, metadata: dict[str, Any] | None = None) -> ScheduledSeed:
         self._seq += 1
+        metadata_dict = dict(metadata or {})
+        metadata_dict.setdefault("_recent_novelty_history", [])
+        metadata_dict.setdefault("_same_coverage_streak", 0)
+        metadata_dict.setdefault("_recent_novelty_rate", 0.0)
         item_id = f"ts{self._seq:06d}"
         item = ScheduledSeed(
             item_id=item_id,
             seed=seed,
             priority=0.0,
-            metadata=dict(metadata or {}),
+            metadata=metadata_dict,
         )
         self._items[item_id] = item
         self._ready.add(item_id)
@@ -198,11 +253,24 @@ class ThompsonFeatureScheduler(BaseSeedScheduler):
             item_id = self._favored_inputs.get(feature_id)
             if item_id not in self._ready:
                 continue
+            favored_item = self._items.get(item_id)
+            if favored_item is None:
+                continue
             alpha = max(float(params.get("alpha", 1.0)), 1e-6)
             beta = max(float(params.get("beta", 1.0)), 1e-6)
             theta = self._rng.betavariate(alpha, beta)
             psi = self._rng.betavariate(alpha + beta, alpha * alpha)
-            score = theta * psi
+            recent_novelty_rate = min(
+                1.0,
+                max(0.0, float(favored_item.metadata.get("_recent_novelty_rate", 0.0) or 0.0)),
+            )
+            same_coverage_streak = max(
+                0,
+                int(favored_item.metadata.get("_same_coverage_streak", 0) or 0),
+            )
+            recency_multiplier = 1.0 + (0.75 * recent_novelty_rate)
+            stagnation_divisor = 1.0 + (0.50 * math.log1p(float(same_coverage_streak)))
+            score = (theta * psi * recency_multiplier) / stagnation_divisor
             if score > best_score:
                 best_score = score
                 best_item_id = item_id
@@ -243,6 +311,10 @@ class ThompsonFeatureScheduler(BaseSeedScheduler):
         stored.updates += 1
 
         feature_ids = _extract_feature_ids(signals)
+        recent_novelty_rate, same_coverage_streak = _track_item_recency(
+            stored,
+            signals,
+        )
         success = _is_success(
             isinteresting_score=isinteresting_score,
             signals=signals,
@@ -250,9 +322,9 @@ class ThompsonFeatureScheduler(BaseSeedScheduler):
         for feature_id in feature_ids:
             params = self._ensure_feature(feature_id)
             if success:
-                params["alpha"] += 1.0
+                params["alpha"] += 1.0 + (0.5 * recent_novelty_rate)
             else:
-                params["beta"] += 1.0
+                params["beta"] += 1.0 + (0.25 * math.log1p(float(same_coverage_streak)))
             self._maybe_favor(feature_id, stored)
 
         if signals:

@@ -17,6 +17,10 @@ from core.sqlite_conn import open_results_db
 from .base import BaseSeedScheduler
 from .types import ScheduledSeed
 
+RECENT_NOVELTY_WINDOW = 16
+RECENT_NOVELTY_REWARD = 0.35
+SAME_COVERAGE_STREAK_PENALTY = 0.20
+
 
 def _short_hash(obj: Any) -> str:
     """Return a stable short hash for bucketing complex scheduler signal payloads."""
@@ -127,6 +131,121 @@ def _compact_coverage_key(key: Any) -> str:
             return "ranges=" + " | ".join(parts)
         return json.dumps(key, sort_keys=True, default=str)[:120]
     return str(key)
+
+
+def _coverage_key_from_edges(edges: set[tuple[str, int, int]]) -> str:
+    """Build a deterministic compact coverage key from covered edges."""
+    if not edges:
+        return "NO_COVERAGE"
+    # Sort for deterministic hashing across process boundaries.
+    ordered = sorted(edges)
+    return "COV:" + _short_hash(ordered)
+
+
+def _track_item_recency(
+    item: ScheduledSeed,
+    signals: dict[str, Any] | None,
+) -> tuple[float, int]:
+    history = item.metadata.get("_recent_novelty_history")
+    if not isinstance(history, list):
+        history = []
+
+    last_cov_key = item.metadata.get("_last_coverage_key")
+    same_coverage_streak = max(0, int(item.metadata.get("_same_coverage_streak", 0)))
+
+    coverage_key = None
+    if isinstance(signals, dict):
+        raw_coverage_key = signals.get("coverage_key")
+        if raw_coverage_key not in (None, "", [], {}):
+            coverage_key = str(raw_coverage_key)
+    novelty = False
+    if isinstance(signals, dict):
+        novelty = any(
+            bool(signals.get(key))
+            for key in ("new_coverage", "new_bug", "new_differential_behavior")
+        )
+
+    if novelty:
+        same_coverage_streak = 0
+    elif coverage_key is None:
+        same_coverage_streak = 0
+    elif coverage_key == last_cov_key:
+        same_coverage_streak += 1
+    else:
+        same_coverage_streak = 1
+
+    if coverage_key is not None:
+        item.metadata["_last_coverage_key"] = coverage_key
+    history.append(1 if novelty else 0)
+    if len(history) > RECENT_NOVELTY_WINDOW:
+        history = history[-RECENT_NOVELTY_WINDOW:]
+    item.metadata["_recent_novelty_history"] = history
+    item.metadata["_same_coverage_streak"] = same_coverage_streak
+
+    recent_novelty_rate = (
+        sum(history) / float(len(history))
+        if history
+        else 0.0
+    )
+    item.metadata["_recent_novelty_rate"] = recent_novelty_rate
+    return recent_novelty_rate, same_coverage_streak
+
+
+def _flat_compact_signals(
+    *,
+    result: dict[str, Any],
+    status: str,
+    score: float,
+    new_coverage: bool,
+    new_bug: bool,
+) -> dict[str, Any]:
+    """Return a compact flat signal payload to reduce queue memory pressure."""
+    closed_raw = result.get("closed_result", {})
+    open_raw = result.get("open_result", {})
+    closed = closed_raw if isinstance(closed_raw, dict) else {}
+    open_ = open_raw if isinstance(open_raw, dict) else {}
+    bug_signature = closed.get("bug_signature") or open_.get("bug_signature")
+    edges = get_covered_edges_from_result(result)
+
+    closed_status = str(closed.get("status") or "").strip().lower()
+    open_status = str(open_.get("status") or "").strip().lower()
+    new_differential_behavior = (
+        bool(open_)
+        and (
+            closed_status != open_status
+            or (closed.get("bug_signature") or {}) != (open_.get("bug_signature") or {})
+            or (closed.get("stdout_signature") or "") != (open_.get("stdout_signature") or "")
+            or (closed.get("stderr_signature") or "") != (open_.get("stderr_signature") or "")
+        )
+    )
+
+    out: dict[str, Any] = {
+        "status": status,
+        "isinteresting": score,
+        "new_coverage": new_coverage,
+        "new_bug": new_bug,
+        "new_differential_behavior": new_differential_behavior,
+        "crash": status == "crash",
+        "timeout": status == "timeout",
+        "coverage_key": _coverage_key_from_edges(edges),
+    }
+    if bug_signature:
+        out["bug_signature"] = bug_signature
+        if isinstance(bug_signature, dict):
+            meaningful = {
+                key: value
+                for key, value in bug_signature.items()
+                if value not in (None, "", [], {})
+            }
+            if meaningful:
+                out["bug_key"] = "BUG:" + _short_hash(meaningful)
+    if closed.get("stdout_signature") not in (None, ""):
+        out["stdout_signature"] = closed.get("stdout_signature")
+    if closed.get("stderr_signature") not in (None, ""):
+        out["stderr_signature"] = closed.get("stderr_signature")
+    if closed.get("semantic_output_signature") not in (None, ""):
+        out["semantic_output_signature"] = closed.get("semantic_output_signature")
+    return out
 
 
 def _closed_status(result: dict[str, Any]) -> str:
@@ -247,21 +366,19 @@ def build_ucb_update_signals(
 ) -> dict[str, Any]:
     """Build the per-mutation feedback payload consumed by the UCB scheduler."""
     status = _closed_status(result)
-    return {
-        "iteration": iteration,
-        "seed_id": seed_id,
-        "bucket": bucket,
-        "status": status,
-        "isinteresting": score,
-        "new_coverage": _has_new_coverage(
-            db_path, result, sqlite_conn=sqlite_conn
-        ),
-        "new_bug": _has_new_bug(db_path, result, target, sqlite_conn=sqlite_conn),
-        "crash": status == "crash",
-        "timeout": status == "timeout",
-        "closed_result": result.get("closed_result", {}),
-        "open_result": result.get("open_result", {}),
-    }
+    new_coverage = _has_new_coverage(db_path, result, sqlite_conn=sqlite_conn)
+    new_bug = _has_new_bug(db_path, result, target, sqlite_conn=sqlite_conn)
+    compact = _flat_compact_signals(
+        result=result,
+        status=status,
+        score=score,
+        new_coverage=new_coverage,
+        new_bug=new_bug,
+    )
+    compact["iteration"] = iteration
+    compact["seed_id"] = seed_id
+    compact["bucket"] = bucket
+    return compact
 
 
 @dataclass
@@ -302,6 +419,9 @@ class UCBTreeScheduler(BaseSeedScheduler):
     def add(self, seed: Seed, *, metadata: dict[str, Any] | None = None) -> ScheduledSeed:
         """Insert a seed into the coverage/bug leaf selected from its metadata signals."""
         metadata = dict(metadata or {})
+        metadata.setdefault("_recent_novelty_history", [])
+        metadata.setdefault("_same_coverage_streak", 0)
+        metadata.setdefault("_recent_novelty_rate", 0.0)
         signals = self._normalize_signals(metadata.get("signals"))
         cov_key = self._coverage_bucket_key(signals)
         bug_key = self._bug_bucket_key(signals)
@@ -371,7 +491,15 @@ class UCBTreeScheduler(BaseSeedScheduler):
         if normalized_signals:
             stored.metadata["last_signals"] = normalized_signals
 
-        reward = self._reward_from_signals(normalized_signals)
+        recent_novelty_rate, same_coverage_streak = _track_item_recency(
+            stored,
+            normalized_signals,
+        )
+        reward = self._reward_from_signals(
+            normalized_signals,
+            recent_novelty_rate=recent_novelty_rate,
+            same_coverage_streak=same_coverage_streak,
+        )
         path = stored.metadata.get("_ucb_last_path")
         if not path:
             raise ValueError("update() called before next() for this item")
@@ -385,9 +513,6 @@ class UCBTreeScheduler(BaseSeedScheduler):
             cov_key, bug_key = stored.metadata.get("_ucb_last_leaf") or stored.metadata.get(
                 "_ucb_home", ("NO_COVERAGE", "NO_BUG")
             )
-        stored.metadata["_ucb_home"] = (cov_key, bug_key)
-        stored.metadata["_ucb_last_leaf"] = (cov_key, bug_key)
-        stored.metadata.pop("_ucb_last_path", None)
         trace = stored.metadata.get("_ucb_trace")
         if trace:
             trace_summary = _summarize_trace_payload(
@@ -408,8 +533,15 @@ class UCBTreeScheduler(BaseSeedScheduler):
         remaining = max(remaining - 1, 0)
         stored.metadata["_ucb_pending_batch_results"] = remaining
         if remaining == 0:
+            stored.metadata["_ucb_home"] = (cov_key, bug_key)
+            stored.metadata["_ucb_last_leaf"] = (cov_key, bug_key)
+            stored.metadata.pop("_ucb_last_path", None)
             leaf = self._ensure_leaf(cov_key, bug_key)
             self._insert_into_leaf(leaf, stored)
+        else:
+            # Keep the leased traversal path alive until the full batch has reported
+            # back; one `next()` lease can produce multiple feedback updates.
+            stored.metadata["_ucb_last_leaf"] = (cov_key, bug_key)
         return stored
 
     def empty(self) -> bool:
@@ -585,7 +717,13 @@ class UCBTreeScheduler(BaseSeedScheduler):
             return len(node.seeds)
         return sum(self._available_count(child) for child in node.children.values())
 
-    def _reward_from_signals(self, signals: dict[str, Any] | None) -> float:
+    def _reward_from_signals(
+        self,
+        signals: dict[str, Any] | None,
+        *,
+        recent_novelty_rate: float = 0.0,
+        same_coverage_streak: int = 0,
+    ) -> float:
         """Map execution signals into a scalar reward used by UCB updates."""
         if not signals:
             return 0.0
@@ -600,7 +738,11 @@ class UCBTreeScheduler(BaseSeedScheduler):
             "timeout",
         }:
             reward += 3.0
-        return reward
+        reward += RECENT_NOVELTY_REWARD * max(0.0, min(recent_novelty_rate, 1.0))
+        reward -= SAME_COVERAGE_STREAK_PENALTY * math.log1p(
+            float(max(0, same_coverage_streak))
+        )
+        return max(reward, -0.5)
 
     def _normalize_signals(self, signals: dict[str, Any] | None) -> dict[str, Any] | None:
         """

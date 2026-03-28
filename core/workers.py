@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import queue
 import json
+import os
 import random
 import sqlite3
 import sys
 import threading
 import time
+from collections import deque
 from contextlib import nullcontext
 from multiprocessing import Process, Queue
 from pathlib import Path
@@ -18,14 +20,15 @@ from core.config import FuzzConfig, is_debug_run
 from core.fuzzer_logging import get_fuzzer_logger
 from core.live_ui import RunDashboard, console
 from core.db_utils import (
+    add_seed_input_if_new,
     input_already_run,
     insert_run,
-    insert_seen_branches_into_conn,
+    insert_seen_edges_into_conn,
     seed_stats_for_power_schedule,
 )
 from core.sqlite_conn import open_results_db
 from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
-from isinteresting import get_compute_interestingness
+from isinteresting import get_compute_interestingness, get_covered_edges_from_result
 from core.mutation_utils import make_discovered_seed
 from parser import get_parser
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
@@ -35,6 +38,32 @@ from seed_scheduler import (
     ScheduledSeed,
     build_ucb_update_signals,
 )
+
+
+def _read_rss_kib(pid: int) -> int | None:
+    """Best-effort RSS lookup from /proc/<pid>/status in KiB."""
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        with open(status_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.startswith("VmRSS:"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    return None
+                try:
+                    return int(parts[1])
+                except ValueError:
+                    return None
+    except OSError:
+        return None
+    return None
+
+
+def _format_rss(kib: int | None) -> str:
+    if kib is None:
+        return "n/a"
+    return f"{(kib / 1024.0):.1f}MiB"
 
 
 def run_worker_process(
@@ -56,6 +85,9 @@ def run_worker_process(
     wlog = get_fuzzer_logger()
     db_path = results_folder / "runs.db"
     db_conn = open_results_db(db_path)
+    debug_mode = is_debug_run(config)
+    worker_max_jobs = max(0, int(config.get("worker_max_jobs") or 0))
+    completed_jobs = 0
 
     try:
         while True:
@@ -142,6 +174,7 @@ def run_worker_process(
             )
             result_queue.put(
                 {
+                    "worker_id": worker_id,
                     "job_id": job_id,
                     "item_id": item_id,
                     "iteration": iteration,
@@ -154,9 +187,21 @@ def run_worker_process(
                     "bug_signature": closed.get("bug_signature"),
                     "isinteresting_score": score,
                     "signals": signals,
-                    "parser_result": result,
+                    "covered_edges": tuple(get_covered_edges_from_result(result)),
+                    "parser_result": result if debug_mode else None,
+                    "worker_retiring": (
+                        worker_max_jobs > 0 and (completed_jobs + 1) >= worker_max_jobs
+                    ),
                 }
             )
+            completed_jobs += 1
+            if worker_max_jobs > 0 and completed_jobs >= worker_max_jobs:
+                wlog.info(
+                    "Worker w%s reached recycle threshold (%s jobs); exiting for refresh.",
+                    worker_id,
+                    worker_max_jobs,
+                )
+                break
     finally:
         db_conn.close()
 
@@ -182,9 +227,10 @@ def run_fuzzer_multi_worker(
     startup_generated_source: str = "",
 ) -> None:
     scheduler_uses_feedback = scheduler.supports_feedback_updates()
-    request_queue: Queue = Queue()
-    reply_queues: list[Queue] = [Queue() for _ in range(workers)]
-    result_queue: Queue = Queue()
+    queue_cap = max(8, workers * 4)
+    request_queue: Queue = Queue(maxsize=max(2, workers * 2))
+    reply_queues: list[Queue] = [Queue(maxsize=1) for _ in range(workers)]
+    result_queue: Queue = Queue(maxsize=queue_cap)
     lock = threading.Lock()
     cond = threading.Condition(lock)
     total_jobs: list[int] = [0]
@@ -196,18 +242,18 @@ def run_fuzzer_multi_worker(
     )
     current_scheduled: list[ScheduledSeed | None] = [None]
     current_mutations_left: list[int] = [0]
-    current_batch: list[tuple[str, float]] = []
+    current_batch: deque[tuple[str, float]] = deque()
     job_id_counter: list[int] = [0]
     iteration_counter: list[int] = [0]
     seed_energies_holder: list[dict[int, int]] = [seed_energies]
     batch_expected: dict[str, int] = {}
     family = corpus.resolve_family_or_target(effective_target)
-    added_seed_inputs_holder: list[set[str]] = [set()]
     next_discovered_ordinal_holder: list[int] = [DISCOVERED_SEED_ORDINAL_BASE]
     results_received_count: list[int] = [0]
     llm_refill_attempts: list[int] = [0]
     last_low_value_signature: list[tuple[str, ...] | None] = [None]
     worker_shutdown_grace_seconds = max(5.0, float(config["timeout"]) * 2.0)
+    worker_max_jobs = max(0, int(config.get("worker_max_jobs") or 0))
     log = get_fuzzer_logger()
     max_iterations = config["max_iterations"]
     debug_mode = is_debug_run(config)
@@ -215,7 +261,7 @@ def run_fuzzer_multi_worker(
     seen_bug_keys: set[tuple[str, str, str, str, str]] = set()
     dashboard = RunDashboard(
         target=effective_target,
-        workers=workers,
+        configured_workers=workers,
         results_folder=str(results_folder),
         max_iterations=max_iterations,
         max_hours=max_hours,
@@ -296,6 +342,14 @@ def run_fuzzer_multi_worker(
             str(signature.get("line") or ""),
         )
 
+    def _coverage_key_from_signals(signals: dict[str, Any] | None) -> str | None:
+        if not isinstance(signals, dict):
+            return None
+        coverage_key = signals.get("coverage_key")
+        if coverage_key in (None, "", [], {}):
+            return None
+        return str(coverage_key)
+
     def _try_refill_scheduler_from_llm() -> bool:
         requested = int(config["llm_seed_candidates"])
         if requested <= 0:
@@ -327,7 +381,11 @@ def run_fuzzer_multi_worker(
 
         added_any = False
         for text in generated.seeds:
-            if text in added_seed_inputs_holder[0]:
+            if not add_seed_input_if_new(
+                conn_thread,
+                target=effective_target,
+                input_text=text,
+            ):
                 continue
             candidate = make_generated_seed(
                 text=text,
@@ -342,7 +400,6 @@ def run_fuzzer_multi_worker(
                 },
             }
             scheduler.add(candidate, metadata=candidate_metadata)
-            added_seed_inputs_holder[0].add(text)
             next_discovered_ordinal_holder[0] += 1
             added_any = True
         if added_any:
@@ -443,10 +500,14 @@ def run_fuzzer_multi_worker(
                             if current_mutations_left[0] <= 0:
                                 conn_thread = open_results_db(db_path)
                                 try:
+                                    live_scheduler_seeds = [
+                                        item.seed for item in scheduler.ready_items()
+                                    ]
                                     stats = seed_stats_for_power_schedule(
                                         corpus=corpus,
                                         target=effective_target,
                                         conn=conn_thread,
+                                        scheduler_seeds=live_scheduler_seeds,
                                     )
                                     if stats:
                                         schedule = (
@@ -497,9 +558,11 @@ def run_fuzzer_multi_worker(
                                             mode,
                                         )
                                     if use_live_ui:
+                                        _sync_dashboard_worker_count()
                                         dashboard.record_schedule(
                                             pending_jobs=len(pending),
-                                            queue_depth=len(batch_expected) + len(pending),
+                                            scheduler_size=len(scheduler),
+                                            queue_size=len(batch_expected) + len(pending),
                                             event=(
                                                 f"seed {current_scheduled[0].seed.seed_id} "
                                                 f"scheduled with {len(current_batch)} mutations"
@@ -515,7 +578,7 @@ def run_fuzzer_multi_worker(
                             iteration_counter[0] += 1
                             job_id = job_id_counter[0]
                             iteration = iteration_counter[0] - 1
-                            mutated_text, generation_time_seconds = current_batch.pop(0)
+                            mutated_text, generation_time_seconds = current_batch.popleft()
                             work = {
                                 "job_id": job_id,
                                 "item_id": scheduled.item_id,
@@ -577,23 +640,109 @@ def run_fuzzer_multi_worker(
     request_thread = threading.Thread(target=request_handler)
     request_thread.start()
 
-    procs = [
-        Process(
+    def _sync_dashboard_worker_count() -> None:
+        if use_live_ui:
+            dashboard.update_worker_count(
+                active_workers=sum(1 for proc in procs if proc.is_alive())
+            )
+            dashboard.update_busy_workers(busy_workers=len(pending))
+
+    def _spawn_worker(slot: int) -> Process:
+        proc = Process(
             target=run_worker_process,
             args=(
                 config,
                 request_queue,
                 reply_queues,
                 result_queue,
-                w,
+                slot,
                 str(results_folder),
                 effective_mutator,
             ),
         )
-        for w in range(workers)
-    ]
-    for p in procs:
-        p.start()
+        proc.start()
+        return proc
+
+    procs = [_spawn_worker(w) for w in range(workers)]
+    pending_worker_refresh: dict[int, str] = {}
+    _sync_dashboard_worker_count()
+
+    def _maybe_refresh_workers() -> None:
+        if shutdown_requested[0]:
+            _sync_dashboard_worker_count()
+            return
+        for slot, proc in enumerate(procs):
+            if proc.is_alive():
+                continue
+            proc.join(timeout=0.1)
+            reason = pending_worker_refresh.pop(slot, None)
+            if reason is None:
+                reason = "unexpected exit"
+                log.warning(
+                    "Worker slot w%s pid=%s exited unexpectedly; spawning replacement.",
+                    slot,
+                    proc.pid,
+                )
+            procs[slot] = _spawn_worker(slot)
+            log.info(
+                "Spawned replacement worker w%s pid=%s after %s.",
+                slot,
+                procs[slot].pid,
+                reason,
+            )
+        _sync_dashboard_worker_count()
+
+    memory_telemetry_seconds = float(config.get("memory_telemetry_seconds") or 0.0)
+    memory_telemetry_stop = threading.Event()
+    memory_telemetry_thread: threading.Thread | None = None
+    if memory_telemetry_seconds > 0:
+        main_pid = os.getpid()
+
+        def _memory_telemetry_loop() -> None:
+            while not memory_telemetry_stop.wait(memory_telemetry_seconds):
+                total_kib = 0
+                main_rss_kib = _read_rss_kib(main_pid)
+                if main_rss_kib is not None:
+                    total_kib += main_rss_kib
+                parts = [f"main[pid={main_pid}]={_format_rss(main_rss_kib)}"]
+                for idx, proc in enumerate(procs):
+                    pid = proc.pid
+                    if pid is None:
+                        parts.append(f"w{idx}[pid=?]=starting")
+                        continue
+                    rss_kib = _read_rss_kib(pid)
+                    if rss_kib is not None:
+                        total_kib += rss_kib
+                    state = "alive" if proc.is_alive() else "dead"
+                    parts.append(
+                        f"w{idx}[{state},pid={pid}]={_format_rss(rss_kib)}"
+                    )
+                total_rss = _format_rss(total_kib)
+                detail = " | ".join(parts)
+                if use_live_ui:
+                    _sync_dashboard_worker_count()
+                    dashboard.update_memory_telemetry(
+                        total_rss=total_rss,
+                        details=detail,
+                    )
+                else:
+                    log.info(
+                        "RSS telemetry: total=%s | %s",
+                        total_rss,
+                        detail,
+                    )
+
+        memory_telemetry_thread = threading.Thread(
+            target=_memory_telemetry_loop,
+            name="memory-telemetry",
+            daemon=True,
+        )
+        memory_telemetry_thread.start()
+        if not use_live_ui:
+            log.info(
+                "Memory telemetry enabled: sampling coordinator + worker RSS every %.1fs",
+                memory_telemetry_seconds,
+            )
 
     results_received = 0
     last_result_time = time.time()
@@ -624,6 +773,7 @@ def run_fuzzer_multi_worker(
             )
             while True:
                 try:
+                    _maybe_refresh_workers()
                     # Use a timeout so we can periodically check for shutdown
                     # requests even when no new results are arriving.
                     result = result_queue.get(timeout=0.5)
@@ -675,12 +825,14 @@ def run_fuzzer_multi_worker(
                         break
                     if shutdown_requested[0]:
                         if use_live_ui:
+                            _maybe_refresh_workers()
                             dashboard.update_status(
                                 "STOPPING", event="shutdown requested"
                             )
                             live.update(dashboard.render())
                         break
                     if use_live_ui:
+                        _maybe_refresh_workers()
                         live.update(dashboard.render())
                     continue
                 except InterruptedError:
@@ -688,16 +840,20 @@ def run_fuzzer_multi_worker(
                     # requested, stop waiting for more results.
                     if shutdown_requested[0]:
                         if use_live_ui:
+                            _maybe_refresh_workers()
                             dashboard.update_status(
                                 "STOPPING", event="shutdown requested"
                             )
                             live.update(dashboard.render())
                         break
                     if use_live_ui:
+                        _maybe_refresh_workers()
                         live.update(dashboard.render())
                     continue
 
                 with cond:
+                    worker_id = result.get("worker_id")
+                    worker_retiring = bool(result.get("worker_retiring"))
                     job_id = result["job_id"]
                     scheduled, iteration = pending.pop(job_id, (None, None))
                     if scheduled is None:
@@ -732,6 +888,9 @@ def run_fuzzer_multi_worker(
                                 )
                                 cond.notify_all()
                 parser_result = result.pop("parser_result", None)
+                covered_edges = result.pop("covered_edges", ())
+                result.pop("worker_id", None)
+                result.pop("worker_retiring", None)
                 insert_run(
                     conn,
                     iteration=iteration,
@@ -742,15 +901,28 @@ def run_fuzzer_multi_worker(
                     run_time_seconds=result.get("run_time_seconds", 0.0),
                     status=result["status"],
                     bug_signature=result["bug_signature"],
+                    coverage_key=_coverage_key_from_signals(result.get("signals")),
+                    new_coverage=bool((result.get("signals") or {}).get("new_coverage")),
                     isinteresting_score=result["isinteresting_score"],
                     target=effective_target,
                 )
-                if parser_result is not None:
-                    insert_seen_branches_into_conn(conn, parser_result)
+                if covered_edges:
+                    insert_seen_edges_into_conn(conn, covered_edges)
+                signals = result.get("signals") or {}
+                new_coverage = bool(signals.get("new_coverage"))
+                bug_key = _bug_key(result)
+                new_bug = bool(signals.get("new_bug"))
+                if bug_key is not None and bug_key not in seen_bug_keys:
+                    seen_bug_keys.add(bug_key)
+                    new_bug = True
                 with cond:
                     if (
-                        result["isinteresting_score"] > 0
-                        and result["mutated_input"] not in added_seed_inputs_holder[0]
+                        (new_coverage or new_bug)
+                        and add_seed_input_if_new(
+                            conn,
+                            target=effective_target,
+                            input_text=result["mutated_input"],
+                        )
                     ):
                         parent_signals = (result.get("signals") or {}).copy()
                         parent_bucket = parent_signals.get("bucket", "discovered")
@@ -770,7 +942,6 @@ def run_fuzzer_multi_worker(
                         if scheduler_uses_feedback and config["ucb_trace"]:
                             candidate_metadata["_ucb_trace"] = True
                         scheduler.add(candidate, metadata=candidate_metadata)
-                        added_seed_inputs_holder[0].add(result["mutated_input"])
                         next_discovered_ordinal_holder[0] += 1
                         last_low_value_signature[0] = None
                         cond.notify()
@@ -780,22 +951,18 @@ def run_fuzzer_multi_worker(
                     last_low_value_signature[0] = None
                     results_received_count[0] = results_received
                     pending_jobs = len(pending)
-                    queue_depth = len(batch_expected) + len(pending)
+                    scheduler_size = len(scheduler)
+                    queue_size = len(batch_expected) + len(pending)
                     cond.notify()
+                if use_live_ui:
+                    _sync_dashboard_worker_count()
 
                 status = str(result.get("status") or "").strip().lower() or "unknown"
-                signals = result.get("signals") or {}
-                new_coverage = bool(signals.get("new_coverage"))
                 if mutator_feedback_fn is not None:
                     mutator_feedback_fn(
                         mutated_text=result["mutated_input"],
                         gained_coverage=new_coverage,
                     )
-                new_bug = bool(signals.get("new_bug"))
-                bug_key = _bug_key(result)
-                if bug_key is not None and bug_key not in seen_bug_keys:
-                    seen_bug_keys.add(bug_key)
-                    new_bug = True
 
                 event_bits = [f"iter {iteration}", status]
                 if new_bug:
@@ -803,13 +970,15 @@ def run_fuzzer_multi_worker(
                 if new_coverage:
                     event_bits.append("new coverage")
                 if use_live_ui:
+                    _maybe_refresh_workers()
                     dashboard.record_result(
                         status=status,
                         score=result["isinteresting_score"],
                         new_coverage=new_coverage,
                         new_bug=new_bug,
                         pending_jobs=pending_jobs,
-                        queue_depth=queue_depth,
+                        scheduler_size=scheduler_size,
+                        queue_size=queue_size,
                         event=" | ".join(event_bits),
                         mutated_input=result["mutated_input"],
                     )
@@ -841,12 +1010,28 @@ def run_fuzzer_multi_worker(
                     )
                 if scheduler_uses_feedback and config["ucb_debug_tree"]:
                     log.info("%s", scheduler.render_tree(limit=12))
+                if (
+                    worker_retiring
+                    and isinstance(worker_id, int)
+                    and 0 <= worker_id < len(procs)
+                    and not shutdown_requested[0]
+                ):
+                    pending_worker_refresh[worker_id] = (
+                        f"recycling after {worker_max_jobs} jobs"
+                    )
+                    log.info(
+                        "Worker slot w%s marked for recycle after %s jobs; waiting for clean exit.",
+                        worker_id,
+                        worker_max_jobs,
+                    )
+                _maybe_refresh_workers()
                 if use_live_ui:
                     live.update(dashboard.render())
                 elif pbar is not None:
                     pbar.update(1)
                 if total_jobs[0] > 0 and results_received >= total_jobs[0]:
                     if use_live_ui:
+                        _maybe_refresh_workers()
                         dashboard.update_status("DONE", event="run complete")
                         live.update(dashboard.render())
                     break
@@ -854,12 +1039,16 @@ def run_fuzzer_multi_worker(
                     # On explicit shutdown (Ctrl+C), stop waiting for any
                     # remaining in-flight work; we'll tear down workers below.
                     if use_live_ui:
+                        _maybe_refresh_workers()
                         dashboard.update_status("STOPPING", event="shutdown requested")
                         live.update(dashboard.render())
                     break
             if pbar is not None:
                 pbar.close()
     finally:
+        memory_telemetry_stop.set()
+        if memory_telemetry_thread is not None:
+            memory_telemetry_thread.join(timeout=1.0)
         request_thread.join(timeout=1.0)
         for p in procs:
             if p.is_alive():

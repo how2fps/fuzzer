@@ -29,8 +29,8 @@ def _count_interesting_seeds(seeds: Sequence[SeedStats]) -> int:
         if bug_count > 0:
             count += 1
             continue
-        avg_score = s.get("avg_isinteresting_score")
-        if avg_score is not None and avg_score > 0:
+        recent_novelty_rate = float(s.get("recent_novelty_rate", 0.0) or 0.0)
+        if recent_novelty_rate > 0.0:
             count += 1
     return count
 
@@ -113,14 +113,17 @@ def _compute_fast_schedule(
     for s in seeds:
         fuzz_count = max(0, int(s.get("fuzz_count", 0)))
         bug_count = max(0, int(s.get("bug_count", 0)))
-        avg_score = s.get("avg_isinteresting_score")
+        avg_score = float(s.get("avg_isinteresting_score") or 0.0)
+        recent_novelty_rate = min(
+            1.0, max(0.0, float(s.get("recent_novelty_rate", 0.0) or 0.0))
+        )
+        same_coverage_streak = max(0, int(s.get("same_coverage_streak", 0)))
 
         s_i = min(fuzz_count, 10)  # cap exponent to keep numbers reasonable
-        f_i = 1.0
-        if avg_score is not None and avg_score > 0:
-            f_i += float(avg_score)
+        f_i = 1.0 + avg_score + (2.0 * recent_novelty_rate)
         if bug_count > 0:
             f_i += min(float(bug_count), 5.0)
+        f_i += math.log1p(float(same_coverage_streak))
 
         energy_estimate = ALPHA_RHO * (math.pow(2.0, float(s_i)) / f_i)
         energy_estimate = min(energy_estimate, MAX_FAST_ENERGY)

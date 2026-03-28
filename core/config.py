@@ -33,6 +33,8 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_iterations",
             "max_hours",
             "timeout",
+            "memory_telemetry_seconds",
+            "worker_max_jobs",
             "rng_seed",
             "workers",
         ),
@@ -75,6 +77,8 @@ class FuzzConfig(TypedDict):
     max_iterations: int | None
     max_hours: float | None
     timeout: float
+    memory_telemetry_seconds: float
+    worker_max_jobs: int
     rng_seed: int | None
     workers: int
 
@@ -110,6 +114,8 @@ def get_default_config() -> FuzzConfig:
         "max_iterations": 10,
         "max_hours": None,
         "timeout": DEFAULT_TIMEOUT,
+        "memory_telemetry_seconds": 0.0,
+        "worker_max_jobs": 500,
         "rng_seed": None,
         "workers": 1,
         "scheduler_kind": "heap",
@@ -175,6 +181,8 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "max_iterations": ("--iterations",),
     "max_hours": ("--hours",),
     "timeout": ("--timeout",),
+    "memory_telemetry_seconds": ("--memory-telemetry-seconds",),
+    "worker_max_jobs": ("--worker-max-jobs",),
     "rng_seed": ("--seed",),
     "workers": ("--workers",),
     "isinteresting_version": ("--isinteresting-version",),
@@ -334,6 +342,10 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError("Cannot set both max_iterations and max_hours.")
     if config["max_hours"] is not None and config["max_hours"] <= 0:
         raise ValueError("max_hours must be positive.")
+    if config["memory_telemetry_seconds"] < 0:
+        raise ValueError("memory_telemetry_seconds must be >= 0.")
+    if config["worker_max_jobs"] < 0:
+        raise ValueError("worker_max_jobs must be >= 0.")
     if config["isinteresting_version"] not in list(isinteresting_versions()):
         raise ValueError(
             f"Invalid isinteresting_version: {config['isinteresting_version']}"
@@ -538,6 +550,26 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         help="Number of worker processes. All workers share one scheduler.",
     )
     parser.add_argument(
+        "--memory-telemetry-seconds",
+        dest="memory_telemetry_seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Log coordinator+worker RSS every N seconds (0 disables). "
+            "Useful for quantifying memory pressure on VPS runs."
+        ),
+    )
+    parser.add_argument(
+        "--worker-max-jobs",
+        dest="worker_max_jobs",
+        type=int,
+        default=500,
+        help=(
+            "Recycle a worker process after N completed jobs (0 disables recycling). "
+            "Useful when parser-side memory grows in long runs."
+        ),
+    )
+    parser.add_argument(
         "--isinteresting-version",
         dest="isinteresting_version",
         default="base",
@@ -619,6 +651,10 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
             parser.error("--hours must be positive.")
     if args.seed_preload_total < 0:
         parser.error("--seed-preload-total must be >= 0.")
+    if args.memory_telemetry_seconds < 0:
+        parser.error("--memory-telemetry-seconds must be >= 0.")
+    if args.worker_max_jobs < 0:
+        parser.error("--worker-max-jobs must be >= 0.")
     if args.config is not None and args.configs_dir is not None:
         parser.error("Cannot specify both --config and --configs-dir.")
     if args.runs < 1:
@@ -650,6 +686,8 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "max_iterations": max_iterations,
         "max_hours": args.max_hours,
         "timeout": args.timeout,
+        "memory_telemetry_seconds": args.memory_telemetry_seconds,
+        "worker_max_jobs": args.worker_max_jobs,
         "rng_seed": args.rng_seed,
         "workers": args.workers,
         "isinteresting_version": args.isinteresting_version,

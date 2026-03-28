@@ -18,6 +18,8 @@ class SeedStats(TypedDict, total=False):
     fuzz_count: int
     avg_isinteresting_score: float
     bug_count: int
+    recent_novelty_rate: float
+    same_coverage_streak: int
 
 
 def compute_power_schedule(
@@ -46,10 +48,17 @@ def compute_power_schedule(
     for s in seeds:
         fuzz_count = int(s.get("fuzz_count", 0))
         base = 1.0 / (1.0 + fuzz_count)
-        # boost by average interestingness
+        # Boost by average interestingness, but let recent novelty matter more
+        # than stale historical score so repeated same-coverage paths cool off.
         avg_score = s.get("avg_isinteresting_score")
         if avg_score is not None and avg_score > 0:
             base *= (1.0 + math.log1p(float(avg_score)))
+        recent_novelty_rate = float(s.get("recent_novelty_rate", 0.0) or 0.0)
+        if recent_novelty_rate > 0.0:
+            base *= (1.0 + (2.0 * min(recent_novelty_rate, 1.0)))
+        same_coverage_streak = max(0, int(s.get("same_coverage_streak", 0)))
+        if same_coverage_streak > 0:
+            base /= (1.0 + math.log1p(float(same_coverage_streak)))
         # boost seeds that have found bugs
         bug_count = int(s.get("bug_count", 0))
         if bug_count > 0:

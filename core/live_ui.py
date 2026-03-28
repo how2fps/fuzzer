@@ -45,6 +45,8 @@ def render_config_panel(
         ("scheduler", config["scheduler_kind"]),
         ("mutator", config["mutator_kind"]),
         ("workers", str(config["workers"])),
+        ("mem telemetry", f"{config['memory_telemetry_seconds']}s"),
+        ("worker recycle", str(config.get("worker_max_jobs", 0))),
         ("limit", _fmt_limit(config)),
         ("timeout", f"{config['timeout']}s"),
         ("seed", str(config["rng_seed"])),
@@ -116,7 +118,7 @@ def render_run_summary_panel(
 @dataclass
 class RunDashboard:
     target: str
-    workers: int
+    configured_workers: int
     results_folder: str
     max_iterations: int | None
     max_hours: float | None
@@ -128,8 +130,11 @@ class RunDashboard:
     errors_found: int = 0
     unique_bugs_found: int = 0
     new_coverage_events: int = 0
-    queue_depth: int = 0
+    scheduler_size: int = 0
+    queue_size: int = 0
     pending_jobs: int = 0
+    active_workers: int = 0
+    busy_workers: int = 0
     last_event: str = "warming up"
     status: str = "RUNNING"
     llm_state: str = "idle"
@@ -137,8 +142,13 @@ class RunDashboard:
     llm_generated_count: int = 0
     llm_seed_previews: list[str] = field(default_factory=list)
     last_mutated_input: str = ""
+    memory_rss_total: str = ""
+    memory_rss_details: str = ""
     # Only treat a result as "interesting" when its score is sufficiently high.
     interesting_score_threshold: float = 0.5
+
+    def __post_init__(self) -> None:
+        self.active_workers = self.configured_workers
 
     def _elapsed_seconds(self) -> float:
         return max(0.0, time.monotonic() - self.started_at)
@@ -167,6 +177,12 @@ class RunDashboard:
         self.status = status
         if event:
             self.last_event = event
+
+    def update_worker_count(self, *, active_workers: int) -> None:
+        self.active_workers = max(0, int(active_workers))
+
+    def update_busy_workers(self, *, busy_workers: int) -> None:
+        self.busy_workers = max(0, int(busy_workers))
 
     def start_llm_generation(self, *, source: str, requested: int) -> None:
         self.llm_state = "generating"
@@ -201,10 +217,22 @@ class RunDashboard:
             return cleaned
         return cleaned[: limit - 3] + "..."
 
-    def record_schedule(self, *, pending_jobs: int, queue_depth: int, event: str) -> None:
+    def record_schedule(
+        self,
+        *,
+        pending_jobs: int,
+        scheduler_size: int,
+        queue_size: int,
+        event: str,
+    ) -> None:
         self.pending_jobs = pending_jobs
-        self.queue_depth = queue_depth
+        self.scheduler_size = scheduler_size
+        self.queue_size = queue_size
         self.last_event = event
+
+    def update_memory_telemetry(self, *, total_rss: str, details: str) -> None:
+        self.memory_rss_total = total_rss
+        self.memory_rss_details = details
 
     def record_result(
         self,
@@ -214,13 +242,15 @@ class RunDashboard:
         new_coverage: bool,
         new_bug: bool,
         pending_jobs: int,
-        queue_depth: int,
+        scheduler_size: int,
+        queue_size: int,
         event: str,
         mutated_input: str,
     ) -> None:
         self.total_results += 1
         self.pending_jobs = pending_jobs
-        self.queue_depth = queue_depth
+        self.scheduler_size = scheduler_size
+        self.queue_size = queue_size
         self.last_event = event
         self.last_mutated_input = self._preview_input(mutated_input)
 
@@ -295,13 +325,15 @@ class RunDashboard:
             pad_edge=False,
         )
         table.add_column("Target", style="bold white", ratio=2)
-        table.add_column("Workers", justify="right")
+        table.add_column("Alive Workers", justify="right")
+        table.add_column("Busy Workers", justify="right")
         table.add_column("Interesting", justify="right")
         table.add_column("Timeouts", justify="right")
         table.add_column("Errors", justify="right")
         table.add_column("Pending", justify="right")
         table.add_column("Elapsed", justify="right")
         table.add_column("Budget", justify="right")
+        table.add_column("RSS Total", justify="right")
         table.add_column("Last Event", ratio=4)
 
         timeouts_style = "bold yellow" if self.timeouts_found else "green"
@@ -319,16 +351,24 @@ class RunDashboard:
             budget_text = "open"
         table.add_row(
             self.target,
-            str(self.workers),
+            str(self.active_workers),
+            str(self.busy_workers),
             str(self.interesting_results),
             Text(str(self.timeouts_found), style=timeouts_style),
             Text(str(self.errors_found), style=errors_style),
             Text(str(self.pending_jobs), style=pending_style),
             self._fmt_elapsed(),
             budget_text,
+            self.memory_rss_total or "-",
             self.last_event,
         )
         return table
+
+    def _memory_panel(self) -> Panel | None:
+        if not self.memory_rss_details:
+            return None
+        text = Text(self.memory_rss_details, style="white")
+        return Panel(text, title="Memory RSS", border_style="green")
 
     def _llm_panel(self) -> Panel | None:
         if self.llm_state == "idle" and not self.llm_seed_previews:
@@ -364,8 +404,10 @@ class RunDashboard:
         footer.add_row(
             Text("Results folder", style="dim"),
             Text(self.results_folder, style="white"),
-            Text("Queue depth", style="dim"),
-            Text(str(self.queue_depth), style="white"),
+            Text("Scheduler Size", style="dim"),
+            Text(str(self.scheduler_size), style="white"),
+            Text("Queue Size", style="dim"),
+            Text(str(self.queue_size), style="white"),
         )
         panels: list[RenderableType] = [
             Panel(self._summary_table(), title="Run Summary", border_style="blue"),
@@ -377,6 +419,9 @@ class RunDashboard:
         llm_panel = self._llm_panel()
         if llm_panel is not None:
             panels.append(llm_panel)
+        memory_panel = self._memory_panel()
+        if memory_panel is not None:
+            panels.append(memory_panel)
         panels.append(Panel(footer, border_style="dim"))
         group = Group(*panels)
         return group

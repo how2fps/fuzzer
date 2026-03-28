@@ -45,12 +45,18 @@ def _seed_score(seed: SeedStats) -> float:
     fuzz_count = max(0, int(seed.get("fuzz_count", 0)))
     avg_score = float(seed.get("avg_isinteresting_score") or 0.0)
     bug_count = max(0, int(seed.get("bug_count", 0)))
+    recent_novelty_rate = min(
+        1.0, max(0.0, float(seed.get("recent_novelty_rate", 0.0) or 0.0))
+    )
+    same_coverage_streak = max(0, int(seed.get("same_coverage_streak", 0)))
 
     interesting_bonus = 1.5 * avg_score
+    novelty_bonus = 2.0 * recent_novelty_rate
     bug_bonus = 0.75 * math.log1p(float(bug_count))
     reuse_penalty = 0.30 * math.log1p(float(fuzz_count))
+    stagnation_penalty = 0.90 * math.log1p(float(same_coverage_streak))
 
-    return interesting_bonus + bug_bonus - reuse_penalty
+    return interesting_bonus + novelty_bonus + bug_bonus - reuse_penalty - stagnation_penalty
 
 
 def compute_power_schedule(
@@ -62,8 +68,10 @@ def compute_power_schedule(
     """
     Assign energy using a temperature-controlled softmax over feedback scores.
 
-    score_i = 1.5 * avg_interestingness + 0.75 * log1p(bug_count)
+    score_i = 1.5 * avg_interestingness + 2.0 * recent_novelty_rate
+              + 0.75 * log1p(bug_count)
               - 0.30 * log1p(fuzz_count)
+              - 0.90 * log1p(same_coverage_streak)
 
     weight_i = exp(score_i / T)
 

@@ -4,6 +4,7 @@ import csv
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 
 from isinteresting import get_covered_edges_from_result
@@ -12,6 +13,46 @@ from power_scheduler import SeedStats
 from core.sqlite_conn import open_results_db
 
 INTERESTING_SCORE_THRESHOLD = 0.5
+RECENT_NOVELTY_WINDOW = 16
+
+
+def _normalize_coverage_key(value: Any) -> str | None:
+    if value in (None, "", [], {}):
+        return None
+    return str(value)
+
+
+def _compute_recent_novelty_rate(rows: list[sqlite3.Row | tuple[Any, ...]]) -> float:
+    if not rows:
+        return 0.0
+    window = rows[-RECENT_NOVELTY_WINDOW:]
+    hits = 0
+    for row in window:
+        new_coverage = int(row[0] or 0)
+        status = str(row[2] or "").strip().lower()
+        if new_coverage > 0 or status in {"bug", "crash", "timeout", "error"}:
+            hits += 1
+    return hits / float(len(window))
+
+
+def _compute_same_coverage_streak(rows: list[sqlite3.Row | tuple[Any, ...]]) -> int:
+    streak = 0
+    last_key: str | None = None
+    for row in reversed(rows):
+        coverage_key = _normalize_coverage_key(row[1])
+        new_coverage = int(row[0] or 0)
+        if new_coverage > 0:
+            break
+        if coverage_key is None:
+            break
+        if last_key is None:
+            last_key = coverage_key
+            streak = 1
+            continue
+        if coverage_key != last_key:
+            break
+        streak += 1
+    return streak
 
 
 def get_seed_stats_from_db(
@@ -47,12 +88,28 @@ def get_seed_stats_from_db(
             "avg_isinteresting_score": float(avg_score) if avg_score is not None else None,
             "bug_count": bug_count or 0,
         }
+    history_cur = conn.execute(
+        """
+        SELECT seed_id, COALESCE(new_coverage, 0), coverage_key, status
+        FROM runs
+        WHERE target = ?
+        ORDER BY id ASC
+        """,
+        (target,),
+    )
+    history_by_seed_id: dict[str, list[tuple[Any, ...]]] = {}
+    for row in history_cur:
+        seed_id = str(row[0])
+        history_by_seed_id.setdefault(seed_id, []).append((row[1], row[2], row[3]))
     stats: list[SeedStats] = []
     for seed in seeds:
         row = by_seed_id.get(seed.seed_id, {})
+        history = history_by_seed_id.get(seed.seed_id, [])
         stat: SeedStats = {
             "id": seed.ordinal,
             "fuzz_count": row.get("fuzz_count", 0),
+            "recent_novelty_rate": _compute_recent_novelty_rate(history),
+            "same_coverage_streak": _compute_same_coverage_streak(history),
         }
         if row.get("avg_isinteresting_score") is not None:
             stat["avg_isinteresting_score"] = row["avg_isinteresting_score"]
@@ -118,6 +175,8 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             message TEXT,
             file TEXT,
             line INTEGER,
+            coverage_key TEXT,
+            new_coverage INTEGER,
             isinteresting_score REAL,
             target TEXT,
             created_at TEXT NOT NULL
@@ -133,6 +192,16 @@ def init_results_db(conn: sqlite3.Connection) -> None:
     """)
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS added_seed_inputs (
+            target TEXT NOT NULL,
+            input_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (target, input_text)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_runs_mutated_input_target
         ON runs (mutated_input, target)
         """
@@ -145,7 +214,35 @@ def init_results_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN generation_time_seconds REAL")
     if "run_time_seconds" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN run_time_seconds REAL")
+    if "coverage_key" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN coverage_key TEXT")
+    if "new_coverage" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN new_coverage INTEGER")
     conn.commit()
+
+
+def add_seed_input_if_new(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    input_text: str,
+) -> bool:
+    """
+    Persist one candidate seed input and return True only on first insert.
+    """
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO added_seed_inputs (target, input_text, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (
+            target,
+            input_text,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
 
 
 def insert_run(
@@ -159,6 +256,8 @@ def insert_run(
     run_time_seconds: float | None,
     status: str | None,
     bug_signature: dict[str, Any] | None,
+    coverage_key: str | None,
+    new_coverage: bool,
     isinteresting_score: float,
     target: str,
 ) -> None:
@@ -173,8 +272,9 @@ def insert_run(
         """INSERT INTO runs (
             iteration, seed_id, seed_text, mutated_input, generation_time_seconds,
             run_time_seconds, status, bug_type, exception, message, file, line,
+            coverage_key, new_coverage,
             isinteresting_score, target, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             iteration,
             seed_id,
@@ -188,6 +288,8 @@ def insert_run(
             msg,
             file_,
             line,
+            coverage_key,
+            int(bool(new_coverage)),
             isinteresting_score,
             target,
             datetime.now(timezone.utc).isoformat(),
@@ -214,16 +316,24 @@ def insert_seen_branches_into_conn(
     result: dict[str, Any],
 ) -> None:
     """Insert covered branches from the parser result using an existing connection."""
-    edges = get_covered_edges_from_result(result)
-    if not edges:
-        return
+    insert_seen_edges_into_conn(conn, get_covered_edges_from_result(result))
+
+
+def insert_seen_edges_into_conn(
+    conn: sqlite3.Connection,
+    edges: Iterable[tuple[str, int, int]],
+) -> None:
+    """Insert precomputed covered edges using an existing connection."""
+    wrote_any = False
     try:
         for (f, fl, tl) in edges:
             conn.execute(
                 "INSERT OR IGNORE INTO seen_branches (file, from_line, to_line) VALUES (?, ?, ?)",
                 (f, fl, tl),
             )
-        conn.commit()
+            wrote_any = True
+        if wrote_any:
+            conn.commit()
     except (sqlite3.Error, OSError):
         pass
 
