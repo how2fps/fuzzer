@@ -11,6 +11,7 @@ GrammarRules: TypeAlias = dict[str, list[str]]
 GrammarSpec: TypeAlias = dict[str, object]
 
 VALID_OUTPUT_PROBABILITY = 0.7
+_JSON_STRING_BOM_PREFIX = "\ufeff"
 
 _NON_TERMINAL_PATTERN = re.compile(r"<[^<>]+>")
 _INTERESTING_BYTE_VALUES = (0x00, 0x01, 0x0A, 0x0D, 0x20, 0x7F, 0x80, 0xFE, 0xFF)
@@ -104,6 +105,7 @@ _DEFAULT_GRAMMARS: dict[str, GrammarSpec] = {
     "ip": IP_GRAMMAR,
     "ipv4": IPV4_GRAMMAR,
     "ipv6": IPV6_GRAMMAR,
+    "grammar": JSON_GRAMMAR,
 }
 _ACTIVE_GRAMMARS: dict[str, GrammarSpec] = dict(_DEFAULT_GRAMMARS)
 
@@ -125,6 +127,10 @@ def _resolve_grammar_spec(*, kind: str, grammar_path: str | Path | None = None) 
     if grammar_path is not None:
         return load_grammar_from_json(path=grammar_path)
     return _ACTIVE_GRAMMARS[kind]
+
+
+def resolve_grammar_spec(*, kind: str, grammar_path: str | Path | None = None) -> GrammarSpec:
+    return _resolve_grammar_spec(kind=kind, grammar_path=grammar_path)
 
 
 def _as_bytearray(data: bytes | bytearray) -> bytearray:
@@ -361,6 +367,105 @@ def _mutate_text_from_original(
     if len(original_text) == 1:
         return original_text + fragment
     return original_text[:start] + original_text[end:]
+
+
+def _find_json_string_ranges(*, text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    in_string = False
+    escaped = False
+    string_start = -1
+    for index, char in enumerate(text):
+        if not in_string:
+            if char == '"':
+                in_string = True
+                escaped = False
+                string_start = index
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            ranges.append((string_start, index))
+            in_string = False
+            string_start = -1
+    return ranges
+
+
+def _mutate_invalid_json_string(
+    *,
+    original_text: str,
+    string_ranges: list[tuple[int, int]],
+    rng: random.Random,
+) -> str | None:
+    if not string_ranges:
+        return None
+
+    for _ in range(12):
+        start, end = rng.choice(string_ranges)
+        body = original_text[start + 1 : end]
+        strategy = rng.choice(
+            (
+                "remove_closing_quote",
+                "remove_opening_quote",
+                "single_quote_delimiter",
+                "raw_control_char",
+                "invalid_escape",
+                "truncated_unicode",
+                "dangling_escape",
+            )
+        )
+
+        if strategy == "remove_closing_quote":
+            candidate = original_text[:end] + original_text[end + 1 :]
+            if candidate != original_text:
+                return candidate
+            continue
+
+        if strategy == "remove_opening_quote":
+            candidate = original_text[:start] + original_text[start + 1 :]
+            if candidate != original_text:
+                return candidate
+            continue
+
+        if strategy == "single_quote_delimiter":
+            candidate = (
+                original_text[:start]
+                + "'"
+                + original_text[start + 1 : end]
+                + "'"
+                + original_text[end + 1 :]
+            )
+            if candidate != original_text:
+                return candidate
+            continue
+
+        if strategy == "dangling_escape":
+            candidate = original_text[:end] + "\\" + original_text[end:]
+            if candidate != original_text:
+                return candidate
+            continue
+
+        insert_at = rng.randrange(len(body) + 1)
+        if strategy == "raw_control_char":
+            payload = rng.choice(("\n", "\r", "\t", "\x01", "\x1f"))
+        elif strategy == "invalid_escape":
+            payload = rng.choice(("\\q", "\\x", "\\8", "\\uZZZZ"))
+        else:
+            payload = "\\u12"
+
+        candidate = (
+            original_text[: start + 1]
+            + body[:insert_at]
+            + payload
+            + body[insert_at:]
+            + original_text[end:]
+        )
+        if candidate != original_text:
+            return candidate
+    return None
 
 
 def _generate_json_value(
@@ -615,9 +720,21 @@ def _mutate_invalid_json_text(
         return valid_text[:-1] if len(valid_text) > 1 else "{"
 
     structural_indexes = [idx for idx, char in enumerate(original_text) if char in '{}[],:\"']
+    string_ranges = _find_json_string_ranges(text=original_text)
 
     for _ in range(12):
-        strategy = rng.choice(("remove_structural", "append_dangling", "truncate", "duplicate_separator"))
+        strategy = rng.choices(
+            population=(
+                "remove_structural",
+                "append_dangling",
+                "truncate",
+                "duplicate_separator",
+                "invalid_string",
+                "leading_bom",
+            ),
+            weights=(2, 2, 2, 2, 4, 1),
+            k=1,
+        )[0]
         candidate = original_text
 
         if strategy == "remove_structural" and structural_indexes:
@@ -632,6 +749,19 @@ def _mutate_invalid_json_text(
             if separator_indexes:
                 index = rng.choice(separator_indexes)
                 candidate = original_text[: index + 1] + original_text[index] + original_text[index + 1 :]
+        elif strategy == "invalid_string":
+            string_candidate = _mutate_invalid_json_string(
+                original_text=original_text,
+                string_ranges=string_ranges,
+                rng=rng,
+            )
+            if string_candidate is not None:
+                candidate = string_candidate
+        elif strategy == "leading_bom":
+            if original_text.startswith(_JSON_STRING_BOM_PREFIX):
+                candidate = original_text
+            else:
+                candidate = _JSON_STRING_BOM_PREFIX + original_text
 
         if candidate == original_text:
             continue
@@ -672,9 +802,14 @@ def _format_ip_address_text(
     rng: random.Random,
 ) -> str:
     if isinstance(address, ipaddress.IPv6Address):
-        if rng.random() < 0.4:
+        render_style = rng.choice(("compressed", "exploded", "compressed_upper", "exploded_upper"))
+        if render_style == "compressed":
+            return str(address)
+        if render_style == "exploded":
             return address.exploded
-        return str(address)
+        if render_style == "compressed_upper":
+            return str(address).upper()
+        return address.exploded.upper()
     return str(address)
 
 
@@ -1013,6 +1148,118 @@ def _is_valid_ip_text(text: str) -> bool:
         return False
 
 
+def _split_ip_base_and_prefix(*, text: str) -> tuple[str, str]:
+    if "/" not in text:
+        return text, ""
+    base, prefix = text.split("/", 1)
+    return base, f"/{prefix}"
+
+
+def _mutate_invalid_ipv4_text(*, original_text: str, rng: random.Random) -> str:
+    base, prefix_suffix = _split_ip_base_and_prefix(text=original_text)
+    octets = base.split(".")
+
+    strategy = rng.choice(
+        (
+            "out_of_range_octet",
+            "negative_octet",
+            "missing_octet",
+            "extra_octet",
+            "hex_octet",
+            "prefix_overflow",
+            "zone_suffix",
+            "separator_noise",
+        )
+    )
+
+    if strategy == "prefix_overflow":
+        return f"{base}/33" if prefix_suffix else f"{base}/999"
+
+    if strategy == "zone_suffix":
+        return f"{base}%eth0{prefix_suffix}"
+
+    if strategy == "separator_noise":
+        return base.replace(".", "..", 1) + prefix_suffix
+
+    if not octets:
+        return original_text + "/999"
+
+    mutated = list(octets)
+    index = rng.randrange(len(mutated))
+    if strategy == "out_of_range_octet":
+        mutated[index] = str(rng.choice((256, 999)))
+    elif strategy == "negative_octet":
+        mutated[index] = "-1"
+    elif strategy == "hex_octet":
+        mutated[index] = "0xFF"
+    elif strategy == "missing_octet" and len(mutated) > 1:
+        mutated.pop(index)
+    elif strategy == "extra_octet":
+        mutated.insert(index, str(rng.randint(0, 255)))
+    else:
+        mutated[index] = "999"
+    return ".".join(mutated) + prefix_suffix
+
+
+def _mutate_invalid_ipv6_text(*, original_text: str, rng: random.Random) -> str:
+    base, prefix_suffix = _split_ip_base_and_prefix(text=original_text)
+    zone_suffix = ""
+    if "%" in base:
+        base, zone = base.split("%", 1)
+        zone_suffix = f"%{zone}"
+
+    strategy = rng.choice(
+        (
+            "invalid_hextet",
+            "overflow_hextet",
+            "prefix_overflow",
+            "duplicate_double_colon",
+            "separator_noise",
+            "invalid_embedded_ipv4",
+            "broken_zone_id",
+            "bracket_noise",
+            "segment_pressure",
+        )
+    )
+
+    if strategy == "prefix_overflow":
+        return f"{base}{zone_suffix}/129" if prefix_suffix else f"{base}{zone_suffix}/999"
+
+    if strategy == "duplicate_double_colon":
+        if "::" in base:
+            return base.replace("::", "::::", 1) + zone_suffix + prefix_suffix
+        return f"{base}::{zone_suffix}{prefix_suffix}"
+
+    if strategy == "separator_noise":
+        return base.replace(":", ":::", 1) + zone_suffix + prefix_suffix
+
+    if strategy == "invalid_embedded_ipv4":
+        return "::ffff:999.999.999.999" + zone_suffix + prefix_suffix
+
+    if strategy == "broken_zone_id":
+        return f"{base}%{rng.choice(('', '25', 'eth0%'))}{prefix_suffix}"
+
+    if strategy == "bracket_noise":
+        return f"[{base}{zone_suffix}]{prefix_suffix}"
+
+    if strategy == "segment_pressure":
+        return f"{base}:1:2:3:4:5:6:7:8:9{zone_suffix}{prefix_suffix}"
+
+    hextets = base.split(":")
+    if not hextets:
+        return original_text + "/999"
+
+    non_empty_indexes = [index for index, part in enumerate(hextets) if part]
+    if not non_empty_indexes:
+        return "gggg" + zone_suffix + prefix_suffix
+    index = rng.choice(non_empty_indexes)
+    if strategy == "invalid_hextet":
+        hextets[index] = rng.choice(("gggg", "zzzz", "12xz"))
+    else:
+        hextets[index] = "10000"
+    return ":".join(hextets) + zone_suffix + prefix_suffix
+
+
 def _mutate_invalid_ip_text(
     *,
     original_text: str,
@@ -1025,23 +1272,10 @@ def _mutate_invalid_ip_text(
         original_text = valid_text
 
     for _ in range(12):
-        candidate = original_text
-        if "." in original_text:
-            strategy = rng.choice(("bad_octet", "bad_prefix", "double_dot"))
-            if strategy == "bad_octet":
-                candidate = re.sub(r"\d+", "999", original_text, count=1)
-            elif strategy == "bad_prefix" and "/" in original_text:
-                candidate = re.sub(r"/\d+$", "/33", original_text)
-            else:
-                candidate = original_text.replace(".", "..", 1)
-        elif ":" in original_text:
-            strategy = rng.choice(("bad_hextet", "bad_prefix", "duplicate_colon"))
-            if strategy == "bad_hextet":
-                candidate = re.sub(r"[0-9a-fA-F]+", "gggg", original_text, count=1)
-            elif strategy == "bad_prefix" and "/" in original_text:
-                candidate = re.sub(r"/\d+$", "/129", original_text)
-            else:
-                candidate = original_text.replace(":", ":::", 1)
+        if ":" in original_text:
+            candidate = _mutate_invalid_ipv6_text(original_text=original_text, rng=rng)
+        elif "." in original_text:
+            candidate = _mutate_invalid_ipv4_text(original_text=original_text, rng=rng)
         elif "/" in original_text:
             candidate = re.sub(r"/\d+$", "/999", original_text)
         elif len(original_text) > 1:
@@ -1220,4 +1454,5 @@ __all__ = [
     "mutate_json_input",
     "mutate_text_with_grammar",
     "normalize_grammar_spec",
+    "resolve_grammar_spec",
 ]

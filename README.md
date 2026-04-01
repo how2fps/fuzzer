@@ -40,7 +40,7 @@ python main.py --help
 | `--power-scheduler-version` | `base` | Power scheduler module version (for ablation). |
 | `--seed-corpus-version` | `base` | Seed corpus module version (for ablation). |
 | `--config PATH` | (none) | Run a single JSON config file (see `configs/_template.json`). |
-| `--configs-dir [DIR]` | (none) | Run all `.json` configs in `DIR`. If `DIR` is omitted, defaults to `configs/`. Config files starting with `_` are ignored. |
+| `--configs-dir DIR` | (none) | Run all `.json` configs in `DIR` (non-recursive). Config files starting with `_` are ignored. |
 | `--runs` | `1` | When using `--config` or `--configs-dir`, run each config this many times. |
 
 ### Examples
@@ -70,8 +70,8 @@ python main.py --config configs/my_run.json
 # Run one config file 5 times
 python main.py --config configs/my_run.json --runs 5
 
-# Run all configs in configs/ 3 times each
-python main.py --configs-dir --runs 3
+# Run all configs in a target folder (non-recursive), 3 times each
+python main.py --configs-dir configs/rerun_allcombos_sched_mut_cov_power_alltargets --runs 3
 ```
 
 ## Results

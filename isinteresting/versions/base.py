@@ -114,6 +114,14 @@ def _coverage_score(
     return max(0.0, min(ratio, 1.0))
 
 
+def _has_coverage_counts(
+    *,
+    covered_branches: int | None,
+    missing_branches: int | None,
+) -> bool:
+    return covered_branches is not None and missing_branches is not None
+
+
 def get_covered_edges_from_result(result: Mapping[str, Any]) -> set[tuple[str, int, int]]:
     """Extract (file, from_line, to_line) for all covered branches. Used by main to insert into seen_branches."""
     closed_raw = result.get("closed_result") if isinstance(result, Mapping) else None
@@ -303,12 +311,16 @@ def compute_interestingness(
         covered_branches=covered_branches,
         missing_branches=missing_branches,
     )
+    has_coverage_counts = _has_coverage_counts(
+        covered_branches=covered_branches,
+        missing_branches=missing_branches,
+    )
     repeat_bug_count: int | None = None
     s_new = 0.0
     s_rare = 0.0
     new_edge_weight = 2.0
     rare_bug_weight = 0.9
-    metric_max = 3.0
+    metric_max = 2.0 + (1.0 if has_coverage_counts else 0.0)
 
     if sqlite_conn is not None:
         try:

@@ -20,7 +20,9 @@ from core.config import FuzzConfig, is_debug_run
 from core.fuzzer_logging import get_fuzzer_logger
 from core.live_ui import RunDashboard, console
 from core.db_utils import (
+    add_unique_coverage_seed_input,
     add_seed_input_if_new,
+    get_unique_coverage_seed_inputs,
     input_already_run,
     insert_run,
     insert_seen_edges_into_conn,
@@ -369,58 +371,111 @@ def run_fuzzer_multi_worker(
                 results_folder=results_folder,
                 include_corpus_context=True,
             )
-        finally:
-            conn_thread.close()
-        if generated is None or not generated.seeds:
-            if use_live_ui:
+            if generated is None or not generated.seeds:
+                if use_live_ui:
+                    dashboard.fail_llm_generation(
+                        source="runtime refill",
+                        event="runtime refill returned no LLM seeds",
+                    )
+                return False
+
+            added_any = False
+            for text in generated.seeds:
+                if not add_seed_input_if_new(
+                    conn_thread,
+                    target=effective_target,
+                    input_text=text,
+                ):
+                    continue
+                candidate = make_generated_seed(
+                    text=text,
+                    family=family,
+                    ordinal=next_discovered_ordinal_holder[0],
+                )
+                candidate_metadata: dict[str, Any] = {
+                    "bucket": candidate.bucket,
+                    "signals": {
+                        "coverage_key": {"family": candidate.family, "bucket": candidate.bucket},
+                        "status": "generated",
+                    },
+                }
+                scheduler.add(candidate, metadata=candidate_metadata)
+                next_discovered_ordinal_holder[0] += 1
+                added_any = True
+            if added_any:
+                llm_refill_attempts[0] += 1
+                last_low_value_signature[0] = None
+                log.info(
+                    "LLM seed fallback added %s candidate seeds (attempt %s).",
+                    len(generated.seeds),
+                    llm_refill_attempts[0],
+                )
+                if use_live_ui:
+                    dashboard.finish_llm_generation(
+                        source="runtime refill",
+                        seeds=generated.seeds,
+                    )
+            elif use_live_ui:
                 dashboard.fail_llm_generation(
                     source="runtime refill",
-                    event="runtime refill returned no LLM seeds",
+                    event="runtime refill produced only duplicate LLM seeds",
                 )
-            return False
+            return added_any
+        finally:
+            conn_thread.close()
 
-        added_any = False
-        for text in generated.seeds:
-            if not add_seed_input_if_new(
+    def _try_refill_scheduler_from_unique_coverage_store() -> bool:
+        refill_limit = max(1, int(config.get("seed_preload_total") or 8))
+        conn_thread = open_results_db(db_path)
+        try:
+            stored = get_unique_coverage_seed_inputs(
                 conn_thread,
                 target=effective_target,
-                input_text=text,
-            ):
-                continue
-            candidate = make_generated_seed(
-                text=text,
-                family=family,
-                ordinal=next_discovered_ordinal_holder[0],
+                limit=refill_limit,
             )
+        finally:
+            conn_thread.close()
+        if not stored:
+            return False
+
+        ready_texts = {item.seed.text for item in scheduler.ready_items()}
+        added_count = 0
+        for entry in stored:
+            text = entry.get("input_text", "")
+            if not text or text in ready_texts:
+                continue
+            bucket = entry.get("seed_bucket") or "coverage_replay"
+            candidate = make_discovered_seed(
+                text,
+                family,
+                bucket,
+                next_discovered_ordinal_holder[0],
+            )
+            coverage_key = entry.get("coverage_key")
             candidate_metadata: dict[str, Any] = {
                 "bucket": candidate.bucket,
                 "signals": {
-                    "coverage_key": {"family": candidate.family, "bucket": candidate.bucket},
-                    "status": "generated",
+                    "status": "coverage_replay",
+                    "bucket": candidate.bucket,
                 },
             }
+            if coverage_key:
+                candidate_metadata["signals"]["coverage_key"] = coverage_key
+            if scheduler_uses_feedback and config["ucb_trace"]:
+                candidate_metadata["_ucb_trace"] = True
             scheduler.add(candidate, metadata=candidate_metadata)
+            ready_texts.add(text)
             next_discovered_ordinal_holder[0] += 1
-            added_any = True
-        if added_any:
-            llm_refill_attempts[0] += 1
+            added_count += 1
+
+        if added_count > 0:
             last_low_value_signature[0] = None
             log.info(
-                "LLM seed fallback added %s candidate seeds (attempt %s).",
-                len(generated.seeds),
-                llm_refill_attempts[0],
+                "Replenished scheduler with %s unique-coverage stored seeds.",
+                added_count,
             )
-            if use_live_ui:
-                dashboard.finish_llm_generation(
-                    source="runtime refill",
-                    seeds=generated.seeds,
-                )
-        elif use_live_ui:
-            dashboard.fail_llm_generation(
-                source="runtime refill",
-                event="runtime refill produced only duplicate LLM seeds",
-            )
-        return added_any
+            return True
+        return False
 
     def request_handler() -> None:
         nones_sent = 0
@@ -495,7 +550,9 @@ def run_fuzzer_multi_worker(
                                 and low_value_signature != last_low_value_signature[0]
                             ):
                                 last_low_value_signature[0] = low_value_signature
-                                if _try_refill_scheduler_from_llm():
+                                # Prefer replaying previously successful
+                                # unique-coverage seeds when the pool looks stale.
+                                if _try_refill_scheduler_from_unique_coverage_store():
                                     cond.notify_all()
                             if current_mutations_left[0] <= 0:
                                 conn_thread = open_results_db(db_path)
@@ -623,6 +680,9 @@ def run_fuzzer_multi_worker(
                         if stop_coordinator_loop:
                             break
                         if not scheduler.empty():
+                            continue
+                        if _try_refill_scheduler_from_unique_coverage_store():
+                            cond.notify_all()
                             continue
                         if _try_refill_scheduler_from_llm():
                             cond.notify_all()
@@ -891,6 +951,7 @@ def run_fuzzer_multi_worker(
                 covered_edges = result.pop("covered_edges", ())
                 result.pop("worker_id", None)
                 result.pop("worker_retiring", None)
+                coverage_key = _coverage_key_from_signals(result.get("signals"))
                 insert_run(
                     conn,
                     iteration=iteration,
@@ -901,7 +962,7 @@ def run_fuzzer_multi_worker(
                     run_time_seconds=result.get("run_time_seconds", 0.0),
                     status=result["status"],
                     bug_signature=result["bug_signature"],
-                    coverage_key=_coverage_key_from_signals(result.get("signals")),
+                    coverage_key=coverage_key,
                     new_coverage=bool((result.get("signals") or {}).get("new_coverage")),
                     isinteresting_score=result["isinteresting_score"],
                     target=effective_target,
@@ -910,6 +971,15 @@ def run_fuzzer_multi_worker(
                     insert_seen_edges_into_conn(conn, covered_edges)
                 signals = result.get("signals") or {}
                 new_coverage = bool(signals.get("new_coverage"))
+                if new_coverage and coverage_key:
+                    add_unique_coverage_seed_input(
+                        conn,
+                        target=effective_target,
+                        coverage_key=coverage_key,
+                        input_text=result["mutated_input"],
+                        seed_family=family,
+                        seed_bucket=str(signals.get("bucket") or "discovered"),
+                    )
                 bug_key = _bug_key(result)
                 new_bug = bool(signals.get("new_bug"))
                 if bug_key is not None and bug_key not in seen_bug_keys:

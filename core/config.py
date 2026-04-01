@@ -21,7 +21,6 @@ from seed_corpus import list_versions as seed_corpus_versions
 from seed_scheduler import list_versions as scheduler_versions
 
 from core.mutation_utils import DEFAULT_PRELOAD_BUCKET_RATIOS
-from core.paths import CONFIGS_DIR
 
 ENABLE_OPEN_COVERAGE: bool = False
 CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -124,7 +123,7 @@ def get_default_config() -> FuzzConfig:
         "seed_corpus_version": "base",
         "seed_corpus_initial_draw": None,
         "seed_preload_mode": "full",
-        "seed_preload_total": 50,
+        "seed_preload_total": 8,
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "llm_seed_candidates": 5,
         "mutator_kind": "auto",
@@ -303,9 +302,9 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             f"Invalid scheduler_kind: {config['scheduler_kind']}. Must be one of: {scheduler_choices}"
         )
-    if config["mutator_kind"] not in ("auto", "json", "ip"):
+    if config["mutator_kind"] != "auto":
         raise ValueError(
-            f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto, json, or ip."
+            f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto."
         )
     grammar_path = config["grammar_path"]
     if grammar_path is not None:
@@ -379,6 +378,8 @@ def load_config_from_file(path: Path) -> FuzzConfig:
     merged: FuzzConfig = {**defaults}
     normalized_data = _normalize_config_data(data)
     _merge_config_values(merged, normalized_data)
+    if merged["mutator_kind"] in {"json", "ip", "grammar"}:
+        merged["mutator_kind"] = "auto"
     if merged["grammar_path"] is not None:
         grammar_path = Path(merged["grammar_path"])
         if not grammar_path.is_absolute():
@@ -465,8 +466,8 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "--mutator",
         dest="mutator_kind",
         default="auto",
-        choices=["auto", "json", "ip"],
-        help="Mutation mode: auto-detect from target, or force json/ip.",
+        choices=["auto"],
+        help="Mutation mode. Auto resolves to grammar-driven mutation using the supplied grammar file or built-in target grammar.",
     )
     parser.add_argument(
         "--grammar-file",
@@ -474,7 +475,7 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         type=Path,
         default=None,
         metavar="PATH",
-        help="Optional JSON grammar file used by the base grammar mutator for the active input family.",
+        help="Optional grammar JSON file used by grammar-driven mutators for the active target.",
     )
     parser.add_argument(
         "-g",
@@ -503,7 +504,7 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
     parser.add_argument(
         "--seed-preload-total",
         type=int,
-        default=50,
+        default=8,
         help="Number of startup seeds to preload when using `ratio_batch` or `sample` mode.",
     )
     parser.add_argument(
@@ -620,11 +621,9 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
     parser.add_argument(
         "--configs-dir",
         type=Path,
-        nargs="?",
         default=None,
-        const=CONFIGS_DIR,
         metavar="DIR",
-        help="Run all .json configs in DIR (default: configs/). Each is run --runs times.",
+        help="Run all .json configs in DIR (non-recursive). Each is run --runs times.",
     )
     parser.add_argument(
         "--runs",
@@ -736,16 +735,23 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
     return ([ (None, from_args) ], 1)
 
 
-def infer_mutator_kind(*, mutator_kind: str, target: str) -> str:
-    if mutator_kind != "auto":
-        return mutator_kind
+def infer_mutator_kind(
+    *,
+    mutator_kind: str,
+    target: str,
+    grammar_path: str | None = None,
+) -> str:
+    _ = mutator_kind
+
+    if grammar_path is not None:
+        return "grammar"
 
     target_lower = target.lower()
     if "json" in target_lower:
         return "json"
     if "ipv4" in target_lower or "ipv6" in target_lower or "cidr" in target_lower:
         return "ip"
-    return "json"
+    return "grammar"
 
 
 def is_debug_run(config: FuzzConfig) -> bool:

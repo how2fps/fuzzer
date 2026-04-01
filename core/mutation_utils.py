@@ -10,9 +10,9 @@ from seed_corpus import Seed
 
 
 DEFAULT_PRELOAD_BUCKET_RATIOS: dict[str, float] = {
-    "valid": 0.7,
-    "string_stress": 0.2,
-    "near_valid": 0.1,
+    "valid": 0.5,
+    "string_stress": 0.25,
+    "near_valid": 0.25,
 }
 
 

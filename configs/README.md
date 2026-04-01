@@ -4,7 +4,7 @@ Copy `_template.json` to a new file (e.g. `my_run.json`) and edit the values. On
 
 - **Run one config**: `python main.py --config configs/my_run.json`
 - **Run one config N times**: `python main.py --config configs/my_run.json --runs 5`
-- **Run all configs in this folder**: `python main.py --configs-dir configs --runs 3`
+- **Run all configs in this folder (non-recursive)**: `python main.py --configs-dir configs/rerun_allcombos_sched_mut_cov_power_alltargets --runs 3`
 
 Files whose names start with `_` (like `_template.json`) are ignored when using `--configs-dir`.
 
@@ -40,7 +40,7 @@ Defaults shown below match `core.config.get_default_config()`.
 | `seed_corpus` | `seed_corpus_version` | `base`, `llm_bootstrap`, `regex-noseed` | `base` |
 | `seed_corpus` | `seed_corpus_initial_draw` | `bucketed`, `random`, `full`, or `null` | `null` |
 | `seed_corpus` | `seed_preload_mode` | `full`, `ratio_batch`, `sample` | `full` |
-| `seed_corpus` | `seed_preload_total` | integer `>= 0` | `50` |
+| `seed_corpus` | `seed_preload_total` | integer `>= 0` | `8` |
 | `seed_corpus` | `seed_preload_bucket_ratios` | object of `{bucket_name: weight}` | project defaults |
 | `seed_corpus` | `llm_seed_candidates` | integer `>= 0` | `5` |
 | `mutator` | `mutator_kind` | `auto`, `json`, `ip` | `auto` |

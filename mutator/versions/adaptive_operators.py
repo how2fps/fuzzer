@@ -98,25 +98,48 @@ def json_escape_unicode(data: Any, rng: random.Random) -> Any:
     return data
 
 
+def _split_ip_base_suffix(ip_str: str) -> tuple[str, str]:
+    base = ip_str
+    suffix = ""
+    if "/" in base:
+        base, prefix = base.split("/", 1)
+        suffix = f"/{prefix}"
+    if "%" in base:
+        base, zone = base.split("%", 1)
+        suffix = f"%{zone}{suffix}"
+    return base, suffix
+
+
+def _join_ip_base_suffix(base: str, suffix: str) -> str:
+    return base + suffix
+
+
 def ip_mutate_octet_hextet(ip_str: str, rng: random.Random) -> str:
-    if "." in ip_str:
-        octets = ip_str.split(".")
+    base, suffix = _split_ip_base_suffix(ip_str)
+    if ":" in base:
+        parts = base.split(":")
+        non_empty = [index for index, part in enumerate(parts) if part]
+        if non_empty:
+            parts[rng.choice(non_empty)] = hex(rng.randint(0, 0x1FFFF))[2:]
+            return _join_ip_base_suffix(":".join(parts), suffix)
+        return _join_ip_base_suffix(base + "gggg", suffix)
+
+    if "." in base:
+        octets = base.split(".")
         if octets:
             octets[rng.randrange(len(octets))] = str(rng.randint(0, 512))
-            return ".".join(octets)
-    elif ":" in ip_str:
-        parts = ip_str.split(":")
-        if parts:
-            parts[rng.randrange(len(parts))] = hex(rng.randint(0, 0x1FFFF))[2:]
-            return ":".join(parts)
+            return _join_ip_base_suffix(".".join(octets), suffix)
     return ip_str
 
 
 def ip_mutate_prefix_length(ip_str: str, rng: random.Random) -> str:
     if "/" in ip_str:
         base, _prefix = ip_str.split("/", 1)
-        return f"{base}/{rng.randint(-1, 129)}"
-    return ip_str + "/" + str(rng.randint(0, 128))
+        max_prefix = 128 if ":" in base else 32
+        candidate_prefix = rng.choice((0, max_prefix, max_prefix + 1, -1, rng.randint(0, max_prefix + 16)))
+        return f"{base}/{candidate_prefix}"
+    max_prefix = 128 if ":" in ip_str else 32
+    return f"{ip_str}/{rng.randint(0, max_prefix + 16)}"
 
 
 def ip_compression_variant(ip_str: str, rng: random.Random) -> str:
@@ -138,9 +161,16 @@ def ip_separator_whitespace(ip_str: str, rng: random.Random) -> str:
 
 
 def ip_near_valid_malformed(ip_str: str, rng: random.Random) -> str:
-    if "." in ip_str:
-        return ip_str + ".1" if rng.random() > 0.5 else ip_str.replace("255", "256")
-    return ip_str + ":ffff:ffff"
+    base, suffix = _split_ip_base_suffix(ip_str)
+    if ":" in base:
+        if rng.random() < 0.5:
+            return _join_ip_base_suffix(base + ":ffff:ffff", suffix)
+        return _join_ip_base_suffix(base.replace("::", ":::", 1), suffix)
+    if "." in base:
+        if rng.random() > 0.5:
+            return _join_ip_base_suffix(base + ".1", suffix)
+        return _join_ip_base_suffix(base.replace("255", "256"), suffix)
+    return ip_str + "/999"
 
 
 def ip_leading_zeros(ip_str: str, rng: random.Random) -> str:
@@ -232,6 +262,80 @@ def ip_truncate(ip_str: str, rng: random.Random) -> str:
     return ip_str
 
 
+def ip_ipv4_boundary_pressure(ip_str: str, rng: random.Random) -> str:
+    pool = [
+        "0.0.0.0",
+        "255.255.255.255",
+        "127.0.0.1",
+        "192.168.0.1",
+        "1.1.1.1",
+        "256.0.0.1",
+        "999.999.999.999",
+        "192.168.1",
+        "01.002.003.004",
+    ]
+    candidate = rng.choice(pool)
+    if "/" in ip_str:
+        candidate = f"{candidate}/{rng.choice((0, 24, 32, 33, 999))}"
+    return candidate
+
+
+def ip_ipv6_boundary_pressure(ip_str: str, rng: random.Random) -> str:
+    pool = [
+        "::",
+        "::1",
+        "2001:db8::1",
+        "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "fe80::1%eth0",
+        "::ffff:192.168.0.1",
+        "2001:db8:::1",
+        "gggg::1",
+        "1:2:3:4:5:6:7:8:9",
+        "::ffff:999.999.1.1",
+    ]
+    candidate = rng.choice(pool)
+    if "/" in ip_str:
+        candidate = f"{candidate}/{rng.choice((0, 64, 128, 129, 999))}"
+    return candidate
+
+
+def ip_prefix_zone_shuffle(ip_str: str, rng: random.Random) -> str:
+    if ":" not in ip_str:
+        return ip_str + rng.choice(("/33", "/999", "%eth0"))
+
+    if "/" in ip_str and "%" in ip_str:
+        base, prefix = ip_str.split("/", 1)
+        addr, zone = base.split("%", 1)
+        return f"{addr}/{prefix}%{zone}"
+    if "/" in ip_str:
+        base, prefix = ip_str.split("/", 1)
+        return f"{base}%eth0/{prefix}"
+    if "%" in ip_str:
+        base, zone = ip_str.split("%", 1)
+        return f"{base}%{zone}/129"
+    return ip_str + "%eth0/129"
+
+
+def ip_delimiter_overload(ip_str: str, rng: random.Random) -> str:
+    if ":" in ip_str:
+        return ip_str.replace(":", rng.choice((":::", "::::", " : ")), 1)
+    if "." in ip_str:
+        return ip_str.replace(".", rng.choice(("..", "...", ". .")), 1)
+    return ip_str + ":::"
+
+
+def ip_unbalanced_brackets(ip_str: str, rng: random.Random) -> str:
+    if ":" in ip_str:
+        return rng.choice(
+            (
+                f"[{ip_str}",
+                f"{ip_str}]",
+                f"[{ip_str}]:{rng.randint(0, 99999)}",
+            )
+        )
+    return f"[{ip_str}]"
+
+
 class AdaptiveStrategy:
     def __init__(self, operators: list[str]) -> None:
         self.weights = {op: 1.0 for op in operators}
@@ -316,4 +420,9 @@ IP_OPERATORS = {
     "zone_id": ip_zone_id,
     "mixed_case_hex": ip_mixed_case_hex,
     "truncate": ip_truncate,
+    "ipv4_boundary_pressure": ip_ipv4_boundary_pressure,
+    "ipv6_boundary_pressure": ip_ipv6_boundary_pressure,
+    "prefix_zone_shuffle": ip_prefix_zone_shuffle,
+    "delimiter_overload": ip_delimiter_overload,
+    "unbalanced_brackets": ip_unbalanced_brackets,
 }

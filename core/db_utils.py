@@ -202,6 +202,25 @@ def init_results_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS coverage_seed_inputs (
+            target TEXT NOT NULL,
+            coverage_key TEXT NOT NULL,
+            input_text TEXT NOT NULL,
+            seed_family TEXT,
+            seed_bucket TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (target, coverage_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_coverage_seed_inputs_target_created
+        ON coverage_seed_inputs (target, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_runs_mutated_input_target
         ON runs (mutated_input, target)
         """
@@ -219,6 +238,78 @@ def init_results_db(conn: sqlite3.Connection) -> None:
     if "new_coverage" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN new_coverage INTEGER")
     conn.commit()
+
+
+def add_unique_coverage_seed_input(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    coverage_key: str,
+    input_text: str,
+    seed_family: str | None = None,
+    seed_bucket: str | None = None,
+) -> bool:
+    """
+    Persist one seed per unique coverage key for a target.
+
+    Returns True when this coverage key is first observed for the target.
+    """
+    normalized_key = _normalize_coverage_key(coverage_key)
+    if normalized_key is None:
+        return False
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO coverage_seed_inputs (
+            target, coverage_key, input_text, seed_family, seed_bucket, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            target,
+            normalized_key,
+            input_text,
+            seed_family,
+            seed_bucket,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def get_unique_coverage_seed_inputs(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
+    """
+    Return stored unique-coverage seeds for a target, newest first.
+    """
+    sql = """
+        SELECT coverage_key, input_text, COALESCE(seed_family, ''), COALESCE(seed_bucket, '')
+        FROM coverage_seed_inputs
+        WHERE target = ?
+        ORDER BY created_at DESC
+    """
+    params: tuple[Any, ...]
+    if limit is not None and limit > 0:
+        sql += " LIMIT ?"
+        params = (target, int(limit))
+    else:
+        params = (target,)
+    rows = conn.execute(sql, params).fetchall()
+    out: list[dict[str, str]] = []
+    for row in rows:
+        out.append(
+            {
+                "coverage_key": str(row[0] or ""),
+                "input_text": str(row[1] or ""),
+                "seed_family": str(row[2] or ""),
+                "seed_bucket": str(row[3] or ""),
+            }
+        )
+    return out
 
 
 def add_seed_input_if_new(

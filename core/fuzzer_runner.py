@@ -50,6 +50,7 @@ def run_fuzzer(
     effective_mutator = infer_mutator_kind(
         mutator_kind=config["mutator_kind"],
         target=effective_target,
+        grammar_path=config["grammar_path"],
     )
     configure_runtime_grammar(
         kind=effective_mutator,
