@@ -14,6 +14,7 @@ from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from coverage.parser import PythonParser
 from tqdm import tqdm
 
 from core.config import FuzzConfig, is_debug_run
@@ -30,7 +31,10 @@ from core.db_utils import (
 )
 from core.sqlite_conn import open_results_db
 from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
-from isinteresting import get_compute_interestingness, get_covered_edges_from_result
+from isinteresting import (
+    get_compute_interestingness,
+    get_covered_edges_from_result,
+)
 from core.mutation_utils import make_discovered_seed
 from parser import get_parser
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
@@ -40,6 +44,90 @@ from seed_scheduler import (
     ScheduledSeed,
     build_ucb_update_signals,
 )
+
+
+_BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
+
+
+def _find_newest_unseen_branch(
+    conn: sqlite3.Connection,
+    covered_edges: Sequence[tuple[str, int, int]],
+) -> str:
+    """Return a compact description of the first branch in this result not yet seen."""
+    for file_name, from_line, to_line in covered_edges:
+        row = conn.execute(
+            "SELECT 1 FROM seen_branches WHERE file = ? AND from_line = ? AND to_line = ? LIMIT 1",
+            (file_name, from_line, to_line),
+        ).fetchone()
+        if row is not None:
+            continue
+        file_label = Path(file_name).name or str(file_name)
+        target_label = "exit" if int(to_line) < 0 else str(to_line)
+        return f"{file_label}:{from_line} -> {target_label}"
+    return ""
+
+
+def _count_seen_branches(conn: sqlite3.Connection) -> int:
+    """Return the accumulated number of unique covered arcs recorded so far."""
+    row = conn.execute("SELECT COUNT(*) FROM seen_branches").fetchone()
+    if row is None:
+        return 0
+    try:
+        return max(0, int(row[0]))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _branch_arcs_for_file(file_name: str) -> set[tuple[int, int]]:
+    cached = _BRANCH_ARC_CACHE.get(file_name)
+    if cached is not None:
+        return cached
+
+    path = Path(file_name)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+
+    branch_arcs: set[tuple[int, int]] = set()
+    try:
+        parser = PythonParser(filename=str(path))
+        parser.parse_source()
+        arcs = parser.arcs() or []
+    except OSError:
+        _BRANCH_ARC_CACHE[file_name] = branch_arcs
+        return branch_arcs
+
+    exits: dict[int, set[int]] = {}
+    for from_line, to_line in arcs:
+        if from_line <= 0:
+            continue
+        exits.setdefault(from_line, set()).add(to_line)
+
+    for from_line, targets in exits.items():
+        if len(targets) <= 1:
+            continue
+        for to_line in targets:
+            branch_arcs.add((from_line, to_line))
+
+    _BRANCH_ARC_CACHE[file_name] = branch_arcs
+    return branch_arcs
+
+
+def _count_seen_covered_branches(conn: sqlite3.Connection) -> int:
+    """Return the accumulated number of unique covered branches, excluding non-branch arcs."""
+    total = 0
+    rows = conn.execute(
+        "SELECT file, from_line, to_line FROM seen_branches"
+    ).fetchall()
+    seen_by_file: dict[str, set[tuple[int, int]]] = {}
+    for file_name, from_line, to_line in rows:
+        try:
+            seen_by_file.setdefault(str(file_name), set()).add((int(from_line), int(to_line)))
+        except (TypeError, ValueError):
+            continue
+
+    for file_name, arcs in seen_by_file.items():
+        total += len(arcs & _branch_arcs_for_file(file_name))
+    return total
 
 
 def _read_rss_kib(pid: int) -> int | None:
@@ -281,10 +369,8 @@ def run_fuzzer_multi_worker(
         conn_thread: sqlite3.Connection,
         max_attempts: int = 200,
     ) -> list[tuple[str, float]]:
-        reject_nul_for_kinds = {"ip", "ipv4", "ipv6"}
-
         def _is_rejected_candidate(candidate: str) -> bool:
-            return effective_mutator in reject_nul_for_kinds and "\x00" in candidate
+            return "\x00" in candidate
 
         seen: set[str] = set()
         batch: list[tuple[str, float]] = []
@@ -952,6 +1038,8 @@ def run_fuzzer_multi_worker(
                 result.pop("worker_id", None)
                 result.pop("worker_retiring", None)
                 coverage_key = _coverage_key_from_signals(result.get("signals"))
+                signals = result.get("signals") or {}
+                new_coverage = bool(signals.get("new_coverage"))
                 insert_run(
                     conn,
                     iteration=iteration,
@@ -963,14 +1051,17 @@ def run_fuzzer_multi_worker(
                     status=result["status"],
                     bug_signature=result["bug_signature"],
                     coverage_key=coverage_key,
-                    new_coverage=bool((result.get("signals") or {}).get("new_coverage")),
+                    new_coverage=new_coverage,
                     isinteresting_score=result["isinteresting_score"],
                     target=effective_target,
                 )
+                newest_coverage_branch = ""
+                if new_coverage and covered_edges:
+                    newest_coverage_branch = _find_newest_unseen_branch(conn, covered_edges)
                 if covered_edges:
                     insert_seen_edges_into_conn(conn, covered_edges)
-                signals = result.get("signals") or {}
-                new_coverage = bool(signals.get("new_coverage"))
+                covered_branches = _count_seen_covered_branches(conn)
+                unique_covered_arcs = _count_seen_branches(conn)
                 if new_coverage and coverage_key:
                     add_unique_coverage_seed_input(
                         conn,
@@ -1029,28 +1120,49 @@ def run_fuzzer_multi_worker(
 
                 status = str(result.get("status") or "").strip().lower() or "unknown"
                 if mutator_feedback_fn is not None:
+                    gained_novelty = any(
+                        bool(signals.get(key))
+                        for key in (
+                            "new_coverage",
+                            "new_bug",
+                            "new_bug_site",
+                            "new_exception_site",
+                            "new_differential_behavior",
+                        )
+                    )
                     mutator_feedback_fn(
                         mutated_text=result["mutated_input"],
-                        gained_coverage=new_coverage,
+                        gained_coverage=gained_novelty,
                     )
 
                 event_bits = [f"iter {iteration}", status]
                 if new_bug:
                     event_bits.append("new bug")
+                elif bool(signals.get("new_bug_site")):
+                    event_bits.append("new bug site")
+                elif bool(signals.get("new_exception_site")):
+                    event_bits.append("new exception site")
+                if bool(signals.get("new_differential_behavior")):
+                    event_bits.append("differential")
                 if new_coverage:
                     event_bits.append("new coverage")
                 if use_live_ui:
                     _maybe_refresh_workers()
                     dashboard.record_result(
+                        iteration=int(iteration),
                         status=status,
                         score=result["isinteresting_score"],
                         new_coverage=new_coverage,
                         new_bug=new_bug,
+                        covered_branches=covered_branches,
+                        unique_covered_arcs=unique_covered_arcs,
                         pending_jobs=pending_jobs,
                         scheduler_size=scheduler_size,
                         queue_size=queue_size,
                         event=" | ".join(event_bits),
                         mutated_input=result["mutated_input"],
+                        newest_coverage_branch=newest_coverage_branch,
+                        bug_signature=result.get("bug_signature"),
                     )
 
                 if debug_mode:

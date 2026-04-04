@@ -133,6 +133,64 @@ def _group_runs_by_target_config(*, runs: list[RunData]) -> dict[str, dict[str, 
     return out
 
 
+def _flatten_config_values(*, value: Any, prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            out.update(_flatten_config_values(value=child, prefix=child_prefix))
+        return out
+    if prefix:
+        out[prefix] = value
+    return out
+
+
+def _setting_label(setting_key: str) -> str:
+    labels = {
+        "runtime.debug_mode": "Debug Mode",
+        "seed_scheduler.ucb_trace": "UCB Trace",
+        "seed_scheduler.ucb_debug_tree": "UCB Debug Tree",
+        "parser.enable_open_coverage": "Open Coverage",
+    }
+    if setting_key in labels:
+        return labels[setting_key]
+    tail = setting_key.split(".")[-1]
+    return tail.replace("_", " ").title()
+
+
+def _is_setting_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (bool, int, float, str))
+
+
+def _setting_value_key(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    return json.dumps(value, sort_keys=True)
+
+
+def _setting_value_label(value: Any) -> str:
+    if isinstance(value, bool):
+        return "ON" if value else "OFF"
+    if value is None:
+        return "null"
+    return str(value)
+
+
+def _sort_setting_values(values: list[Any]) -> list[Any]:
+    def sort_key(value: Any) -> tuple[int, Any]:
+        if isinstance(value, bool):
+            return (0, int(value))
+        if value is None:
+            return (1, "")
+        if isinstance(value, (int, float)):
+            return (2, float(value))
+        return (3, str(value))
+
+    return sorted(values, key=sort_key)
+
+
 def _collect_timestamps(rows: list[dict[str, str]]) -> list[datetime]:
     values: list[datetime] = []
     for row in rows:
@@ -348,6 +406,111 @@ def compute_config_aggregates(*, run_metrics: list[dict[str, Any]]) -> list[dict
             }
         )
     return out
+
+
+def compute_setting_impacts(
+    *,
+    runs: list[RunData],
+    run_metrics: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    max_distinct_values = 8
+    run_metric_by_key = {
+        (str(metric["target"]), str(metric["config"]), str(metric["run_id"])): metric
+        for metric in run_metrics
+    }
+    observed_values_by_setting: dict[str, dict[str, Any]] = {}
+    grouped: dict[tuple[str, str, str], list[float]] = {}
+
+    for run in runs:
+        metric = run_metric_by_key.get((run.target, run.config_name, run.run_id))
+        if metric is None:
+            continue
+        flat_config = _flatten_config_values(value=run.config)
+        for setting_key, setting_value in flat_config.items():
+            if not _is_setting_scalar(setting_value):
+                continue
+            value_key = _setting_value_key(setting_value)
+            observed_values_by_setting.setdefault(setting_key, {})[value_key] = setting_value
+            grouped.setdefault((run.target, setting_key, value_key), []).append(
+                float(metric["total_unique_bugs"])
+            )
+
+    supported_settings = sorted(
+        setting_key
+        for setting_key, values in observed_values_by_setting.items()
+        if 1 < len(values) <= max_distinct_values
+    )
+
+    by_target: list[dict[str, Any]] = []
+    overall: list[dict[str, Any]] = []
+    for setting_key in supported_settings:
+        distinct_values = observed_values_by_setting[setting_key]
+        ordered_values = _sort_setting_values(list(distinct_values.values()))
+        ordered_value_rows: list[dict[str, Any]] = []
+        targets = sorted(
+            {
+                target
+                for target, candidate_key, _ in grouped.keys()
+                if candidate_key == setting_key
+            }
+        )
+        for target in targets:
+            target_value_rows: list[dict[str, Any]] = []
+            for raw_value in ordered_values:
+                value_key = _setting_value_key(raw_value)
+                samples = grouped.get((target, setting_key, value_key), [])
+                if not samples:
+                    continue
+                target_value_rows.append(
+                    {
+                        "value_key": value_key,
+                        "value_label": _setting_value_label(raw_value),
+                        "run_count": len(samples),
+                        "mean_unique_bugs": mean(samples),
+                    }
+                )
+            if len(target_value_rows) < 2:
+                continue
+            by_target.append(
+                {
+                    "target": target,
+                    "setting_key": setting_key,
+                    "setting_label": _setting_label(setting_key),
+                    "values": target_value_rows,
+                }
+            )
+
+        for raw_value in ordered_values:
+            value_key = _setting_value_key(raw_value)
+            overall_samples: list[float] = []
+            for target in targets:
+                overall_samples.extend(grouped.get((target, setting_key, value_key), []))
+            if not overall_samples:
+                continue
+            ordered_value_rows.append(
+                {
+                    "value_key": value_key,
+                    "value_label": _setting_value_label(raw_value),
+                    "run_count": len(overall_samples),
+                    "mean_unique_bugs": mean(overall_samples),
+                }
+            )
+
+        if len(ordered_value_rows) >= 2:
+            best_mean = max(float(row["mean_unique_bugs"]) for row in ordered_value_rows)
+            worst_mean = min(float(row["mean_unique_bugs"]) for row in ordered_value_rows)
+            overall.append(
+                {
+                    "setting_key": setting_key,
+                    "setting_label": _setting_label(setting_key),
+                    "values": ordered_value_rows,
+                    "spread_mean_unique_bugs": best_mean - worst_mean,
+                }
+            )
+
+    overall.sort(key=lambda row: float(row["spread_mean_unique_bugs"]), reverse=True)
+    by_target.sort(key=lambda row: (str(row["setting_label"]), str(row["target"])))
+    return {"overall": overall, "by_target": by_target}
 
 
 def _render_table(*, headers: list[str], rows: list[list[str]], table_id: str = "") -> str:
@@ -705,6 +868,153 @@ def render_comparison_overview(
         + "\n".join(cards)
         + "</div><h3>Overview charts</h3>"
         + chart_html
+        + "</section>"
+    )
+
+
+def render_setting_impact(
+    *,
+    setting_impacts: dict[str, list[dict[str, Any]]],
+    charts_dir: Path,
+    report_root: Path,
+) -> str:
+    overall_rows_data = setting_impacts.get("overall", [])
+    by_target_rows_data = setting_impacts.get("by_target", [])
+    if not overall_rows_data:
+        return (
+            "<section id='setting-impact'><h2>Setting Impact</h2>"
+            "<p class='meta'>Data unavailable: no low-cardinality scalar settings varied across runs in this batch.</p>"
+            "</section>"
+        )
+
+    overview_rows: list[list[str]] = []
+    for row in overall_rows_data:
+        value_summaries = "<br/>".join(
+            f"<code>{html.escape(str(value_row['value_label']))}</code>: "
+            f"{html.escape(_to_str(value_row['mean_unique_bugs']))} "
+            f"(n={html.escape(str(value_row['run_count']))})"
+            for value_row in row["values"]
+        )
+        overview_rows.append(
+            [
+                html.escape(str(row["setting_label"])),
+                f"<code>{html.escape(str(row['setting_key']))}</code>",
+                value_summaries,
+                html.escape(_to_str(row["spread_mean_unique_bugs"])),
+            ]
+        )
+
+    by_target_rows: list[list[str]] = []
+    for row in by_target_rows_data:
+        value_summaries = "<br/>".join(
+            f"<code>{html.escape(str(value_row['value_label']))}</code>: "
+            f"{html.escape(_to_str(value_row['mean_unique_bugs']))} "
+            f"(n={html.escape(str(value_row['run_count']))})"
+            for value_row in row["values"]
+        )
+        by_target_rows.append(
+            [
+                html.escape(str(row["target"])),
+                html.escape(str(row["setting_label"])),
+                f"<code>{html.escape(str(row['setting_key']))}</code>",
+                value_summaries,
+            ]
+        )
+
+    chart_parts: list[str] = []
+    for row in overall_rows_data:
+        setting_key = str(row["setting_key"])
+        try:
+            overall_categories = [str(value_row["value_label"]) for value_row in row["values"]]
+            overall_values = [float(value_row["mean_unique_bugs"]) for value_row in row["values"]]
+            fig_overall = _plot_grouped_bar(
+                title=f"Overall unique bugs by {_setting_label(setting_key)} value",
+                categories=overall_categories,
+                series=[("Mean unique bugs", overall_values)],
+            )
+            overall_chart_path = charts_dir / f"setting_impact_overall_{_slug(setting_key)}.png"
+            save_chart_png(fig_overall, overall_chart_path)
+            chart_parts.append(
+                _render_chart_html(
+                    title=f"{_setting_label(setting_key)} overall comparison",
+                    output_path=overall_chart_path,
+                    root=report_root,
+                    description=f"Setting key: {setting_key}",
+                )
+            )
+        except Exception:
+            chart_parts.append(
+                f"<p class='meta'>Data unavailable for {_setting_label(setting_key)} overall chart.</p>"
+            )
+
+        matching = [entry for entry in by_target_rows_data if entry["setting_key"] == setting_key]
+        if not matching:
+            continue
+        try:
+            ordered_value_labels = [str(value_row["value_label"]) for value_row in row["values"]]
+            categories = [str(entry["target"]) for entry in matching]
+            series = []
+            for value_label in ordered_value_labels:
+                value_by_target: list[float] = []
+                for entry in matching:
+                    target_value = next(
+                        (
+                            float(value_row["mean_unique_bugs"])
+                            for value_row in entry["values"]
+                            if str(value_row["value_label"]) == value_label
+                        ),
+                        0.0,
+                    )
+                    value_by_target.append(target_value)
+                series.append((value_label, value_by_target))
+            fig = _plot_grouped_bar(
+                title=f"Unique bugs by target for {_setting_label(setting_key)}",
+                categories=categories,
+                series=series,
+            )
+            chart_path = charts_dir / f"setting_impact_by_target_{_slug(setting_key)}.png"
+            save_chart_png(fig, chart_path)
+            chart_parts.append(
+                _render_chart_html(
+                    title=f"{_setting_label(setting_key)} impact by target",
+                    output_path=chart_path,
+                    root=report_root,
+                    description=f"Setting key: {setting_key}",
+                )
+            )
+        except Exception:
+            chart_parts.append(
+                f"<p class='meta'>Data unavailable for {_setting_label(setting_key)} target-level chart.</p>"
+            )
+
+    return (
+        "<section id='setting-impact'><h2>Setting Impact</h2>"
+        "<p class='meta'>These charts compare low-cardinality config settings, including boolean toggles "
+        "and categorical options like scheduler or mutator variants. Values are ranked by average unique bugs found.</p>"
+        "<h3>Overall setting summary</h3>"
+        + _render_table(
+            headers=[
+                "setting",
+                "setting_key",
+                "values",
+                "spread_mean_unique_bugs",
+            ],
+            rows=overview_rows,
+            table_id="setting-impact-overall",
+        )
+        + "<h3>Per-target breakdown</h3>"
+        + _render_table(
+            headers=[
+                "target",
+                "setting",
+                "setting_key",
+                "values",
+            ],
+            rows=by_target_rows,
+            table_id="setting-impact-by-target",
+        )
+        + "<h3>Charts</h3>"
+        + "".join(chart_parts)
         + "</section>"
     )
 
@@ -1178,6 +1488,7 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
 
     run_metrics = [compute_run_metrics(run=run) for run in runs]
     config_aggregates = compute_config_aggregates(run_metrics=run_metrics)
+    setting_impacts = compute_setting_impacts(runs=runs, run_metrics=run_metrics)
     runs_by_target_config = _group_runs_by_target_config(runs=runs)
 
     report_path = batch_folder / "report.html"
@@ -1194,6 +1505,7 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
                 "generated_at": generated_at,
                 "run_metrics": run_metrics,
                 "config_aggregates": config_aggregates,
+                "setting_impacts": setting_impacts,
             },
             f,
             indent=2,
@@ -1202,6 +1514,11 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
     overview = render_comparison_overview(
         run_metrics=run_metrics,
         config_aggregates=config_aggregates,
+        charts_dir=charts_dir,
+        report_root=batch_folder,
+    )
+    setting_impact = render_setting_impact(
+        setting_impacts=setting_impacts,
         charts_dir=charts_dir,
         report_root=batch_folder,
     )
@@ -1233,6 +1550,7 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
 
     toc_links = [
         ("Comparison Overview", "comparison-overview"),
+        ("Setting Impact", "setting-impact"),
         ("RQ1 Effectiveness", "rq1"),
         ("RQ2 Efficiency", "rq2"),
         ("RQ3 Baseline / Ablation", "rq3"),
@@ -1326,6 +1644,7 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
       </div>
       <div class="toc"><strong>Table of Contents:</strong> {toc_html}</div>
       {overview}
+      {setting_impact}
       {rq1}
       {rq2}
       {rq3}
@@ -1339,4 +1658,3 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(html_out)
     return report_path
-

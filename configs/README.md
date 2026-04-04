@@ -5,6 +5,7 @@ Copy `_template.json` to a new file (e.g. `my_run.json`) and edit the values. On
 - **Run one config**: `python main.py --config configs/my_run.json`
 - **Run one config N times**: `python main.py --config configs/my_run.json --runs 5`
 - **Run all configs in this folder (non-recursive)**: `python main.py --configs-dir configs/rerun_allcombos_sched_mut_cov_power_alltargets --runs 3`
+- **Store the repeat count in the config file**: set `"batch": {"runs": 5}` or top-level `"runs": 5`
 
 Files whose names start with `_` (like `_template.json`) are ignored when using `--configs-dir`.
 
@@ -18,6 +19,7 @@ Config files may be written in either of these forms:
 - Nested by module: grouped objects such as `runtime`, `seed_scheduler`, `seed_corpus`, `mutator`, `parser`, and `power_scheduler`.
 
 The loader accepts both forms. Nested module configs are flattened internally into the runtime `FuzzConfig`.
+Plan-level settings may also include `batch.runs` (or flat `runs`) to control how many times that config is executed in batch mode.
 
 ## Module configuration table
 
@@ -26,6 +28,7 @@ Defaults shown below match `core.config.get_default_config()`.
 | Module | Config keys | Allowed values / shape | Default |
 |---|---|---|---|
 | `target` | `target` | Built-in parser target name | `json-decoder` |
+| `batch` | `runs` | integer `>= 1` | `1` |
 | `runtime` | `debug_mode` | `true` / `false` | `false` |
 | `runtime` | `max_iterations` | integer or `null` | `10` |
 | `runtime` | `max_hours` | float or `null` | `null` |
@@ -46,6 +49,7 @@ Defaults shown below match `core.config.get_default_config()`.
 | `mutator` | `mutator_kind` | `auto`, `json`, `ip` | `auto` |
 | `mutator` | `mutator_version` | `base`, `byte_havoc`, `grammar_ast`, `adaptive_all` | `base` |
 | `mutator` | `grammar_path` | file path string or `null` | `null` |
+| `mutator` | `ast_grammar_path` | file path string or `null` | `null` |
 | `mutator` | `grammar_rules_file` | file path string or `null` | `null` |
 | `isinteresting` | `isinteresting_version` | `base` | `base` |
 | `parser` | `parser_version` | `base` | `base` |
@@ -71,6 +75,9 @@ Example `configs/my_run.json` using the nested module form:
 ```json
 {
   "target": "json-decoder",
+  "batch": {
+    "runs": 3
+  },
   "runtime": {
     "max_iterations": 5000,
     "rng_seed": 42,
@@ -84,6 +91,9 @@ Example `configs/my_run.json` using the nested module form:
 ```json
 {
   "target": "json-decoder",
+  "batch": {
+    "runs": 2
+  },
   "runtime": {
     "max_iterations": 1000,
     "workers": 4

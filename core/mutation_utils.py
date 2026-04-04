@@ -77,10 +77,8 @@ def generate_unique_mutations(
     max_attempts: int = 200,
 ) -> list[str]:
     """Generate up to n unique mutated inputs not already present in runs for this target."""
-    reject_nul_for_kinds = {"ip", "ipv4", "ipv6"}
-
     def _is_rejected_candidate(candidate: str) -> bool:
-        return mutator_kind in reject_nul_for_kinds and "\x00" in candidate
+        return "\x00" in candidate
 
     seen: set[str] = set()
     batch: list[str] = []

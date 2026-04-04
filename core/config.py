@@ -23,6 +23,7 @@ from seed_scheduler import list_versions as scheduler_versions
 from core.mutation_utils import DEFAULT_PRELOAD_BUCKET_RATIOS
 
 ENABLE_OPEN_COVERAGE: bool = False
+BATCH_CONFIG_KEYS = {"runs"}
 CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("target", ("target",)),
     (
@@ -56,6 +57,7 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mutator_kind",
             "mutator_version",
             "grammar_path",
+            "ast_grammar_path",
             "grammar_rules_file",
         ),
     ),
@@ -95,6 +97,7 @@ class FuzzConfig(TypedDict):
     mutator_kind: str
     mutator_version: str
     grammar_path: str | None
+    ast_grammar_path: str | None
     grammar_rules_file: str | None
 
     isinteresting_version: str
@@ -129,6 +132,7 @@ def get_default_config() -> FuzzConfig:
         "mutator_kind": "auto",
         "mutator_version": "base",
         "grammar_path": None,
+        "ast_grammar_path": None,
         "grammar_rules_file": None,
         "isinteresting_version": "base",
         "parser_version": "base",
@@ -171,6 +175,7 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "scheduler_kind": ("--scheduler",),
     "mutator_kind": ("--mutator",),
     "grammar_path": ("--grammar-file",),
+    "ast_grammar_path": ("--ast-grammar-file",),
     "grammar_rules_file": ("-g", "--grammar-rules-file"),
     "debug_mode": ("--debug",),
     "seed_preload_mode": ("--seed-preload-mode",),
@@ -248,6 +253,26 @@ def _normalize_config_data(data: object) -> dict[str, object]:
     return normalized
 
 
+def _load_config_file_data(path: Path) -> dict[str, object]:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a JSON object.")
+    return data
+
+
+def _extract_runs_per_config(data: dict[str, object]) -> int | None:
+    raw_runs = data.get("runs")
+    batch = data.get("batch")
+    if isinstance(batch, dict) and "runs" in batch:
+        raw_runs = batch.get("runs")
+    if raw_runs is None:
+        return None
+    if not isinstance(raw_runs, int) or raw_runs < 1:
+        raise ValueError("batch.runs (or top-level runs) must be an integer >= 1.")
+    return raw_runs
+
+
 def _iter_grouped_config_values(config: FuzzConfig) -> list[tuple[str, dict[str, object]]]:
     grouped: list[tuple[str, dict[str, object]]] = []
     for module_name, keys in CONFIG_MODULES:
@@ -312,6 +337,12 @@ def _validate_config(config: FuzzConfig) -> None:
             raise ValueError("grammar_path must be a non-empty string or null.")
         if not Path(grammar_path).is_file():
             raise ValueError(f"grammar_path does not exist: {grammar_path}")
+    ast_grammar_path = config["ast_grammar_path"]
+    if ast_grammar_path is not None:
+        if not isinstance(ast_grammar_path, str) or not ast_grammar_path.strip():
+            raise ValueError("ast_grammar_path must be a non-empty string or null.")
+        if not Path(ast_grammar_path).is_file():
+            raise ValueError(f"ast_grammar_path does not exist: {ast_grammar_path}")
     if config["seed_preload_mode"] not in ("full", "ratio_batch", "sample"):
         raise ValueError(
             f"Invalid seed_preload_mode: {config['seed_preload_mode']}. "
@@ -372,8 +403,7 @@ def _validate_config(config: FuzzConfig) -> None:
 
 def load_config_from_file(path: Path) -> FuzzConfig:
     """Load and validate FuzzConfig from a JSON file. Missing keys use defaults."""
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+    data = _load_config_file_data(path)
     defaults = get_default_config()
     merged: FuzzConfig = {**defaults}
     normalized_data = _normalize_config_data(data)
@@ -385,6 +415,11 @@ def load_config_from_file(path: Path) -> FuzzConfig:
         if not grammar_path.is_absolute():
             grammar_path = (path.parent / grammar_path).resolve()
         merged["grammar_path"] = str(grammar_path)
+    if merged["ast_grammar_path"] is not None:
+        ast_grammar_path = Path(merged["ast_grammar_path"])
+        if not ast_grammar_path.is_absolute():
+            ast_grammar_path = (path.parent / ast_grammar_path).resolve()
+        merged["ast_grammar_path"] = str(ast_grammar_path)
     grammar_rules_file = merged["grammar_rules_file"]
     if grammar_rules_file is not None:
         grammar_rules_path = Path(grammar_rules_file)
@@ -402,10 +437,8 @@ def load_config_from_file(path: Path) -> FuzzConfig:
     merged["seed_corpus_version"] = canonicalize_seed_corpus_version(
         merged["seed_corpus_version"]
     )
-    # Normalize: if max_hours is set, clear max_iterations
     if merged.get("max_hours"):
         merged["max_iterations"] = None
-    # Friendly alias: bucketed -> ratio_batch, random -> sample for initial corpus draw
     if merged["seed_corpus_initial_draw"] is not None:
         _draw_map = {
             "bucketed": "ratio_batch",
@@ -415,6 +448,12 @@ def load_config_from_file(path: Path) -> FuzzConfig:
         merged["seed_preload_mode"] = _draw_map[merged["seed_corpus_initial_draw"]]
     _validate_config(merged)
     return merged
+
+
+def load_runs_per_config_from_file(path: Path) -> int | None:
+    """Load optional plan-level run repetition count from a JSON config file."""
+    data = _load_config_file_data(path)
+    return _extract_runs_per_config(data)
 
 
 def list_config_files(configs_dir: Path) -> list[Path]:
@@ -430,7 +469,7 @@ def list_config_files(configs_dir: Path) -> list[Path]:
 
 def build_config() -> FuzzConfig:
     """Return a single config from CLI (for backward compatibility). Use get_run_plan() for config files."""
-    entries, _ = get_run_plan()
+    entries = get_run_plan()
     if len(entries) != 1:
         raise RuntimeError(
             "build_config() expects a single run; use get_run_plan() when using --config or --configs-dir."
@@ -438,10 +477,10 @@ def build_config() -> FuzzConfig:
     return entries[0][1]
 
 
-def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
+def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
     """
-    Parse CLI and return (list of (config_path_or_None, config), runs_per_config).
-    Use --config for one file, --configs-dir to run all configs in a folder, --runs for repeat count.
+    Parse CLI and return a list of (config_path_or_None, config, runs_per_config).
+    Use --config for one file, --configs-dir to run all configs in a folder, --runs to override repeat count.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -476,6 +515,14 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         default=None,
         metavar="PATH",
         help="Optional grammar JSON file used by grammar-driven mutators for the active target.",
+    )
+    parser.add_argument(
+        "--ast-grammar-file",
+        dest="ast_grammar_path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional AST grammar JSON file used by the grammar_ast mutator for the active target.",
     )
     parser.add_argument(
         "-g",
@@ -641,6 +688,7 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
     argv = sys.argv[1:]
     args = parser.parse_args()
     cli_override_keys = _get_cli_override_keys(argv)
+    runs_override_present = _cli_option_present(argv, ("--runs",))
 
     if args.max_hours is not None and "--iterations" in argv:
         parser.error(
@@ -664,6 +712,8 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         parser.error(f"--configs-dir is not a directory: {args.configs_dir}")
     if args.grammar_path is not None and not args.grammar_path.is_file():
         parser.error(f"--grammar-file path is not a file: {args.grammar_path}")
+    if args.ast_grammar_path is not None and not args.ast_grammar_path.is_file():
+        parser.error(f"--ast-grammar-file path is not a file: {args.ast_grammar_path}")
     if args.grammar_rules_file is not None and not args.grammar_rules_file.is_file():
         parser.error(f"--grammar-rules-file path is not a file: {args.grammar_rules_file}")
 
@@ -675,6 +725,11 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
         "grammar_path": (
             str(args.grammar_path.resolve())
             if args.grammar_path is not None
+            else None
+        ),
+        "ast_grammar_path": (
+            str(args.ast_grammar_path.resolve())
+            if args.ast_grammar_path is not None
             else None
         ),
         "debug_mode": args.debug_mode,
@@ -710,12 +765,14 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
     )
 
     if args.config is not None:
+        file_runs = load_runs_per_config_from_file(args.config)
         config = _apply_cli_overrides(
             load_config_from_file(args.config),
             from_args,
             cli_override_keys,
         )
-        return ([ (args.config, config) ], args.runs)
+        runs_per_config = args.runs if runs_override_present else (file_runs or 1)
+        return [(args.config, config, runs_per_config)]
     if args.configs_dir is not None:
         paths = list_config_files(args.configs_dir)
         if not paths:
@@ -728,11 +785,14 @@ def get_run_plan() -> tuple[list[tuple[Path | None, FuzzConfig]], int]:
                     from_args,
                     cli_override_keys,
                 ),
+                args.runs
+                if runs_override_present
+                else (load_runs_per_config_from_file(p) or 1),
             )
             for p in paths
         ]
-        return (entries, args.runs)
-    return ([ (None, from_args) ], 1)
+        return entries
+    return [(None, from_args, 1)]
 
 
 def infer_mutator_kind(

@@ -4,6 +4,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from collections.abc import Mapping
+from pathlib import Path
 
 from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
@@ -58,6 +59,9 @@ def render_config_panel(
     grammar_rules_file = config.get("grammar_rules_file")
     if grammar_rules_file:
         rows.append(("grammar rules", str(grammar_rules_file)))
+    ast_grammar_path = config.get("ast_grammar_path")
+    if ast_grammar_path:
+        rows.append(("ast grammar", str(ast_grammar_path)))
     for label, value in rows:
         table.add_row(label, value)
 
@@ -129,7 +133,8 @@ class RunDashboard:
     timeouts_found: int = 0
     errors_found: int = 0
     unique_bugs_found: int = 0
-    new_coverage_events: int = 0
+    covered_branches_total: int = 0
+    unique_covered_arcs: int = 0
     scheduler_size: int = 0
     queue_size: int = 0
     pending_jobs: int = 0
@@ -144,7 +149,8 @@ class RunDashboard:
     last_mutated_input: str = ""
     memory_rss_total: str = ""
     memory_rss_details: str = ""
-    # Only treat a result as "interesting" when its score is sufficiently high.
+    newest_coverage_branch: str = ""
+    crash_output: str = ""
     interesting_score_threshold: float = 0.5
 
     def __post_init__(self) -> None:
@@ -237,15 +243,20 @@ class RunDashboard:
     def record_result(
         self,
         *,
+        iteration: int,
         status: str,
         score: float,
         new_coverage: bool,
         new_bug: bool,
+        covered_branches: int,
+        unique_covered_arcs: int,
         pending_jobs: int,
         scheduler_size: int,
         queue_size: int,
         event: str,
         mutated_input: str,
+        newest_coverage_branch: str = "",
+        bug_signature: Mapping[str, object] | None = None,
     ) -> None:
         self.total_results += 1
         self.pending_jobs = pending_jobs
@@ -253,6 +264,8 @@ class RunDashboard:
         self.queue_size = queue_size
         self.last_event = event
         self.last_mutated_input = self._preview_input(mutated_input)
+        self.covered_branches_total = max(0, int(covered_branches))
+        self.unique_covered_arcs = max(0, int(unique_covered_arcs))
 
         if score >= self.interesting_score_threshold:
             self.interesting_results += 1
@@ -265,7 +278,44 @@ class RunDashboard:
         if new_bug:
             self.unique_bugs_found += 1
         if new_coverage:
-            self.new_coverage_events += 1
+            if newest_coverage_branch:
+                self.newest_coverage_branch = newest_coverage_branch
+        if status == "crash":
+            self.crash_output = self._format_crash_output(
+                iteration=iteration,
+                bug_signature=bug_signature,
+            )
+
+    def _format_crash_output(
+        self,
+        *,
+        iteration: int,
+        bug_signature: Mapping[str, object] | None = None,
+    ) -> str:
+        if not isinstance(bug_signature, Mapping):
+            bug_signature = {}
+        parts = [f"iteration={iteration}"]
+        exception = str(bug_signature.get("exception") or "").strip()
+        message = str(bug_signature.get("message") or "").strip()
+        file_name = str(bug_signature.get("file") or "").strip()
+        line = str(bug_signature.get("line") or "").strip()
+        bug_type = str(bug_signature.get("type") or "").strip()
+        if exception:
+            parts.append(f"exception={exception}")
+        if bug_type:
+            parts.append(f"type={bug_type}")
+        if file_name:
+            location = f"{file_name}:{line}" if line else file_name
+            parts.append(f"location={location}")
+        if message:
+            parts.append(f"message={message}")
+        return " | ".join(parts)
+
+    def _preview_branch(self, value: str, *, limit: int = 72) -> str:
+        cleaned = " ".join(value.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 3] + "..."
 
     def _status_text(self) -> Text:
         styles = {
@@ -298,10 +348,17 @@ class RunDashboard:
                 ),
             ),
             (
-                "New Coverage",
+                "Covered Branches",
                 Text(
-                    str(self.new_coverage_events),
-                    style="bold magenta" if self.new_coverage_events else "dim",
+                    str(self.covered_branches_total),
+                    style="bold magenta" if self.covered_branches_total else "dim",
+                ),
+            ),
+            (
+                "Unique Covered Arcs",
+                Text(
+                    str(self.unique_covered_arcs),
+                    style="bold magenta" if self.unique_covered_arcs else "dim",
                 ),
             ),
         ]
@@ -362,6 +419,19 @@ class RunDashboard:
             self.memory_rss_total or "-",
             self.last_event,
         )
+        table.add_row(
+            Text("Newest Coverage Branch", style="dim"),
+            self._preview_branch(self.newest_coverage_branch) or "-",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
         return table
 
     def _memory_panel(self) -> Panel | None:
@@ -399,6 +469,19 @@ class RunDashboard:
         text = Text(self.last_mutated_input, style="white")
         return Panel(text, title="Last Mutated Input", border_style="yellow")
 
+    def _crash_output_panel(self) -> Panel | None:
+        if not self.crash_output:
+            return None
+        table = Table(
+            expand=True,
+            header_style="bold red",
+            box=None,
+            pad_edge=False,
+        )
+        table.add_column("Crash Output", style="bold white")
+        table.add_row(self._preview_input(self.crash_output, limit=320))
+        return Panel(table, title="Crash Output", border_style="red")
+
     def render(self) -> RenderableType:
         footer = Table.grid(padding=(0, 1))
         footer.add_row(
@@ -423,5 +506,8 @@ class RunDashboard:
         if memory_panel is not None:
             panels.append(memory_panel)
         panels.append(Panel(footer, border_style="dim"))
+        crash_output_panel = self._crash_output_panel()
+        if crash_output_panel is not None:
+            panels.append(crash_output_panel)
         group = Group(*panels)
         return group

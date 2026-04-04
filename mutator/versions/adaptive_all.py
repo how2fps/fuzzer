@@ -10,11 +10,12 @@ from collections.abc import Callable
 
 from .adaptive_operators import AdaptiveStrategy
 from .lib import (
+    apply_grammar_operator,
     arithmetic_mutation,
+    available_grammar_operator_names,
     bit_flip,
     clone_block_mutation,
     delete_block_mutation,
-    generate_from_grammar,
     interesting_value_mutation,
     mutate_text_with_grammar,
     resolve_grammar_spec,
@@ -22,15 +23,6 @@ from .lib import (
 
 ByteMutator = Callable[..., bytes]
 Operator = Callable[[str, random.Random], str]
-_OPERATOR_NAMES = (
-    "grammar_splice",
-    "grammar_regenerate",
-    "byte_bit_flip",
-    "byte_arithmetic",
-    "byte_interesting_val",
-    "byte_delete_block",
-    "byte_clone_block",
-)
 _DEFAULT_MAX_DEPTH = 5
 
 
@@ -44,24 +36,28 @@ def _wrap_byte_mutator(func: ByteMutator) -> Operator:
 
 def _build_unified_ops(*, mutator_kind: str) -> dict[str, Operator]:
     grammar_spec = resolve_grammar_spec(kind=mutator_kind)
-    return {
-        "grammar_splice": lambda text, rng: mutate_text_with_grammar(
-            original_text=text,
-            grammar_spec=grammar_spec,
-            max_depth=_DEFAULT_MAX_DEPTH,
-            rng=rng,
-        ),
-        "grammar_regenerate": lambda _text, rng: generate_from_grammar(
-            grammar_spec=grammar_spec,
-            max_depth=_DEFAULT_MAX_DEPTH,
-            rng=rng,
-        ),
-        "byte_bit_flip": _wrap_byte_mutator(bit_flip),
-        "byte_arithmetic": _wrap_byte_mutator(arithmetic_mutation),
-        "byte_interesting_val": _wrap_byte_mutator(interesting_value_mutation),
-        "byte_delete_block": _wrap_byte_mutator(delete_block_mutation),
-        "byte_clone_block": _wrap_byte_mutator(clone_block_mutation),
+    ops = {
+        f"grammar_{operator_name}": (
+            lambda text, rng, operator_name=operator_name: apply_grammar_operator(
+                operator_name=operator_name,
+                original_text=text,
+                grammar_spec=grammar_spec,
+                max_depth=_DEFAULT_MAX_DEPTH,
+                rng=rng,
+            )
+        )
+        for operator_name in available_grammar_operator_names(grammar_spec=grammar_spec)
     }
+    ops.update(
+        {
+            "byte_bit_flip": _wrap_byte_mutator(bit_flip),
+            "byte_arithmetic": _wrap_byte_mutator(arithmetic_mutation),
+            "byte_interesting_val": _wrap_byte_mutator(interesting_value_mutation),
+            "byte_delete_block": _wrap_byte_mutator(delete_block_mutation),
+            "byte_clone_block": _wrap_byte_mutator(clone_block_mutation),
+        }
+    )
+    return ops
 
 
 class AdaptiveAllMutator:
@@ -70,17 +66,29 @@ class AdaptiveAllMutator:
         self._pending_by_text: dict[str, tuple[str, str]] = {}
         self._lock = threading.Lock()
 
-    def _strategy_for_kind(self, *, mutator_kind: str) -> AdaptiveStrategy:
+    def _strategy_for_kind(
+        self,
+        *,
+        mutator_kind: str,
+        operator_names: list[str],
+    ) -> AdaptiveStrategy:
         strategy = self._strategy_by_kind.get(mutator_kind)
-        if strategy is None:
-            strategy = AdaptiveStrategy(list(_OPERATOR_NAMES))
+        if strategy is None or (
+            isinstance(strategy, AdaptiveStrategy)
+            and set(strategy.weights) != set(operator_names)
+        ):
+            strategy = AdaptiveStrategy(operator_names)
             self._strategy_by_kind[mutator_kind] = strategy
         return strategy
 
     def mutate(self, text: str, *, mutator_kind: str, rng: random.Random) -> str:
         ops = _build_unified_ops(mutator_kind=mutator_kind)
+        operator_names = list(ops)
         with self._lock:
-            strategy = self._strategy_for_kind(mutator_kind=mutator_kind)
+            strategy = self._strategy_for_kind(
+                mutator_kind=mutator_kind,
+                operator_names=operator_names,
+            )
             op_name = strategy.select_operator(rng)
         try:
             mutated = ops[op_name](text, rng)
@@ -104,6 +112,8 @@ class AdaptiveAllMutator:
             mutator_kind, op_name = pending
             strategy = self._strategy_by_kind.get(mutator_kind)
             if strategy is None:
+                return False
+            if isinstance(strategy, AdaptiveStrategy) and op_name not in strategy.weights:
                 return False
             strategy.update_score(op_name, gained_coverage)
             return True

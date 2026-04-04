@@ -24,23 +24,13 @@ try:
 except ImportError:
     from .json_decoder_parser import run_json_decoder_with_branches
 
-# Default timeout per target run (seconds)
 DEFAULT_TIMEOUT = 10.0
 
-# Name of target that gets coverage bitmap (e.g. json_open)
 COVERAGE_TARGET_NAME = "json_open"
 
-# Base path for targets (project root / targets)
 _TARGETS_BASE = Path(__file__).resolve().parent.parent / "targets"
 
-# Absolute path to the json_open runner script that uses stdlib json
 JSON_OPEN_SCRIPT = Path(__file__).resolve().parent / "json_open_runner.py"
-# Child entry so json-decoder (in-process loads + coverage) honors timeout like subprocess targets
-_JSON_DECODER_ISOLATED_MAIN = Path(__file__).resolve().parent / "json_decoder_isolated_main.py"
-
-# Target name -> path, run command, and optional oracle target.
-# New config-file driven targets can override or extend this registry via
-# `parser_config.targets`.
 TARGETS: dict[str, dict[str, Any]] = {
     "cidrize-runner": {
         "path": "cidrize-runner",
@@ -112,7 +102,6 @@ TARGETS: dict[str, dict[str, Any]] = {
     },
 }
 
-# Patterns to normalize for stable hashes (paths, numbers, timestamps, PIDs)
 NORMALIZE_PATTERNS = [
     (re.compile(r"\b\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}[.\d]*Z?", re.I), "<TIMESTAMP>"),
     (re.compile(r"\b\d{10,}\b"), "<NUM>"),
@@ -321,7 +310,6 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
         if last.lower().startswith("warning:"):
             return out
 
-    # Traceback file/line: use last frame (where exception was raised)
     file_line_matches = list(
         re.finditer(
             r'File\s+"([^"]+)",\s*line\s+(\d+)',
@@ -334,7 +322,6 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
         out["file"] = m.group(1)
         out["line"] = m.group(2)
 
-    # Last line often: ExceptionType: message
     last_line = None
     for line in reversed(stderr.strip().splitlines()):
         line = line.strip()
@@ -370,7 +357,10 @@ def _resolve_argv(
         else:
             argv.append(part)
     if append_input_as_final_arg and input_arg is not None:
-        argv.append(input_arg)
+        if argv and argv[-1].startswith("--") and "=" not in argv[-1]:
+            argv[-1] = f"{argv[-1]}={input_arg}"
+        else:
+            argv.append(input_arg)
     return argv
 
 
@@ -492,11 +482,8 @@ def run_target(
         if proc.returncode != 0:
             result["status"] = "crash"
 
-    # Primary bug signature from stderr (usual case)
     bug_sig = _parse_bug_signature(stderr)
 
-    # If stderr did not yield a bug signature, try to infer it from JSON stdout
-    # used by some open targets (e.g. json_open) that encode bug info and status in stdout.
     if not bug_sig.get("type"):
         try:
             stdout_obj = json.loads(stdout)
@@ -514,14 +501,12 @@ def run_target(
                     "line": str(bug_info.get("line")) if bug_info.get("line") is not None else None,
                 }
 
-            # If the JSON stdout includes an explicit status field, trust it.
             status_from_stdout = stdout_obj.get("status")
             if isinstance(status_from_stdout, str):
                 result["status"] = status_from_stdout
 
     result["bug_signature"] = bug_sig
 
-    # If we have a bug signature but status is still "ok", treat it as a bug.
     if bug_sig.get("type") and result.get("status") == "ok":
         result["status"] = "bug"
 
@@ -696,7 +681,6 @@ def run_parser(
 
     entry = target_registry[target]
 
-    # Special handling for json-decoder target using internal helper
     handler = _handler_name(entry)
     if handler == "json_decoder":
         input_str = data.decode("utf-8", errors="replace")
@@ -735,7 +719,6 @@ def run_parser(
             process_cwd=closed_cwd_override,
         )
 
-    # For closed targets, also run the oracle target
     open_name = entry.get("oracle")
     if open_name is not None:
         open_entry = target_registry.get(open_name)
@@ -803,7 +786,6 @@ def run_parser(
                 "bug_signature": None,
             }
 
-    # Move any open_result out of the closed_result payload to top level.
     open_result = None
     if isinstance(result, dict) and "open_result" in result:
         open_result = result.pop("open_result")
@@ -836,7 +818,4 @@ def example_print_json() -> None:
     )
 
 if __name__ == "__main__":
-
-    # example_from_bytes()
-
     example_print_json()

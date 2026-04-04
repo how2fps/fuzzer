@@ -22,6 +22,7 @@ def mutate(
     return mutate_text_with_grammar(
         original_text=text,
         grammar_spec=grammar_spec,
+        kind=mutator_kind,
         max_depth=_DEFAULT_MAX_DEPTH,
         rng=rng,
     )

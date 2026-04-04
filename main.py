@@ -14,12 +14,12 @@ from core.batch_report import generate_batch_report
 def main() -> None:
     configure_fuzzer_logging()
     log = get_fuzzer_logger()
-    entries, runs_per_config = get_run_plan()
+    entries = get_run_plan()
     batch_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     batch_folder = RESULTS_DIR / f"batch_{batch_timestamp}"
     batch_folder.mkdir(parents=True, exist_ok=True)
 
-    for config_path, config in entries:
+    for config_path, config, runs_per_config in entries:
         config_label = config_path.stem if config_path is not None else "cli"
         config_folder = batch_folder / config_label
         config_folder.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from isinteresting import get_covered_edges_from_result
+from isinteresting import (
+    get_coverage_source_kind_from_result,
+    get_covered_edges_from_result,
+)
 from seed_corpus import Seed
 
 from core.fuzzer_logging import get_fuzzer_logger
@@ -102,6 +105,14 @@ def _summarize_trace_payload(
         "bug_type": bug_signature.get("type") if isinstance(bug_signature, dict) else None,
         "new_coverage": normalized_signals.get("new_coverage") if normalized_signals else None,
         "new_bug": normalized_signals.get("new_bug") if normalized_signals else None,
+        "new_bug_site": normalized_signals.get("new_bug_site") if normalized_signals else None,
+        "new_exception_site": normalized_signals.get("new_exception_site") if normalized_signals else None,
+        "new_differential_behavior": (
+            normalized_signals.get("new_differential_behavior")
+            if normalized_signals
+            else None
+        ),
+        "coverage_source": normalized_signals.get("coverage_source") if normalized_signals else None,
         "crash": normalized_signals.get("crash") if normalized_signals else None,
         "timeout": normalized_signals.get("timeout") if normalized_signals else None,
         "covered_branches": covered,
@@ -162,7 +173,13 @@ def _track_item_recency(
     if isinstance(signals, dict):
         novelty = any(
             bool(signals.get(key))
-            for key in ("new_coverage", "new_bug", "new_differential_behavior")
+            for key in (
+                "new_coverage",
+                "new_bug",
+                "new_bug_site",
+                "new_exception_site",
+                "new_differential_behavior",
+            )
         )
 
     if novelty:
@@ -198,6 +215,10 @@ def _flat_compact_signals(
     score: float,
     new_coverage: bool,
     new_bug: bool,
+    new_bug_site: bool,
+    new_exception_site: bool,
+    new_differential_behavior: bool,
+    coverage_source: str,
 ) -> dict[str, Any]:
     """Return a compact flat signal payload to reduce queue memory pressure."""
     closed_raw = result.get("closed_result", {})
@@ -207,24 +228,15 @@ def _flat_compact_signals(
     bug_signature = closed.get("bug_signature") or open_.get("bug_signature")
     edges = get_covered_edges_from_result(result)
 
-    closed_status = str(closed.get("status") or "").strip().lower()
-    open_status = str(open_.get("status") or "").strip().lower()
-    new_differential_behavior = (
-        bool(open_)
-        and (
-            closed_status != open_status
-            or (closed.get("bug_signature") or {}) != (open_.get("bug_signature") or {})
-            or (closed.get("stdout_signature") or "") != (open_.get("stdout_signature") or "")
-            or (closed.get("stderr_signature") or "") != (open_.get("stderr_signature") or "")
-        )
-    )
-
     out: dict[str, Any] = {
         "status": status,
         "isinteresting": score,
         "new_coverage": new_coverage,
         "new_bug": new_bug,
+        "new_bug_site": new_bug_site,
+        "new_exception_site": new_exception_site,
         "new_differential_behavior": new_differential_behavior,
+        "coverage_source": coverage_source,
         "crash": status == "crash",
         "timeout": status == "timeout",
         "coverage_key": _coverage_key_from_edges(edges),
@@ -353,6 +365,139 @@ def _has_new_bug(
         return False
 
 
+def _has_new_bug_site(
+    db_path: Path | str,
+    result: dict[str, Any],
+    target: str,
+    *,
+    sqlite_conn: sqlite3.Connection | None = None,
+) -> bool:
+    status = _closed_status(result)
+    if status not in {"bug", "crash", "timeout", "error"}:
+        return False
+    closed = result.get("closed_result", {})
+    bug_signature = closed.get("bug_signature") or {}
+    if not isinstance(bug_signature, dict):
+        return False
+    file_ = bug_signature.get("file") or ""
+    line_raw = bug_signature.get("line")
+    line = None
+    if line_raw is not None:
+        try:
+            line = int(line_raw)
+        except (TypeError, ValueError):
+            line = None
+    if not file_ and line is None:
+        return False
+
+    def _is_first_occurrence(conn: sqlite3.Connection) -> bool:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+              AND COALESCE(file, '') = COALESCE(?, '')
+              AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
+            """,
+            (target, file_, line, line),
+        )
+        row = cur.fetchone()
+        return int(row[0]) == 0 if row else False
+
+    if sqlite_conn is not None:
+        try:
+            return _is_first_occurrence(sqlite_conn)
+        except sqlite3.OperationalError:
+            return False
+
+    path = Path(db_path) if isinstance(db_path, str) else db_path
+    if not path.exists():
+        return False
+    try:
+        conn = open_results_db(path)
+        try:
+            return _is_first_occurrence(conn)
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def _has_new_exception_site(
+    db_path: Path | str,
+    result: dict[str, Any],
+    target: str,
+    *,
+    sqlite_conn: sqlite3.Connection | None = None,
+) -> bool:
+    status = _closed_status(result)
+    if status not in {"bug", "crash", "timeout", "error"}:
+        return False
+    closed = result.get("closed_result", {})
+    bug_signature = closed.get("bug_signature") or {}
+    if not isinstance(bug_signature, dict):
+        return False
+    exc = bug_signature.get("exception") or ""
+    file_ = bug_signature.get("file") or ""
+    line_raw = bug_signature.get("line")
+    line = None
+    if line_raw is not None:
+        try:
+            line = int(line_raw)
+        except (TypeError, ValueError):
+            line = None
+    if not exc:
+        return False
+
+    def _is_first_occurrence(conn: sqlite3.Connection) -> bool:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+              AND COALESCE(exception, '') = COALESCE(?, '')
+              AND COALESCE(file, '') = COALESCE(?, '')
+              AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
+            """,
+            (target, exc, file_, line, line),
+        )
+        row = cur.fetchone()
+        return int(row[0]) == 0 if row else False
+
+    if sqlite_conn is not None:
+        try:
+            return _is_first_occurrence(sqlite_conn)
+        except sqlite3.OperationalError:
+            return False
+
+    path = Path(db_path) if isinstance(db_path, str) else db_path
+    if not path.exists():
+        return False
+    try:
+        conn = open_results_db(path)
+        try:
+            return _is_first_occurrence(conn)
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def _has_new_differential_behavior(result: dict[str, Any]) -> bool:
+    closed_raw = result.get("closed_result", {})
+    open_raw = result.get("open_result", {})
+    closed = closed_raw if isinstance(closed_raw, dict) else {}
+    open_ = open_raw if isinstance(open_raw, dict) else {}
+    if not open_:
+        return False
+    closed_status = str(closed.get("status") or "").strip().lower()
+    open_status = str(open_.get("status") or "").strip().lower()
+    return (
+        closed_status != open_status
+        or (closed.get("bug_signature") or {}) != (open_.get("bug_signature") or {})
+        or (closed.get("stdout_signature") or "") != (open_.get("stdout_signature") or "")
+        or (closed.get("stderr_signature") or "") != (open_.get("stderr_signature") or "")
+    )
+
+
 def build_ucb_update_signals(
     *,
     result: dict[str, Any],
@@ -366,14 +511,39 @@ def build_ucb_update_signals(
 ) -> dict[str, Any]:
     """Build the per-mutation feedback payload consumed by the UCB scheduler."""
     status = _closed_status(result)
-    new_coverage = _has_new_coverage(db_path, result, sqlite_conn=sqlite_conn)
+    coverage_source = get_coverage_source_kind_from_result(result)
+    raw_new_coverage = _has_new_coverage(db_path, result, sqlite_conn=sqlite_conn)
     new_bug = _has_new_bug(db_path, result, target, sqlite_conn=sqlite_conn)
+    new_bug_site = _has_new_bug_site(
+        db_path,
+        result,
+        target,
+        sqlite_conn=sqlite_conn,
+    )
+    new_exception_site = _has_new_exception_site(
+        db_path,
+        result,
+        target,
+        sqlite_conn=sqlite_conn,
+    )
+    new_differential_behavior = _has_new_differential_behavior(result)
+    new_coverage = raw_new_coverage and (
+        coverage_source != "open"
+        or new_bug
+        or new_bug_site
+        or new_exception_site
+        or new_differential_behavior
+    )
     compact = _flat_compact_signals(
         result=result,
         status=status,
         score=score,
         new_coverage=new_coverage,
         new_bug=new_bug,
+        new_bug_site=new_bug_site,
+        new_exception_site=new_exception_site,
+        new_differential_behavior=new_differential_behavior,
+        coverage_source=coverage_source,
     )
     compact["iteration"] = iteration
     compact["seed_id"] = seed_id
@@ -732,6 +902,12 @@ class UCBTreeScheduler(BaseSeedScheduler):
             reward += 1.0
         if bool(signals.get("new_bug")):
             reward += 2.0
+        if bool(signals.get("new_bug_site")):
+            reward += 0.9
+        if bool(signals.get("new_exception_site")):
+            reward += 0.6
+        if bool(signals.get("new_differential_behavior")):
+            reward += 1.0
         status = str(signals.get("status", "")).lower()
         if bool(signals.get("crash")) or bool(signals.get("timeout")) or status in {
             "crash",
@@ -755,7 +931,6 @@ class UCBTreeScheduler(BaseSeedScheduler):
         if not isinstance(signals, dict):
             return {"raw_signals": signals}
 
-        # Already-flat shape.
         if "closed_result" not in signals and "open_result" not in signals:
             return signals
 
@@ -771,7 +946,16 @@ class UCBTreeScheduler(BaseSeedScheduler):
         }
 
         # Preserve explicit novelty flags if caller computed them.
-        for key in ("new_coverage", "new_bug", "crash", "timeout"):
+        for key in (
+            "new_coverage",
+            "new_bug",
+            "new_bug_site",
+            "new_exception_site",
+            "new_differential_behavior",
+            "crash",
+            "timeout",
+            "coverage_source",
+        ):
             if key in signals:
                 out[key] = signals[key]
             elif key in closed:

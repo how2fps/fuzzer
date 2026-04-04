@@ -12,18 +12,17 @@ from .lib import (
     bit_flip,
     clone_block_mutation,
     delete_block_mutation,
-    generate_ip_input,
-    generate_json_input,
+    generate_from_grammar,
     interesting_value_mutation,
+    resolve_grammar_spec,
 )
 
 ByteMutationFn = Callable[..., bytes]
 
 
 def _generate_seed_text(*, mutator_kind: str, rng: random.Random) -> str:
-    if mutator_kind == "ip":
-        return generate_ip_input(rng=rng)
-    return generate_json_input(rng=rng)
+    grammar_spec = resolve_grammar_spec(kind=mutator_kind)
+    return generate_from_grammar(grammar_spec=grammar_spec, rng=rng)
 
 
 def _run_byte_havoc(*, data: bytes, rng: random.Random) -> bytes:

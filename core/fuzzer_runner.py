@@ -55,6 +55,7 @@ def run_fuzzer(
     configure_runtime_grammar(
         kind=effective_mutator,
         grammar_path=config["grammar_path"],
+        ast_grammar_path=config["ast_grammar_path"],
     )
 
     rng = random.Random(
@@ -107,7 +108,6 @@ def run_fuzzer(
         parser_config=config.get("parser_config"),  # type: ignore[arg-type]
     )
 
-    # Save the config used for this run into the results folder
     config_dest = results_folder / "config.json"
     if config_path is not None:
         shutil.copy2(config_path, config_dest)

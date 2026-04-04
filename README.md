@@ -70,6 +70,10 @@ python main.py --config configs/my_run.json
 # Run one config file 5 times
 python main.py --config configs/my_run.json --runs 5
 
+# Or store the repeat count in the config itself
+# { "batch": { "runs": 5 }, ... }
+python main.py --config configs/my_run.json
+
 # Run all configs in a target folder (non-recursive), 3 times each
 python main.py --configs-dir configs/rerun_allcombos_sched_mut_cov_power_alltargets --runs 3
 ```

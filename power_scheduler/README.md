@@ -123,12 +123,13 @@ This draws a seed identifier at random, with probability proportional to its ass
 import random
 from typing import List
 
-from mutator.versions.lib import mutate_json_input
+from mutator.versions.lib import mutate_text_with_grammar, resolve_grammar_spec
 from parser import run_parser
 from power_scheduler import SeedStats, compute_power_schedule, pick_seed_id
 
 
 def fuzz_loop(seed_corpus: list[str], max_iterations: int) -> None:
+    grammar_spec = resolve_grammar_spec(kind="grammar")
     # Initialise simple per-seed stats.
     stats: List[SeedStats] = [
         {
@@ -148,7 +149,10 @@ def fuzz_loop(seed_corpus: list[str], max_iterations: int) -> None:
 
         entry = stats[seed_id]
         original = seed_corpus[seed_id]
-        mutated = mutate_json_input(original_text=original)
+        mutated = mutate_text_with_grammar(
+            original_text=original,
+            grammar_spec=grammar_spec,
+        )
         payload = mutated.encode("utf-8")
 
         result = run_parser(input_data=payload, target="json-decoder", timeout=5.0)

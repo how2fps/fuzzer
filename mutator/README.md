@@ -8,14 +8,9 @@ This package contains grammar‑aware generators and byte‑level mutators that 
 
 ```python
 from mutator.versions.lib import (
-    generate_json_input,
-    generate_ip_input,
-    generate_ipv4_input,
-    generate_ipv6_input,
-    mutate_json_input,
-    mutate_ip_input,
-    mutate_ipv4_input,
-    mutate_ipv6_input,
+    generate_from_grammar,
+    mutate_text_with_grammar,
+    resolve_grammar_spec,
     bit_flip,
     arithmetic_mutation,
     interesting_value_mutation,
@@ -26,58 +21,31 @@ from mutator.versions.lib import (
 
 Everything is plain functions with type hints; there is no class state to manage.
 
-### JSON fuzzing
+### Grammar-driven fuzzing
 
-- **Generate fresh JSON from the grammar**:
+- **Generate fresh input from the active grammar**:
 
 ```python
-seed = generate_json_input()
+grammar_spec = resolve_grammar_spec(kind="grammar")
+seed = generate_from_grammar(grammar_spec=grammar_spec)
 data = seed.encode("utf-8")
 ```
 
-- **Mutate an existing JSON string, staying grammar‑shaped**:
+- **Mutate an existing seed while staying grammar-aware**:
 
 ```python
-next_seed = mutate_json_input(original_text=seed)
+next_seed = mutate_text_with_grammar(
+    original_text=seed,
+    grammar_spec=grammar_spec,
+)
 data = next_seed.encode("utf-8")
 ```
 
-`max_depth` controls how deeply recursive the JSON structures get, and `regenerate_probability` controls how often a completely new sample is generated instead of editing the old one.
-
-### IP fuzzing (IPv4 + IPv6)
-
-You can either fuzz both families together or focus on one.
-
-- **Any IP (v4 or v6, with optional prefix)**:
-
-```python
-ip_seed = generate_ip_input()          # may be IPv4 or IPv6
-ip_next = mutate_ip_input(original_text=ip_seed)
-```
-
-- **IPv4‑only**:
-
-```python
-ipv4_seed = generate_ipv4_input()
-ipv4_next = mutate_ipv4_input(original_text=ipv4_seed)
-```
-
-- **IPv6‑only**:
-
-```python
-ipv6_seed = generate_ipv6_input()
-ipv6_next = mutate_ipv6_input(original_text=ipv6_seed)
-```
-
-All IP helpers produce strings; encode to bytes before sending to a target:
-
-```python
-payload = ipv4_next.encode("utf-8")
-```
+`max_depth` controls how deeply recursive generated structures get, and `regenerate_probability` controls how often a completely new sample is generated instead of editing the old one.
 
 ### Byte‑level mutation primitives
 
-These helpers work on raw `bytes`/`bytearray` and are format‑agnostic, so you can layer them on top of JSON/IP generators or use them directly for binary fuzzing.
+These helpers work on raw `bytes`/`bytearray` and are format‑agnostic, so you can layer them on top of grammar-generated inputs or use them directly for binary fuzzing.
 
 - **Bit flip in a random byte**:
 
@@ -91,7 +59,7 @@ mutated = bit_flip(data=payload)
 mutated = arithmetic_mutation(data=payload)
 ```
 
-- **Replace one byte with an “interesting” value (0x00, 0xFF, etc.)**:
+- **Replace one byte with an “interesting” value (0x01, 0xFF, etc.)**:
 
 ```python
 mutated = interesting_value_mutation(data=payload)
@@ -115,24 +83,31 @@ All mutators are pure functions: they return new `bytes` and never modify the or
 
 ```python
 import random
-from mutator.versions.lib import generate_json_input, mutate_json_input, bit_flip
+from mutator.versions.lib import (
+    bit_flip,
+    generate_from_grammar,
+    mutate_text_with_grammar,
+    resolve_grammar_spec,
+)
 
 def fuzz_one_iteration(previous_seed: str | None) -> bytes:
+    grammar_spec = resolve_grammar_spec(kind="grammar")
     if previous_seed is None:
-        seed = generate_json_input()
+        seed = generate_from_grammar(grammar_spec=grammar_spec)
     else:
-        seed = mutate_json_input(original_text=previous_seed)
+        seed = mutate_text_with_grammar(
+            original_text=previous_seed,
+            grammar_spec=grammar_spec,
+        )
     payload = seed.encode("utf-8")
     if random.random() < 0.5:
         payload = bit_flip(data=payload)
     return payload
 ```
 
-You can adapt the same pattern for `generate_ip_input`/`mutate_ip_input` (or the v4/v6‑specific variants) depending on which targets you are fuzzing.
-
 ### Mutator versions
 
-- `base`: grammar-shaped JSON/IP mutation
+- `base`: grammar-driven text mutation
 - `byte_havoc`: AFL-style byte-level mutations
 - `grammar_ast`: generalized grammar-AST mutator inspired by `mutator_test.py`; mutates generic grammar node classes (`Sequence`, `Alternation`, `Repeat`, `Literal`, `Ref`, etc.), supports extra DSL rules via `-g/--grammar-rules-file`, and can now parse a seed into an exact derivation tree under an explicit grammar start rule via `parse_from_rule(...)` / `mutate_from_rule(...)`
 

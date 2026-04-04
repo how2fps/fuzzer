@@ -134,6 +134,17 @@ def get_covered_edges_from_result(result: Mapping[str, Any]) -> set[tuple[str, i
     return _get_covered_edges(coverage_source)
 
 
+def get_coverage_source_kind_from_result(result: Mapping[str, Any]) -> str:
+    """Return `closed`, `open`, or `none` for the coverage source selected for a result."""
+    closed_raw = result.get("closed_result") if isinstance(result, Mapping) else None
+    closed = _as_mapping(closed_raw)
+    if closed is None:
+        return "none"
+    open_raw = result.get("open_result") if isinstance(result, Mapping) else None
+    open_res = _as_mapping(open_raw) if open_raw is not None else None
+    return _coverage_source_kind(closed=closed, open_res=open_res)
+
+
 def _has_coverage_fields(value: Mapping[str, Any] | None) -> bool:
     if value is None:
         return False
@@ -143,14 +154,26 @@ def _has_coverage_fields(value: Mapping[str, Any] | None) -> bool:
     return covered is not None and missing is not None and isinstance(details, Sequence)
 
 
+def _coverage_source_kind(
+    *,
+    closed: Mapping[str, Any],
+    open_res: Mapping[str, Any] | None,
+) -> str:
+    if _has_coverage_fields(closed):
+        return "closed"
+    if _has_coverage_fields(open_res):
+        return "open"
+    return "none"
+
+
 def _select_coverage_source(
     *,
     closed: Mapping[str, Any],
     open_res: Mapping[str, Any] | None,
 ) -> Mapping[str, Any]:
-    if _has_coverage_fields(closed):
+    if _coverage_source_kind(closed=closed, open_res=open_res) == "closed":
         return closed
-    if _has_coverage_fields(open_res):
+    if _coverage_source_kind(closed=closed, open_res=open_res) == "open":
         return open_res
     return closed
 
@@ -256,6 +279,80 @@ def _rare_bug_score(repeat_count: int | None) -> float:
     return 1.0 / (1.0 + repeat_count)
 
 
+def _repeat_bug_site_count(
+    conn: sqlite3.Connection,
+    closed_status: str,
+    closed_bug: Mapping[str, Any] | None,
+    target: str,
+) -> int | None:
+    if closed_status not in {"bug", "crash", "timeout", "error"}:
+        return None
+    if not closed_bug:
+        return None
+    file_ = closed_bug.get("file") or ""
+    line_raw = closed_bug.get("line")
+    line = None
+    if line_raw is not None:
+        try:
+            line = int(line_raw)
+        except (TypeError, ValueError):
+            line = None
+    if not file_ and line is None:
+        return None
+    try:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+              AND COALESCE(file, '') = COALESCE(?, '')
+              AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
+            """,
+            (target, file_, line, line),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return None
+
+
+def _repeat_exception_site_count(
+    conn: sqlite3.Connection,
+    closed_status: str,
+    closed_bug: Mapping[str, Any] | None,
+    target: str,
+) -> int | None:
+    if closed_status not in {"bug", "crash", "timeout", "error"}:
+        return None
+    if not closed_bug:
+        return None
+    exc = closed_bug.get("exception") or ""
+    file_ = closed_bug.get("file") or ""
+    line_raw = closed_bug.get("line")
+    line = None
+    if line_raw is not None:
+        try:
+            line = int(line_raw)
+        except (TypeError, ValueError):
+            line = None
+    if not exc:
+        return None
+    try:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE target = ? AND status IN ('bug', 'crash', 'timeout', 'error')
+              AND COALESCE(exception, '') = COALESCE(?, '')
+              AND COALESCE(file, '') = COALESCE(?, '')
+              AND ((line IS NOT NULL AND line = ?) OR (line IS NULL AND ? IS NULL))
+            """,
+            (target, exc, file_, line, line),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return None
+
+
 def compute_interestingness(
     *,
     result: Mapping[str, Any],
@@ -297,6 +394,7 @@ def compute_interestingness(
     open_bug = _as_mapping(open_res.get("bug_signature")) if open_res else None
 
     coverage_source = _select_coverage_source(closed=closed, open_res=open_res)
+    coverage_source_kind = _coverage_source_kind(closed=closed, open_res=open_res)
     covered_branches = coverage_source.get("covered_branches")
     missing_branches = coverage_source.get("missing_branches")
 
@@ -316,10 +414,16 @@ def compute_interestingness(
         missing_branches=missing_branches,
     )
     repeat_bug_count: int | None = None
+    repeat_bug_site_count: int | None = None
+    repeat_exception_site_count: int | None = None
     s_new = 0.0
     s_rare = 0.0
+    s_bug_site = 0.0
+    s_exception_site = 0.0
     new_edge_weight = 2.0
     rare_bug_weight = 0.9
+    bug_site_weight = 1.2
+    exception_site_weight = 0.7
     metric_max = 2.0 + (1.0 if has_coverage_counts else 0.0)
 
     if sqlite_conn is not None:
@@ -328,9 +432,22 @@ def compute_interestingness(
             repeat_bug_count = _repeat_bug_count(
                 sqlite_conn, closed_status, closed_bug, target
             )
+            repeat_bug_site_count = _repeat_bug_site_count(
+                sqlite_conn, closed_status, closed_bug, target
+            )
+            repeat_exception_site_count = _repeat_exception_site_count(
+                sqlite_conn, closed_status, closed_bug, target
+            )
             s_new = _new_edges_score(sqlite_conn, edges)
             s_rare = _rare_bug_score(repeat_bug_count)
-            metric_max += new_edge_weight + rare_bug_weight
+            s_bug_site = _rare_bug_score(repeat_bug_site_count)
+            s_exception_site = _rare_bug_score(repeat_exception_site_count)
+            metric_max += (
+                new_edge_weight
+                + rare_bug_weight
+                + bug_site_weight
+                + exception_site_weight
+            )
         except (sqlite3.Error, OSError):
             pass
     elif db_path and Path(db_path).exists():
@@ -342,9 +459,22 @@ def compute_interestingness(
                 repeat_bug_count = _repeat_bug_count(
                     conn, closed_status, closed_bug, target
                 )
+                repeat_bug_site_count = _repeat_bug_site_count(
+                    conn, closed_status, closed_bug, target
+                )
+                repeat_exception_site_count = _repeat_exception_site_count(
+                    conn, closed_status, closed_bug, target
+                )
                 s_new = _new_edges_score(conn, edges)
                 s_rare = _rare_bug_score(repeat_bug_count)
-                metric_max += new_edge_weight + rare_bug_weight
+                s_bug_site = _rare_bug_score(repeat_bug_site_count)
+                s_exception_site = _rare_bug_score(repeat_exception_site_count)
+                metric_max += (
+                    new_edge_weight
+                    + rare_bug_weight
+                    + bug_site_weight
+                    + exception_site_weight
+                )
             finally:
                 conn.close()
         except (sqlite3.Error, OSError):
@@ -353,13 +483,30 @@ def compute_interestingness(
     # Keep rewarding novel coverage signals, but damp bug-related rewards when
     # the same bug signature has already been observed many times.
     repeated_bug_factor = _repeat_bug_factor(repeat_bug_count)
-    metric_sum = ((s_status + s_diff) * repeated_bug_factor) + s_cov
-    metric_sum += (s_new * new_edge_weight) + (s_rare * rare_bug_weight)
+    support_signal = max(
+        (s_status * repeated_bug_factor),
+        s_diff,
+        s_bug_site,
+        s_exception_site,
+        s_rare,
+    )
+    coverage_factor = 1.0
+    if coverage_source_kind == "open":
+        coverage_factor = 0.2 + (0.8 * support_signal)
+    metric_sum = ((s_status + s_diff) * repeated_bug_factor) + (s_cov * coverage_factor)
+    metric_sum += (s_new * new_edge_weight * coverage_factor)
+    metric_sum += (s_rare * rare_bug_weight)
+    metric_sum += (s_bug_site * bug_site_weight) + (
+        s_exception_site * exception_site_weight
+    )
 
     if metric_max <= 0.0:
         return 0.0
     weighted_score = metric_sum / metric_max
-    # Blend through s_new so any positive new-coverage signal becomes a lower
-    # bound on the final score instead of just another additive term.
-    score = s_new + ((1.0 - s_new) * weighted_score)
+    if coverage_source_kind == "open":
+        score = weighted_score
+    else:
+        # Blend through s_new so any positive new-coverage signal becomes a lower
+        # bound on the final score instead of just another additive term.
+        score = s_new + ((1.0 - s_new) * weighted_score)
     return max(0.0, min(1.0, float(score)))

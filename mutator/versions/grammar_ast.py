@@ -5,7 +5,7 @@ This version keeps the grammar DSL and generic node-type mutation operators:
 Literal, CharClass, Sequence, Alternation, Repeat, NumberRange, and Ref.
 
 The seed is used to:
-- choose a sensible start rule (JSON object/value, IPv4/IPv6 with or without CIDR)
+- choose a sensible start rule from grammar structure
 - bias which grammar rules are mutated more often
 - optionally blend the generated candidate back with the original seed
 
@@ -16,7 +16,6 @@ wrapped so generated outputs can naturally reach the mutation overlay.
 from __future__ import annotations
 
 import copy
-import ipaddress
 import json
 import random
 import re
@@ -24,8 +23,17 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
+from .lib import resolve_ast_grammar_spec, runtime_grammar_version
+
 _PRINTABLE_ASCII = [chr(code) for code in range(32, 127)]
 _GRAMMAR_RULES_FILE: str | None = None
+_DEFAULT_MAX_GENERATION_DEPTH = 5
+
+
+def _normalize_rule_name(name: str) -> str:
+    if name.startswith("<") and name.endswith(">") and len(name) >= 3:
+        return name[1:-1]
+    return name
 
 
 class Node:
@@ -51,9 +59,6 @@ class SeedTreeNode:
         return [self]
 
     def to_text(self) -> str:
-        raise NotImplementedError
-
-    def to_json_value(self) -> object:
         raise NotImplementedError
 
 
@@ -126,11 +131,6 @@ class ParseTreeNode(SeedTreeNode):
         if self.kind in {"alternation", "ref"}:
             return self.children[0].to_text() if self.children else self.text
         return self.text
-
-    def to_json_value(self) -> object:
-        """Best-effort JSON conversion for compatibility with SeedTreeNode."""
-        return self.to_text()
-
 
 class Literal(Node):
     """A fixed terminal string in the grammar."""
@@ -325,7 +325,7 @@ def tokenize(expr: str) -> list[tuple[str, str]]:
         ("NUMRANGE", r"<number_range\s+min=[^ >]+\s+max=[^>]+>"),
         ("CLASS", r"\[[^\]]+\]"),
         ("REPEAT", r"\{\d+(,\d+)?\}"),
-        ("REF", r"<[A-Za-z_][A-Za-z0-9_]*>"),
+        ("REF", r"<[^<>]+>"),
         ("ALT", r"\|"),
         ("LPAREN", r"\("),
         ("RPAREN", r"\)"),
@@ -373,11 +373,11 @@ def parse(expr: str) -> Node:
         position += 1
 
         if token_type == "STRING":
-            node: Node = Literal(raw[1:-1])
+            node = Literal(json.loads(raw))
         elif token_type == "CLASS":
             node = _parse_char_class(raw[1:-1])
         elif token_type == "REF":
-            node = Ref(raw[1:-1])
+            node = Ref(_normalize_rule_name(raw))
         elif token_type == "NUMRANGE":
             match = re.fullmatch(r"<number_range\s+min=([^\s]+)\s+max=([^\s]+)>", raw)
             if match is None:
@@ -406,18 +406,158 @@ def parse(expr: str) -> Node:
     return parse_expr()
 
 
+class _GenerationError(RuntimeError):
+    pass
+
+
 class Grammar:
     """Container for named grammar rules plus generation/mutation helpers."""
-    def __init__(self) -> None:
+
+    def __init__(
+        self,
+        *,
+        start_rule: str | None = None,
+        recursive_rule_names: set[str] | None = None,
+    ) -> None:
         self.rules: dict[str, Node] = {}
+        self.start_rule = (
+            _normalize_rule_name(start_rule) if start_rule is not None else None
+        )
+        self.recursive_rule_names = {
+            _normalize_rule_name(name) for name in (recursive_rule_names or set())
+        }
 
     def add(self, name: str, expr: str) -> None:
-        self.rules[name] = parse(expr)
+        self.rules[_normalize_rule_name(name)] = parse(expr)
 
-    def generate(self, start: str, rng: random.Random) -> str:
-        if start not in self.rules:
-            raise KeyError(f"unknown grammar start rule {start!r}")
-        return self.rules[start].generate(self.rules, rng)
+    def _generate_rule(
+        self,
+        name: str,
+        rng: random.Random,
+        *,
+        active_counts: dict[str, int],
+        max_depth: int,
+    ) -> str:
+        normalized_name = _normalize_rule_name(name)
+        if normalized_name not in self.rules:
+            raise KeyError(f"unknown grammar start rule {normalized_name!r}")
+
+        next_counts = active_counts
+        if normalized_name in self.recursive_rule_names:
+            current_depth = active_counts.get(normalized_name, 0)
+            if current_depth >= max_depth:
+                raise _GenerationError(f"generation depth exceeded for {normalized_name!r}")
+            next_counts = dict(active_counts)
+            next_counts[normalized_name] = current_depth + 1
+
+        return self._generate_node(
+            self.rules[normalized_name],
+            rng,
+            active_counts=next_counts,
+            max_depth=max_depth,
+        )
+
+    def _generate_node(
+        self,
+        node: Node,
+        rng: random.Random,
+        *,
+        active_counts: dict[str, int],
+        max_depth: int,
+    ) -> str:
+        if isinstance(node, Literal):
+            return node.value
+        if isinstance(node, CharClass):
+            if not node.chars:
+                return ""
+            return rng.choice(node.chars)
+        if isinstance(node, NumberRange):
+            low = min(node.min_val, node.max_val)
+            high = max(node.min_val, node.max_val)
+            if node.is_int:
+                return str(rng.randint(int(low), int(high)))
+            return str(rng.uniform(low, high))
+        if isinstance(node, Sequence):
+            return "".join(
+                self._generate_node(
+                    child,
+                    rng,
+                    active_counts=active_counts,
+                    max_depth=max_depth,
+                )
+                for child in node.nodes
+            )
+        if isinstance(node, Alternation):
+            options = list(node.options)
+            if not options:
+                return ""
+            for option in rng.sample(options, k=len(options)):
+                try:
+                    return self._generate_node(
+                        option,
+                        rng,
+                        active_counts=active_counts,
+                        max_depth=max_depth,
+                    )
+                except _GenerationError:
+                    continue
+            raise _GenerationError("no viable alternation branch")
+        if isinstance(node, Repeat):
+            low = min(node.min_r, node.max_r)
+            high = max(node.min_r, node.max_r)
+            counts = list(range(low, high + 1))
+            for count in sorted(counts, key=lambda item: (item, rng.random())):
+                try:
+                    return "".join(
+                        self._generate_node(
+                            node.node,
+                            rng,
+                            active_counts=active_counts,
+                            max_depth=max_depth,
+                        )
+                        for _ in range(count)
+                    )
+                except _GenerationError:
+                    continue
+            raise _GenerationError("no viable repeat count")
+        if isinstance(node, Ref):
+            if node.name not in self.rules:
+                return ""
+            return self._generate_rule(
+                node.name,
+                rng,
+                active_counts=active_counts,
+                max_depth=max_depth,
+            )
+        return ""
+
+    def generate(
+        self,
+        start: str,
+        rng: random.Random,
+        *,
+        max_depth: int = _DEFAULT_MAX_GENERATION_DEPTH,
+    ) -> str:
+        return self._generate_rule(
+            start,
+            rng,
+            active_counts={},
+            max_depth=max_depth,
+        )
+
+    def generate_from_node(
+        self,
+        node: Node,
+        rng: random.Random,
+        *,
+        max_depth: int = _DEFAULT_MAX_GENERATION_DEPTH,
+    ) -> str:
+        return self._generate_node(
+            node,
+            rng,
+            active_counts={},
+            max_depth=max_depth,
+        )
 
     def mutate(
         self,
@@ -461,11 +601,15 @@ def _generate_parse_subtree_from_node(
 ) -> ParseTreeNode:
     """Generate and re-parse one grammar-node subtree for add/replace edits."""
     for _ in range(8):
-        generated = node.generate(grammar.rules, rng)
+        generated = grammar.generate_from_node(node, rng)
         parsed = _match_exact_node(node=node, text=generated, grammar=grammar)
         if parsed is not None:
             return parsed
-    return ParseTreeNode(kind="literal", text=node.generate(grammar.rules, rng), grammar_node=node)
+    return ParseTreeNode(
+        kind="literal",
+        text=grammar.generate_from_node(node, rng),
+        grammar_node=node,
+    )
 
 
 def _mutate_sequence_parse_node(
@@ -811,21 +955,38 @@ def _candidate_start_rules(grammar: Grammar, start_rule: str) -> list[str]:
     return candidates
 
 
-def parse_from_rule(*, text: str, start_rule: str) -> ParseTreeNode | None:
+def parse_from_rule(
+    *,
+    text: str,
+    start_rule: str,
+    mutator_kind: str = "grammar",
+) -> ParseTreeNode | None:
     """Parse seed text into a derivation tree under one explicit grammar rule.
 
     This is the generic path for new formats supplied via external grammar
     files: if a caller can name the right start rule, the mutator can attempt
     exact tree recovery from the seed before mutating it.
     """
-    grammar = _base_grammar()
-    if start_rule not in grammar.rules:
-        raise KeyError(f"unknown grammar start rule {start_rule!r}")
-    for candidate_rule in _candidate_start_rules(grammar, start_rule):
-        matched = _match_exact_node(node=grammar.rules[candidate_rule], text=text, grammar=grammar)
+    normalized_start_rule = _normalize_rule_name(start_rule)
+    grammar = _resolved_base_grammar(mutator_kind=mutator_kind)
+    if normalized_start_rule not in grammar.rules:
+        raise KeyError(f"unknown grammar start rule {normalized_start_rule!r}")
+    matched = _match_exact_node(
+        node=grammar.rules[normalized_start_rule],
+        text=text,
+        grammar=grammar,
+    )
+    if matched is not None:
+        return matched
+    for candidate_rule in _candidate_start_rules(grammar, normalized_start_rule):
+        if candidate_rule == normalized_start_rule:
+            continue
+        matched = _match_exact_node(
+            node=grammar.rules[candidate_rule],
+            text=text,
+            grammar=grammar,
+        )
         if matched is not None:
-            if candidate_rule == start_rule:
-                return matched
             return ParseTreeNode(
                 kind="ref",
                 text=text,
@@ -836,278 +997,76 @@ def parse_from_rule(*, text: str, start_rule: str) -> ParseTreeNode | None:
     return None
 
 
-@dataclass
-class JsonStringNode(SeedTreeNode):
-    value: str
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        literal = Literal(self.value)
-        literal.mutate(grammar.rules, rng)
-        self.value = literal.value
-        return self
-
-    def to_text(self) -> str:
-        return json.dumps(self.value, separators=(",", ":"))
-
-    def to_json_value(self) -> object:
-        return self.value
+def _default_start_rule(grammar: Grammar) -> str:
+    return grammar.start_rule or next(iter(grammar.rules))
 
 
-@dataclass
-class JsonNumberNode(SeedTreeNode):
-    value: int | float
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        if isinstance(self.value, int) and not isinstance(self.value, bool):
-            self.value += rng.randint(-10, 10)
-        else:
-            self.value += rng.uniform(-5.0, 5.0)
-        return self
-
-    def to_text(self) -> str:
-        return json.dumps(self.value, separators=(",", ":"))
-
-    def to_json_value(self) -> object:
-        return self.value
+def _parse_tree_root_wrapper_depth(node: ParseTreeNode) -> int:
+    depth = 0
+    current = node
+    while current.kind in {"ref", "alternation"} and len(current.children) == 1:
+        depth += 1
+        current = current.children[0]
+    return depth
 
 
-@dataclass
-class JsonBoolNode(SeedTreeNode):
-    value: bool
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        self.value = not self.value
-        return self
-
-    def to_text(self) -> str:
-        return "true" if self.value else "false"
-
-    def to_json_value(self) -> object:
-        return self.value
+def _parse_tree_text_span(node: ParseTreeNode) -> int:
+    return len(node.text)
 
 
-class JsonNullNode(SeedTreeNode):
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        return rng.choice(
-            [
-                JsonBoolNode(False),
-                JsonNumberNode(0),
-                JsonStringNode(""),
-                JsonArrayNode([]),
-            ]
+def _exact_parse_profile(
+    *,
+    text: str,
+    grammar: Grammar,
+    requested_start_rule: str,
+) -> tuple[str, ParseTreeNode] | None:
+    normalized_start_rule = _normalize_rule_name(requested_start_rule)
+    candidate_rules = _candidate_start_rules(grammar, normalized_start_rule)
+    best_match: tuple[tuple[int, int, int, int, str], str, ParseTreeNode] | None = None
+    for order, candidate_rule in enumerate(candidate_rules):
+        matched = _match_exact_node(
+            node=grammar.rules[candidate_rule],
+            text=text,
+            grammar=grammar,
         )
-
-    def to_text(self) -> str:
-        return "null"
-
-    def to_json_value(self) -> object:
+        if matched is None:
+            continue
+        score = (
+            _parse_tree_root_wrapper_depth(matched),
+            -_rule_complexity(grammar.rules[candidate_rule]),
+            -_parse_tree_text_span(matched),
+            order,
+            candidate_rule,
+        )
+        if best_match is None or score < best_match[0]:
+            best_match = (score, candidate_rule, matched)
+    if best_match is None:
         return None
+    return (best_match[1], best_match[2])
 
 
-@dataclass
-class JsonArrayNode(SeedTreeNode):
-    items: list[SeedTreeNode]
-
-    def walk_mutable_nodes(self) -> list[SeedTreeNode]:
-        nodes: list[SeedTreeNode] = [self]
-        for item in self.items:
-            nodes.extend(item.walk_mutable_nodes())
-        return nodes
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        action = rng.choice(["append", "drop", "duplicate"])
-        if action == "append":
-            self.items.append(_generate_json_seed_subtree(grammar, "value", rng))
-        elif action == "drop" and self.items:
-            self.items.pop(rng.randrange(len(self.items)))
-        elif action == "duplicate" and self.items:
-            self.items.insert(rng.randrange(len(self.items) + 1), copy.deepcopy(rng.choice(self.items)))
-        return self
-
-    def to_text(self) -> str:
-        return json.dumps(self.to_json_value(), separators=(",", ":"))
-
-    def to_json_value(self) -> object:
-        return [item.to_json_value() for item in self.items]
-
-
-@dataclass
-class JsonPairNode(SeedTreeNode):
-    key: JsonStringNode
-    value: SeedTreeNode
-
-    def walk_mutable_nodes(self) -> list[SeedTreeNode]:
-        return [self, *self.key.walk_mutable_nodes(), *self.value.walk_mutable_nodes()]
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        action = rng.choice(["key", "value", "replace_value"])
-        if action == "key":
-            self.key = copy.deepcopy(self.key)
-            self.key.mutate_self(rng, grammar)
-        elif action == "replace_value":
-            self.value = _generate_json_seed_subtree(grammar, "value", rng)
-        else:
-            self.value = copy.deepcopy(self.value)
-            self.value = self.value.mutate_self(rng, grammar)
-        return self
-
-    def to_text(self) -> str:
-        return f"{self.key.to_text()}:{self.value.to_text()}"
-
-    def to_json_value(self) -> object:
-        return (self.key.value, self.value.to_json_value())
-
-
-@dataclass
-class JsonObjectNode(SeedTreeNode):
-    pairs: list[JsonPairNode]
-
-    def walk_mutable_nodes(self) -> list[SeedTreeNode]:
-        nodes: list[SeedTreeNode] = [self]
-        for pair in self.pairs:
-            nodes.extend(pair.walk_mutable_nodes())
-        return nodes
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        action = rng.choice(["add_pair", "drop_pair", "duplicate_pair"])
-        if action == "add_pair":
-            key_seed = _generate_json_seed_subtree(grammar, "string", rng)
-            if isinstance(key_seed, JsonStringNode):
-                key = key_seed
-            else:
-                key = JsonStringNode("k")
-            self.pairs.append(JsonPairNode(key=key, value=_generate_json_seed_subtree(grammar, "value", rng)))
-        elif action == "drop_pair" and self.pairs:
-            self.pairs.pop(rng.randrange(len(self.pairs)))
-        elif action == "duplicate_pair" and self.pairs:
-            self.pairs.insert(rng.randrange(len(self.pairs) + 1), copy.deepcopy(rng.choice(self.pairs)))
-        return self
-
-    def to_text(self) -> str:
-        return json.dumps(self.to_json_value(), separators=(",", ":"))
-
-    def to_json_value(self) -> object:
-        out: dict[str, object] = {}
-        for pair in self.pairs:
-            key, value = pair.to_json_value()
-            out[str(key)] = value
-        return out
-
-
-@dataclass
-class IPv4SeedNode(SeedTreeNode):
-    octets: list[str]
-    prefix: str | None = None
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        action = rng.choice(["octet", "prefix", "separator"])
-        if action == "octet" and self.octets:
-            idx = rng.randrange(len(self.octets))
-            generated = generate_from_rule(
-                start_rule="octet",
-                rng=rng,
-                count=1,
-                preferred_rule_names=["octet"],
-            )
-            if generated:
-                self.octets[idx] = generated[0]
-        elif action == "prefix":
-            if self.prefix is None:
-                generated = generate_from_rule(
-                    start_rule="cidr4",
-                    rng=rng,
-                    count=1,
-                    preferred_rule_names=["cidr4"],
-                )
-                self.prefix = generated[0] if generated else str(rng.randint(0, 32))
-            else:
-                self.prefix = str(max(-1, min(64, int(self.prefix) + rng.randint(-8, 8))))
-        elif self.octets:
-            idx = rng.randrange(len(self.octets))
-            self.octets[idx] = self.octets[idx] + rng.choice([".", ":", "/"])
-        return self
-
-    def to_text(self) -> str:
-        body = ".".join(self.octets)
-        return f"{body}/{self.prefix}" if self.prefix is not None else body
-
-
-@dataclass
-class IPv6SeedNode(SeedTreeNode):
-    hextets: list[str]
-    prefix: str | None = None
-
-    def mutate_self(self, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-        action = rng.choice(["hextet", "prefix", "separator"])
-        if action == "hextet" and self.hextets:
-            idx = rng.randrange(len(self.hextets))
-            generated = generate_from_rule(
-                start_rule="hex",
-                rng=rng,
-                count=1,
-                preferred_rule_names=["hex"],
-            )
-            if generated:
-                self.hextets[idx] = generated[0]
-        elif action == "prefix":
-            if self.prefix is None:
-                generated = generate_from_rule(
-                    start_rule="cidr6",
-                    rng=rng,
-                    count=1,
-                    preferred_rule_names=["cidr6"],
-                )
-                self.prefix = generated[0] if generated else str(rng.randint(0, 128))
-            else:
-                self.prefix = str(max(-1, min(256, int(self.prefix) + rng.randint(-16, 16))))
-        elif self.hextets:
-            idx = rng.randrange(len(self.hextets))
-            self.hextets[idx] = self.hextets[idx] + rng.choice([":", "/", "."])
-        return self
-
-    def to_text(self) -> str:
-        body = ":".join(self.hextets)
-        return f"{body}/{self.prefix}" if self.prefix is not None else body
-
-
-def build() -> Grammar:
-    """Build the default JSON and IP grammar used by grammar_ast."""
-    grammar = Grammar()
-
-    grammar.add("dot", '"."')
-    grammar.add("slash", '"/"')
-    grammar.add("digit", "[0-9]")
-    grammar.add("letter", "[a-zA-Z]")
-    grammar.add("quote", '["]')
-
-    grammar.add(
-        "octet",
-        '("25"[0-5] | "2"[0-4]<digit> | "1"<digit><digit> | <digit>{1,2})',
+def _build_from_ast_spec(*, mutator_kind: str) -> Grammar:
+    ast_grammar_spec = resolve_ast_grammar_spec(kind=mutator_kind)
+    recursive_symbols = ast_grammar_spec.get("recursive_symbols", set())
+    grammar = Grammar(
+        start_rule=str(ast_grammar_spec["start"]),
+        recursive_rule_names=set(recursive_symbols)
+        if isinstance(recursive_symbols, set)
+        else set(recursive_symbols),
     )
-    grammar.add("ipv4", "<octet> <dot> <octet> <dot> <octet> <dot> <octet>")
-    grammar.add("cidr4", "<number_range min=0 max=32>")
-    grammar.add("ipv4_cidr", "<ipv4> <slash> <cidr4>")
-
-    grammar.add("hex", "[0-9a-f]{1,4}")
-    grammar.add(
-        "ipv6",
-        '<hex> ":" <hex> ":" <hex> ":" <hex> ":" <hex> ":" <hex> ":" <hex> ":" <hex>',
-    )
-    grammar.add("cidr6", "<number_range min=0 max=128>")
-    grammar.add("ipv6_cidr", '<ipv6> "/" <cidr6>')
-    grammar.add("ip", "<ipv4_cidr> | <ipv6_cidr> | <ipv4> | <ipv6>")
-
-    grammar.add("string", '<quote> (<letter>|<digit>|"_"|"-"){1,8} <quote>')
-    grammar.add("number", '("-" <digit>{1,3}) | <digit>{1,3}')
-    grammar.add("bool", '"true" | "false"')
-    grammar.add("null", '"null"')
-    grammar.add("scalar", "<string> | <number> | <bool> | <null>")
-    grammar.add("pair", '<string> ":" <scalar>')
-    grammar.add("object", '"{}" | "{" <pair> ("," <pair>){0,3} "}"')
-    grammar.add("array", '"[]" | "[" <scalar> ("," <scalar>){0,3} "]"')
-    grammar.add("value", "<string> | <number> | <array>")
-
+    rules = ast_grammar_spec.get("rules")
+    if not isinstance(rules, dict):
+        raise TypeError("ast grammar spec rules must be a dictionary")
+    for name, expr in rules.items():
+        if not isinstance(name, str) or not isinstance(expr, str):
+            raise TypeError("ast grammar spec rules must map strings to strings")
+        grammar.add(name, expr)
     return grammar
+
+
+def build(*, mutator_kind: str = "grammar") -> Grammar:
+    """Build the AST grammar used by grammar_ast for one mutator kind."""
+    return _build_from_ast_spec(mutator_kind=mutator_kind)
 
 
 def configure(*, grammar_rules_file: str | None) -> None:
@@ -1130,11 +1089,11 @@ def _parse_rule_definition(line: str) -> tuple[str, str]:
     return name.strip(), expr.strip()
 
 
-def _apply_extra_rules(grammar: Grammar) -> None:
+def _apply_extra_rules(grammar: Grammar, *, grammar_rules_file: str | None) -> None:
     """Load additional DSL rules from the configured rules file."""
-    if not _GRAMMAR_RULES_FILE:
+    if not grammar_rules_file:
         return
-    path = Path(_GRAMMAR_RULES_FILE)
+    path = Path(grammar_rules_file)
     with path.open(encoding="utf-8") as handle:
         for raw_line in handle:
             line = raw_line.strip()
@@ -1144,12 +1103,26 @@ def _apply_extra_rules(grammar: Grammar) -> None:
             grammar.add(name, expr)
 
 
-@lru_cache(maxsize=1)
-def _base_grammar() -> Grammar:
+@lru_cache(maxsize=16)
+def _base_grammar(
+    *,
+    mutator_kind: str,
+    grammar_rules_file: str | None,
+    grammar_version: int,
+) -> Grammar:
     """Return the cached base grammar with any external rules applied."""
-    grammar = build()
-    _apply_extra_rules(grammar)
+    del grammar_version
+    grammar = build(mutator_kind=mutator_kind)
+    _apply_extra_rules(grammar, grammar_rules_file=grammar_rules_file)
     return grammar
+
+
+def _resolved_base_grammar(*, mutator_kind: str) -> Grammar:
+    return _base_grammar(
+        mutator_kind=mutator_kind,
+        grammar_rules_file=_GRAMMAR_RULES_FILE,
+        grammar_version=runtime_grammar_version(),
+    )
 
 
 def _expand_preferred_rules(grammar: Grammar, names: list[str]) -> list[str]:
@@ -1157,262 +1130,72 @@ def _expand_preferred_rules(grammar: Grammar, names: list[str]) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
     for name in names:
-        for candidate in (name, f"{name}_mut"):
+        normalized_name = _normalize_rule_name(name)
+        for candidate in (normalized_name, f"{normalized_name}_mut"):
             if candidate in grammar.rules and candidate not in seen:
                 ordered.append(candidate)
                 seen.add(candidate)
     return ordered
 
 
-def _json_value_to_seed_tree(value: object) -> SeedTreeNode:
-    """Convert a parsed Python JSON value into a mutable seed tree."""
-    if isinstance(value, dict):
-        return JsonObjectNode(
-            [
-                JsonPairNode(
-                    key=JsonStringNode(str(key)),
-                    value=_json_value_to_seed_tree(val),
-                )
-                for key, val in value.items()
-            ]
-        )
-    if isinstance(value, list):
-        return JsonArrayNode([_json_value_to_seed_tree(item) for item in value])
-    if isinstance(value, str):
-        return JsonStringNode(value)
-    if isinstance(value, bool):
-        return JsonBoolNode(value)
-    if value is None:
-        return JsonNullNode()
-    if isinstance(value, (int, float)):
-        return JsonNumberNode(value)
-    return JsonStringNode(str(value))
-
-
-def _parse_json_seed_tree(text: str) -> SeedTreeNode | None:
-    """Parse JSON text into a seed tree, or return None on failure."""
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return _json_value_to_seed_tree(parsed)
-
-
-def _parse_ip_seed_tree(text: str) -> SeedTreeNode | None:
-    """Parse IPv4/IPv6 text into a seed tree, or return None on failure."""
-    stripped = text.strip()
-    if not stripped:
-        return None
-    try:
-        if "/" in stripped:
-            interface = ipaddress.ip_interface(stripped)
-            if interface.version == 4:
-                return IPv4SeedNode(
-                    octets=str(interface.ip).split("."),
-                    prefix=str(interface.network.prefixlen),
-                )
-            return IPv6SeedNode(
-                hextets=interface.ip.exploded.split(":"),
-                prefix=str(interface.network.prefixlen),
-            )
-        address = ipaddress.ip_address(stripped)
-        if address.version == 4:
-            return IPv4SeedNode(octets=str(address).split("."))
-        return IPv6SeedNode(hextets=address.exploded.split(":"))
-    except ValueError:
-        return None
-
-
-def _parse_seed_tree(text: str, mutator_kind: str) -> SeedTreeNode | None:
-    """Dispatch seed parsing by family and return a seed tree when possible."""
-    if mutator_kind == "ip":
-        return _parse_ip_seed_tree(text)
-    return _parse_json_seed_tree(text)
-
-
-def _generate_json_seed_subtree(grammar: Grammar, start_rule: str, rng: random.Random) -> SeedTreeNode:
-    """Generate a JSON-shaped subtree for add/replace mutations inside seed trees."""
-    try:
-        generated = generate_from_rule(
-            start_rule=start_rule,
-            rng=rng,
-            count=1,
-            preferred_rule_names=[start_rule],
-        )
-    except KeyError:
-        generated = []
-    if generated:
-        tree = _parse_json_seed_tree(generated[0])
-        if tree is not None:
-            return tree
-    if start_rule == "string":
-        return JsonStringNode("x")
-    if start_rule == "number":
-        return JsonNumberNode(0)
-    if start_rule == "array":
-        return JsonArrayNode([])
-    if start_rule == "object":
-        return JsonObjectNode([])
-    return JsonStringNode("x")
-
-
-def _mutate_seed_tree(tree: SeedTreeNode, rng: random.Random, grammar: Grammar) -> SeedTreeNode:
-    """Pick one parsed seed-tree node and apply its node-type mutation operator."""
+def _mutate_parse_tree(
+    tree: ParseTreeNode,
+    rng: random.Random,
+    grammar: Grammar,
+) -> ParseTreeNode:
+    """Pick one parsed node and apply its generic node-type mutation operator."""
     mutable_nodes = tree.walk_mutable_nodes()
     chosen = rng.choice(mutable_nodes)
     if chosen is tree:
         return tree.mutate_self(rng, grammar)
 
-    def _replace(node: SeedTreeNode) -> SeedTreeNode:
+    def _replace(node: ParseTreeNode) -> ParseTreeNode:
         if node is chosen:
             return node.mutate_self(rng, grammar)
-        if isinstance(node, ParseTreeNode):
-            node.children = [_replace(child) for child in node.children]  # type: ignore[list-item]
-            node.text = node.to_text()
-            return node
-        if isinstance(node, JsonObjectNode):
-            node.pairs = [_replace(pair) for pair in node.pairs]  # type: ignore[list-item]
-            return node
-        if isinstance(node, JsonArrayNode):
-            node.items = [_replace(item) for item in node.items]
-            return node
-        if isinstance(node, JsonPairNode):
-            node.key = _replace(node.key)  # type: ignore[assignment]
-            node.value = _replace(node.value)
-            return node
+        node.children = [_replace(child) for child in node.children]
+        node.text = node.to_text()
         return node
 
-    return _replace(copy.deepcopy(tree))
+    return _replace(tree)
 
 
-def _choose_ip_profile(text: str, grammar: Grammar, rng: random.Random) -> tuple[str, list[str]]:
-    """Infer the most likely IP start rule and preferred rule set from the seed."""
-    stripped = text.strip()
-    detected: str
-    if not stripped:
-        detected = rng.choice(["ipv4_cidr", "ipv6_cidr"])
-    else:
-        try:
-            if "/" in stripped:
-                address_text, _prefix = stripped.rsplit("/", 1)
-                try:
-                    ipaddress.IPv4Address(address_text)
-                    detected = "ipv4_cidr"
-                except ValueError:
-                    ipaddress.IPv6Address(address_text)
-                    detected = "ipv6_cidr"
-            else:
-                try:
-                    ipaddress.IPv4Address(stripped)
-                    detected = "ipv4"
-                except ValueError:
-                    ipaddress.IPv6Address(stripped)
-                    detected = "ipv6"
-        except ValueError:
-            if ":" in stripped:
-                detected = "ipv6_cidr" if "/" in stripped else "ipv6"
-            elif "." in stripped:
-                detected = "ipv4_cidr" if "/" in stripped else "ipv4"
-            else:
-                detected = "ip"
-
-    start_candidates = {
-        "ipv4": ["ipv4", "ipv4_start", "ip_start", "ip"],
-        "ipv4_cidr": ["ipv4_cidr", "ipv4_start", "ip_start", "ip"],
-        "ipv6": ["ipv6", "ipv6_start", "ip_start", "ip"],
-        "ipv6_cidr": ["ipv6_cidr", "ipv6_start", "ip_start", "ip"],
-        "ip": ["ip_start", "ip", "ipv4_cidr", "ipv6_cidr"],
-    }
-    preferred_candidates = {
-        "ipv4": ["ipv4", "octet", "dot"],
-        "ipv4_cidr": ["ipv4_cidr", "ipv4", "octet", "dot", "cidr4", "slash"],
-        "ipv6": ["ipv6", "hex"],
-        "ipv6_cidr": ["ipv6_cidr", "ipv6", "hex", "cidr6", "slash"],
-        "ip": ["ip", "ipv4_cidr", "ipv6_cidr", "octet", "hex", "cidr4", "cidr6"],
-    }
-    start_rule = next(
-        (name for name in start_candidates[detected] if name in grammar.rules),
-        "ip" if "ip" in grammar.rules else next(iter(grammar.rules)),
-    )
-    preferred = _expand_preferred_rules(grammar, preferred_candidates[detected])
-    return start_rule, preferred
+def _collect_direct_ref_names(node: Node) -> set[str]:
+    if isinstance(node, Ref):
+        return {node.name}
+    if isinstance(node, Sequence):
+        out: set[str] = set()
+        for child in node.nodes:
+            out.update(_collect_direct_ref_names(child))
+        return out
+    if isinstance(node, Alternation):
+        out: set[str] = set()
+        for option in node.options:
+            out.update(_collect_direct_ref_names(option))
+        return out
+    if isinstance(node, Repeat):
+        return _collect_direct_ref_names(node.node)
+    return set()
 
 
-def _choose_json_profile(text: str, grammar: Grammar) -> tuple[str, list[str]]:
-    """Infer the most likely JSON start rule and preferred rule set from the seed."""
-    stripped = text.strip()
-    parsed: object | None
-    if not stripped:
-        detected = "object"
-        preferred_names = ["object", "pair", "string", "scalar", "number", "bool", "null"]
-        start_rule = next(
-            (name for name in ["json_start", "object", "value"] if name in grammar.rules),
-            "object" if "object" in grammar.rules else next(iter(grammar.rules)),
-        )
-        preferred = _expand_preferred_rules(grammar, preferred_names)
-        return start_rule, preferred
-    try:
-        parsed = json.loads(stripped) if stripped else None
-    except json.JSONDecodeError:
-        parsed = None
-
-    if isinstance(parsed, dict):
-        detected = "object"
-        preferred_names = ["object", "pair", "string", "scalar", "number", "bool", "null"]
-    elif isinstance(parsed, list):
-        detected = "array"
-        preferred_names = ["array", "scalar", "string", "number", "bool", "null"]
-    elif isinstance(parsed, str):
-        detected = "string"
-        preferred_names = ["value", "scalar", "string"]
-    elif isinstance(parsed, bool):
-        detected = "bool"
-        preferred_names = ["value", "scalar", "bool"]
-    elif parsed is None and stripped == "null":
-        detected = "null"
-        preferred_names = ["value", "scalar", "null"]
-    elif isinstance(parsed, (int, float)):
-        detected = "number"
-        preferred_names = ["value", "scalar", "number"]
-    else:
-        if stripped.startswith("{"):
-            detected = "object"
-            preferred_names = ["object", "pair", "string", "scalar"]
-        elif stripped.startswith("["):
-            detected = "array"
-            preferred_names = ["array", "scalar", "string", "number"]
-        else:
-            detected = "value"
-            preferred_names = ["value", "scalar", "string", "number", "bool", "null"]
-
-    start_candidates = {
-        "object": ["object", "json_start", "value"],
-        "array": ["array", "json_start", "value"],
-        "string": ["string", "value", "json_start"],
-        "number": ["number", "value", "json_start"],
-        "bool": ["bool", "value", "json_start"],
-        "null": ["null", "value", "json_start"],
-        "value": ["json_start", "value", "object"],
-    }
-    start_rule = next(
-        (name for name in start_candidates[detected] if name in grammar.rules),
-        "object" if "object" in grammar.rules else next(iter(grammar.rules)),
-    )
-    preferred = _expand_preferred_rules(grammar, preferred_names)
-    return start_rule, preferred
-
-
-def _choose_profile(
+def _preferred_rule_neighborhood(
     *,
-    text: str,
-    mutator_kind: str,
     grammar: Grammar,
-    rng: random.Random,
-) -> tuple[str, list[str]]:
-    """Choose the seed profile within the already-known mutator family."""
-    if mutator_kind == "ip":
-        return _choose_ip_profile(text, grammar, rng)
-    return _choose_json_profile(text, grammar)
+    start_rule: str,
+    limit: int = 8,
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    queue = [start_rule]
+    while queue and len(ordered) < limit:
+        name = queue.pop(0)
+        if name not in grammar.rules or name in seen:
+            continue
+        ordered.append(name)
+        seen.add(name)
+        for child_name in sorted(_collect_direct_ref_names(grammar.rules[name])):
+            if child_name not in seen:
+                queue.append(child_name)
+    return _expand_preferred_rules(grammar, ordered)
 
 
 def _blend_with_seed(
@@ -1446,7 +1229,9 @@ def generate_without_seed(
     """Generate unique seedless candidates from the built grammar."""
     if count <= 0:
         return []
-    base = _base_grammar()
+    base = _resolved_base_grammar(mutator_kind=mutator_kind)
+    start_rule = _default_start_rule(base)
+    preferred = _preferred_rule_neighborhood(grammar=base, start_rule=start_rule)
     outputs: list[str] = []
     seen: set[str] = set()
     attempts = 0
@@ -1454,15 +1239,12 @@ def generate_without_seed(
     while len(outputs) < count and attempts < max_attempts:
         attempts += 1
         grammar = copy.deepcopy(base)
-        start_rule, preferred = _choose_profile(
-            text="",
-            mutator_kind=mutator_kind,
-            grammar=grammar,
-            rng=rng,
-        )
         for _round in range(rng.randint(0, 3)):
             grammar.mutate(rng, preferred_rule_names=preferred)
-        generated = grammar.generate(start_rule, rng)
+        try:
+            generated = grammar.generate(start_rule, rng)
+        except _GenerationError:
+            continue
         if generated in seen:
             continue
         seen.add(generated)
@@ -1478,15 +1260,17 @@ def generate_from_rule(
     min_mutation_rounds: int = 0,
     max_mutation_rounds: int = 3,
     preferred_rule_names: list[str] | None = None,
+    mutator_kind: str = "grammar",
 ) -> list[str]:
     """Generate unique candidates from a specific start rule."""
     if count <= 0:
         return []
     if min_mutation_rounds < 0 or max_mutation_rounds < min_mutation_rounds:
         raise ValueError("invalid mutation round bounds")
-    base = _base_grammar()
-    if start_rule not in base.rules:
-        raise KeyError(f"unknown grammar start rule {start_rule!r}")
+    normalized_start_rule = _normalize_rule_name(start_rule)
+    base = _resolved_base_grammar(mutator_kind=mutator_kind)
+    if normalized_start_rule not in base.rules:
+        raise KeyError(f"unknown grammar start rule {normalized_start_rule!r}")
     preferred = _expand_preferred_rules(base, preferred_rule_names or [])
     outputs: list[str] = []
     seen: set[str] = set()
@@ -1497,7 +1281,10 @@ def generate_from_rule(
         grammar = copy.deepcopy(base)
         for _round in range(rng.randint(min_mutation_rounds, max_mutation_rounds)):
             grammar.mutate(rng, preferred_rule_names=preferred)
-        generated = grammar.generate(start_rule, rng)
+        try:
+            generated = grammar.generate(normalized_start_rule, rng)
+        except _GenerationError:
+            continue
         if generated in seen:
             continue
         seen.add(generated)
@@ -1514,6 +1301,7 @@ def mutate_from_rule(
     min_mutation_rounds: int = 1,
     max_mutation_rounds: int = 5,
     blend_with_seed: bool = True,
+    mutator_kind: str = "grammar",
 ) -> str:
     """Mutate from one explicit start rule.
 
@@ -1523,16 +1311,21 @@ def mutate_from_rule(
     """
     if min_mutation_rounds < 0 or max_mutation_rounds < min_mutation_rounds:
         raise ValueError("invalid mutation round bounds")
-    base = _base_grammar()
-    if start_rule not in base.rules:
-        raise KeyError(f"unknown grammar start rule {start_rule!r}")
+    normalized_start_rule = _normalize_rule_name(start_rule)
+    base = _resolved_base_grammar(mutator_kind=mutator_kind)
+    if normalized_start_rule not in base.rules:
+        raise KeyError(f"unknown grammar start rule {normalized_start_rule!r}")
     if text:
-        parsed_tree = parse_from_rule(text=text, start_rule=start_rule)
+        parsed_tree = parse_from_rule(
+            text=text,
+            start_rule=normalized_start_rule,
+            mutator_kind=mutator_kind,
+        )
         if parsed_tree is not None:
             for _attempt in range(8):
-                tree: SeedTreeNode = copy.deepcopy(parsed_tree)
+                tree = copy.deepcopy(parsed_tree)
                 for _ in range(rng.randint(min_mutation_rounds, max_mutation_rounds)):
-                    tree = _mutate_seed_tree(tree, rng, base)
+                    tree = _mutate_parse_tree(tree, rng, base)
                 mutated_text = tree.to_text()
                 if mutated_text != text:
                     return mutated_text
@@ -1541,7 +1334,10 @@ def mutate_from_rule(
     grammar = copy.deepcopy(base)
     for _ in range(rng.randint(min_mutation_rounds, max_mutation_rounds)):
         grammar.mutate(rng, preferred_rule_names=preferred)
-    generated = grammar.generate(start_rule, rng)
+    try:
+        generated = grammar.generate(normalized_start_rule, rng)
+    except _GenerationError:
+        generated = base.generate(normalized_start_rule, rng)
     if blend_with_seed and text:
         return _blend_with_seed(original_text=text, generated_text=generated, rng=rng)
     return generated
@@ -1555,32 +1351,47 @@ def mutate(
 ) -> str:
     """Main mutator entry point.
 
-    Prefer exact parsed seed-tree mutation for JSON/IP seeds. If parsing fails,
-    fall back to grammar-AST mutation and generation.
+    Prefer exact derivation-tree mutation under the inferred grammar start rule.
+    If exact parsing fails, fall back to grammar-AST mutation and generation.
     """
-    base = _base_grammar()
-    parsed_tree = _parse_seed_tree(text, mutator_kind)
-    if parsed_tree is not None:
+    base = _resolved_base_grammar(mutator_kind=mutator_kind)
+    start_rule = _default_start_rule(base)
+    preferred = _preferred_rule_neighborhood(
+        grammar=base,
+        start_rule=start_rule,
+    )
+    parse_profile = (
+        _exact_parse_profile(
+            text=text,
+            grammar=base,
+            requested_start_rule=start_rule,
+        )
+        if text
+        else None
+    )
+    if parse_profile is not None:
+        start_rule, parsed_tree = parse_profile
+        preferred = _preferred_rule_neighborhood(
+            grammar=base,
+            start_rule=start_rule,
+        )
         for _attempt in range(8):
             tree = copy.deepcopy(parsed_tree)
             mutation_rounds = rng.randint(1, 5)
             for _ in range(mutation_rounds):
-                tree = _mutate_seed_tree(tree, rng, base)
+                tree = _mutate_parse_tree(tree, rng, base)
             mutated_text = tree.to_text()
             if mutated_text != text:
                 return mutated_text
         return tree.to_text()
     grammar = copy.deepcopy(base)
-    start_rule, preferred = _choose_profile(
-        text=text,
-        mutator_kind=mutator_kind,
-        grammar=grammar,
-        rng=rng,
-    )
     mutation_rounds = rng.randint(1, 5)
     for _ in range(mutation_rounds):
         grammar.mutate(rng, preferred_rule_names=preferred)
-    generated = grammar.generate(start_rule, rng)
+    try:
+        generated = grammar.generate(start_rule, rng)
+    except _GenerationError:
+        generated = base.generate(start_rule, rng)
     if text:
         return _blend_with_seed(original_text=text, generated_text=generated, rng=rng)
     return generated
