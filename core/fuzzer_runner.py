@@ -18,12 +18,59 @@ from core.mutation_utils import initial_scheduler_seeds
 from mutator import get_feedback_handler, get_mutator
 from power_scheduler import get_power_scheduler
 from core.results_export import export_results
+from core.seed_refill import generate_grammar_refill_seeds
 from seed_corpus import Seed, get_corpus_loader, get_version_spec
 from seed_scheduler import UCBTreeScheduler, make_scheduler
 from core.workers import run_fuzzer_multi_worker
 from core.target_artifacts import clear_bug_counts_csv
 from mutator import configure_runtime_grammar
 from mutator.versions import grammar_ast
+
+
+def _generate_startup_grammar_seeds(
+    *,
+    effective_mutator: str,
+    rng: random.Random,
+    count: int,
+) -> list[str]:
+    """Generate startup seeds that try to cover as much AST grammar space as possible."""
+    if count <= 0:
+        return []
+
+    refill = generate_grammar_refill_seeds(
+        history_texts=(),
+        ready_texts=(),
+        mutator_kind=effective_mutator,
+        rng=rng,
+        count=count,
+    )
+    generated = list(refill.seeds)
+    if len(generated) >= count:
+        return generated
+
+    available_items = grammar_ast.available_coverage_items(mutator_kind=effective_mutator)
+    start_index = 0
+    while len(generated) < count:
+        preferred_item = (
+            [available_items[start_index % len(available_items)]]
+            if available_items
+            else None
+        )
+        fallback = grammar_ast.generate_without_seed(
+            mutator_kind=effective_mutator,
+            rng=rng,
+            count=1,
+            preferred_coverage_items=preferred_item,
+        )
+        if not fallback:
+            break
+        candidate = fallback[0]
+        if candidate in generated:
+            start_index += 1
+            continue
+        generated.append(candidate)
+        start_index += 1
+    return generated
 
 
 def run_fuzzer(
@@ -141,8 +188,8 @@ def run_fuzzer(
             f"Generating {requested} grammar seeds for {effective_target}...",
             spinner="dots",
         ):
-            generated = grammar_ast.generate_without_seed(
-                mutator_kind=effective_mutator,
+            generated = _generate_startup_grammar_seeds(
+                effective_mutator=effective_mutator,
                 rng=rng,
                 count=requested,
             )
@@ -158,6 +205,9 @@ def run_fuzzer(
                 candidate,
                 metadata={
                     "bucket": candidate.bucket,
+                    "startup_generated_run_unmutated_first": bool(
+                        config.get("run_startup_generated_unmutated_first")
+                    ),
                     "signals": {
                         "coverage_key": {
                             "family": candidate.family,
@@ -206,6 +256,9 @@ def run_fuzzer(
                     candidate,
                     metadata={
                         "bucket": candidate.bucket,
+                        "startup_generated_run_unmutated_first": bool(
+                            config.get("run_startup_generated_unmutated_first")
+                        ),
                         "signals": {
                             "coverage_key": {
                                 "family": candidate.family,

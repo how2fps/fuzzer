@@ -50,6 +50,40 @@ from seed_scheduler import (
 _BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
 
 
+def _build_execution_batch(
+    *,
+    item: ScheduledSeed,
+    n: int,
+    target: str,
+    conn_thread: sqlite3.Connection,
+    generate_mutation_batch: Callable[..., list[tuple[str, float]]],
+) -> list[tuple[str, float]]:
+    """Build one execution batch, optionally running a startup-generated seed raw first."""
+    if n <= 0:
+        return []
+
+    batch: list[tuple[str, float]] = []
+    run_unmutated_first = bool(item.metadata.get("startup_generated_run_unmutated_first"))
+    already_consumed = bool(item.metadata.get("startup_generated_unmutated_consumed"))
+
+    if run_unmutated_first and not already_consumed:
+        if not input_already_run(conn_thread, item.seed.text, target):
+            batch.append((item.seed.text, 0.0))
+        item.metadata["startup_generated_unmutated_consumed"] = True
+
+    remaining = max(0, n - len(batch))
+    if remaining > 0:
+        batch.extend(
+            generate_mutation_batch(
+                n=remaining,
+                seed_text=item.seed.text,
+                conn_thread=conn_thread,
+            )
+        )
+
+    return batch
+
+
 def _coverage_replay_ready_signature(
     ready_items: Sequence[ScheduledSeed],
     *,
@@ -791,10 +825,12 @@ def run_fuzzer_multi_worker(
                                     )
                                     current_batch.clear()
                                     current_batch.extend(
-                                        _generate_timed_mutation_batch(
+                                        _build_execution_batch(
+                                            item=current_scheduled[0],
                                             n=n,
-                                            seed_text=current_scheduled[0].seed.text,
+                                            target=effective_target,
                                             conn_thread=conn_thread,
+                                            generate_mutation_batch=_generate_timed_mutation_batch,
                                         )
                                     )
                                     current_mutations_left[0] = len(current_batch)

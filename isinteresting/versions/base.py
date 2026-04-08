@@ -480,6 +480,9 @@ def compute_interestingness(
         except (sqlite3.Error, OSError):
             pass
 
+    if open_res is not None:
+        return 1.0 if s_new > 0.0 else 0.0
+
     # Keep rewarding novel coverage signals, but damp bug-related rewards when
     # the same bug signature has already been observed many times.
     repeated_bug_factor = _repeat_bug_factor(repeat_bug_count)

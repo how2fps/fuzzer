@@ -58,6 +58,7 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "seed_preload_bucket_ratios",
             "seed_refill_mode",
             "llm_seed_candidates",
+            "run_startup_generated_unmutated_first",
         ),
     ),
     (
@@ -104,6 +105,7 @@ class FuzzConfig(TypedDict):
     seed_preload_bucket_ratios: dict[str, float]
     seed_refill_mode: str
     llm_seed_candidates: int
+    run_startup_generated_unmutated_first: bool
 
     mutator_kind: str
     mutator_version: str
@@ -142,6 +144,7 @@ def get_default_config() -> FuzzConfig:
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "seed_refill_mode": "historical",
         "llm_seed_candidates": 5,
+        "run_startup_generated_unmutated_first": False,
         "mutator_kind": "auto",
         "mutator_version": "base",
         "grammar_path": None,
@@ -419,6 +422,8 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(f"grammar_rules_file does not exist: {grammar_rules_file}")
     if config["llm_seed_candidates"] < 0:
         raise ValueError("llm_seed_candidates must be >= 0.")
+    if not isinstance(config["run_startup_generated_unmutated_first"], bool):
+        raise ValueError("run_startup_generated_unmutated_first must be a boolean.")
     if not isinstance(config["enable_open_coverage"], bool):
         raise ValueError("enable_open_coverage must be a boolean.")
 
@@ -800,6 +805,7 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
             else None
         ),
         "llm_seed_candidates": args.llm_seed_candidates,
+        "run_startup_generated_unmutated_first": False,
         "enable_open_coverage": args.enable_open_coverage,
         "parser_config": {},
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),

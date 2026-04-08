@@ -46,6 +46,7 @@ Defaults shown below match `core.config.get_default_config()`.
 | `seed_corpus` | `seed_preload_total` | integer `>= 0` | `8` |
 | `seed_corpus` | `seed_preload_bucket_ratios` | object of `{bucket_name: weight}` | project defaults |
 | `seed_corpus` | `llm_seed_candidates` | integer `>= 0` | `5` |
+| `seed_corpus` | `run_startup_generated_unmutated_first` | `true` / `false` | `false` |
 | `mutator` | `mutator_kind` | `auto`, `json`, `ip` | `auto` |
 | `mutator` | `mutator_version` | `base`, `byte_havoc`, `grammar_ast`, `adaptive_all` | `base` |
 | `mutator` | `grammar_path` | file path string or `null` | `null` |
