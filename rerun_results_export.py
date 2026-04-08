@@ -33,6 +33,8 @@ from core.batch_report import generate_batch_report
 from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
 from core.results_export import export_results
 
+RERUN_REPORT_INTERESTING_SCORE_THRESHOLD = 0.2
+
 
 def _target_for_run_folder(run_folder: Path, db_path: Path) -> str:
     cfg = run_folder / "config.json"
@@ -143,8 +145,15 @@ def main() -> int:
         log.info("No batch report root (use --report-root or a path under batch_*).")
         return 0
 
-    log.info("Generating batch report for %s", report_target)
-    out = generate_batch_report(batch_folder=report_target)
+    log.info(
+        "Generating batch report for %s (interestingness threshold=%s)",
+        report_target,
+        RERUN_REPORT_INTERESTING_SCORE_THRESHOLD,
+    )
+    out = generate_batch_report(
+        batch_folder=report_target,
+        interesting_score_threshold=RERUN_REPORT_INTERESTING_SCORE_THRESHOLD,
+    )
     if out is None:
         log.warning("Batch report not written (no runs.csv found under %s).", report_target)
         return 1

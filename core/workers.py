@@ -23,7 +23,7 @@ from core.live_ui import RunDashboard, console
 from core.db_utils import (
     add_unique_coverage_seed_input,
     add_seed_input_if_new,
-    get_unique_coverage_seed_inputs,
+    get_coverage_replay_seed_inputs,
     input_already_run,
     insert_run,
     insert_seen_edges_into_conn,
@@ -47,6 +47,33 @@ from seed_scheduler import (
 
 
 _BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
+
+
+def _coverage_replay_ready_signature(
+    ready_items: Sequence[ScheduledSeed],
+    *,
+    score_threshold: float = 0.1,
+    hot_item_fraction_ceiling: float = 0.25,
+) -> tuple[str, ...] | None:
+    """
+    Return a stable signature when the pool looks stale enough to justify replay.
+
+    Unlike the old "any hot seed blocks refill" check, this tolerates a small
+    number of still-promising seeds while allowing replay to broaden the pool.
+    """
+    if not ready_items:
+        return None
+    if any(item.updates <= 0 for item in ready_items):
+        return None
+    hot_items = sum(
+        1
+        for item in ready_items
+        if item.avg_isinteresting_score > score_threshold
+    )
+    hot_ratio = hot_items / float(len(ready_items))
+    if hot_ratio > hot_item_fraction_ceiling:
+        return None
+    return tuple(sorted(item.seed.seed_id for item in ready_items))
 
 
 def _find_newest_unseen_branch(
@@ -405,16 +432,6 @@ def run_fuzzer_multi_worker(
                 batch.append((candidate, time.perf_counter() - started_at))
         return batch
 
-    def _low_value_ready_signature(*, threshold: float = 0.1) -> tuple[str, ...] | None:
-        ready_items = scheduler.ready_items()
-        if not ready_items:
-            return None
-        if any(item.updates <= 0 for item in ready_items):
-            return None
-        if any(item.avg_isinteresting_score > threshold for item in ready_items):
-            return None
-        return tuple(sorted(item.seed.seed_id for item in ready_items))
-
     def _bug_key(result: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
         status = str(result.get("status") or "").strip().lower()
         if status not in {"bug", "crash", "timeout", "error"}:
@@ -512,12 +529,14 @@ def run_fuzzer_multi_worker(
 
     def _try_refill_scheduler_from_unique_coverage_store() -> bool:
         refill_limit = max(1, int(config.get("seed_preload_total") or 8))
+        replay_sample_limit = max(refill_limit, refill_limit * 4)
         conn_thread = open_results_db(db_path)
         try:
-            stored = get_unique_coverage_seed_inputs(
+            stored = get_coverage_replay_seed_inputs(
                 conn_thread,
                 target=effective_target,
-                limit=refill_limit,
+                rng=rng,
+                limit=replay_sample_limit,
             )
         finally:
             conn_thread.close()
@@ -527,6 +546,8 @@ def run_fuzzer_multi_worker(
         ready_texts = {item.seed.text for item in scheduler.ready_items()}
         added_count = 0
         for entry in stored:
+            if added_count >= refill_limit:
+                break
             text = entry.get("input_text", "")
             if not text or text in ready_texts:
                 continue
@@ -630,7 +651,9 @@ def run_fuzzer_multi_worker(
                             nones_sent += 1
                             break
                         if not scheduler.empty():
-                            low_value_signature = _low_value_ready_signature()
+                            low_value_signature = _coverage_replay_ready_signature(
+                                scheduler.ready_items()
+                            )
                             if (
                                 low_value_signature is not None
                                 and low_value_signature != last_low_value_signature[0]

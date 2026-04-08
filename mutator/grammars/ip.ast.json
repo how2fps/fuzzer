@@ -3,12 +3,19 @@
   "recursive_symbols": [],
   "rules": {
     "ip": "<ipv4_input> | <ipv6_input>",
-    "ipv4_input": "<ipv4> | <ipv4> \"/\" <prefix4>",
+    "ipv4_input": "<ipv4> | <ipv4> \"/\" <prefix4> | <ipv4_glob> | <ipv4_last_octet_range> | <ipv4_full_range> | <ipv4_bracket_range>",
     "ipv4": "<octet> \".\" <octet> \".\" <octet> \".\" <octet>",
+    "ipv4_glob": "<octet> \".\" <octet> \".\" <octet> \".*\"",
+    "ipv4_last_octet_range": "<octet> \".\" <octet> \".\" <octet> \".\" <octet> \"-\" <octet>",
+    "ipv4_full_range": "<ipv4> \"-\" <ipv4>",
+    "ipv4_bracket_range": "<octet> \".\" <octet> \".\" <octet> \".[\" <digit> \"-\" <digit> \"]\" | <octet> \".\" <octet> \".\" <octet> \".\" <digit> \"[\" <digit> \"-\" <digit> \"]\" | <octet> \".\" <octet> \".\" <octet> \".[\" <digit> <digit> \"]\"",
     "octet": "\"0\" | \"1\" | \"10\" | \"127\" | \"192\" | \"223\" | \"254\" | \"255\"",
     "prefix4": "\"0\" | \"8\" | \"16\" | \"24\" | \"30\" | \"32\"",
-    "ipv6_input": "<ipv6> | <ipv6> \"/\" <prefix6>",
+    "digit": "\"0\" | \"1\" | \"2\" | \"3\" | \"4\" | \"5\" | \"8\" | \"9\"",
+    "ipv6_input": "<ipv6> | <ipv6> \"/\" <prefix6> | <ipv6_bracketed> | <ipv6_full_range>",
     "ipv6": "<h> \":\" <h> \":\" <h> \":\" <h> \":\" <h> \":\" <h> \":\" <h> \":\" <h> | <h> \"::\" <h> | \"::1\" | \"::\" | \"fe80::\" <h> | \"2001:db8::\" <h> \":\" <h>",
+    "ipv6_bracketed": "\"[\" <ipv6> \"]\"",
+    "ipv6_full_range": "<ipv6> \"-\" <ipv6>",
     "h": "\"0\" | \"1\" | \"a\" | \"f\" | \"10\" | \"ff\" | \"0abc\" | \"ffff\"",
     "prefix6": "\"0\" | \"32\" | \"48\" | \"64\" | \"96\" | \"128\""
   }

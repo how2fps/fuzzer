@@ -61,7 +61,13 @@ def run_fuzzer(
     rng = random.Random(
         config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
 
-    scheduler = make_scheduler(config["scheduler_kind"])
+    scheduler_kwargs: dict[str, Any] = {}
+    if config["scheduler_kind"] == "heap":
+        startup_min_batches = int(config["heap_startup_min_batches_per_seed"])
+        if config["seed_preload_mode"] == "full":
+            startup_min_batches = 0
+        scheduler_kwargs["startup_min_batches_per_seed"] = startup_min_batches
+    scheduler = make_scheduler(config["scheduler_kind"], **scheduler_kwargs)
     initial_seeds = (
         []
         if use_llm_bootstrap or use_regex_noseed
@@ -74,6 +80,11 @@ def run_fuzzer(
             bucket_ratios=config["seed_preload_bucket_ratios"],
         )
     )
+    startup_preloaded = bool(
+        config["scheduler_kind"] == "heap"
+        and config["seed_preload_mode"] in {"ratio_batch", "sample"}
+        and int(config["heap_startup_min_batches_per_seed"]) > 0
+    )
     for seed in initial_seeds:
         metadata: dict[str, Any] = {
             "bucket": seed.bucket,
@@ -82,6 +93,8 @@ def run_fuzzer(
                 "status": "ok",
             },
         }
+        if startup_preloaded:
+            metadata["startup_preloaded"] = True
         if config["ucb_trace"] and isinstance(scheduler, UCBTreeScheduler):
             metadata["_ucb_trace"] = True
         scheduler.add(seed, metadata=metadata)

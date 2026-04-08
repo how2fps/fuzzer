@@ -120,3 +120,31 @@ After the full run plan finishes, an overview report is written into the batch f
 - **`report.json`** — raw aggregated metrics used by the report
 
 Run from the repository root so that imports (`isinteresting`, `mutator`, `parser`, etc.) resolve correctly.
+
+## Validity Analysis
+
+To chart how much of the mutated output is valid vs invalid over time for a saved run:
+
+```bash
+python analyze_runs_validity.py \
+  results/batch_20260403_045300/001_json-decoder_heap_adaptive_all_cov-on_constant/run_1_20260403_045300/runs.csv \
+  --format json
+```
+
+For IP-oriented runs:
+
+```bash
+python analyze_runs_validity.py path/to/runs.csv --format ipv4
+python analyze_runs_validity.py path/to/runs.csv --format ipv6
+```
+
+This writes:
+
+- a PNG chart next to the input `runs.csv`
+- a CSV summary with valid/invalid percentages over time
+
+Useful options:
+
+- `--mode cumulative` for cumulative percentages instead of per-bin percentages
+- `--bin-seconds 10` to control the time-bin size in binned mode
+- `--output path/to/chart.png` to choose the chart location

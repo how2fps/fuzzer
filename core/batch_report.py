@@ -4,6 +4,7 @@ import csv
 import html
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,9 @@ from typing import Any
 
 
 BUG_STATUSES = {"bug", "crash", "timeout"}
-INTERESTING_SCORE_THRESHOLD = 0.5
+DEFAULT_INTERESTING_SCORE_THRESHOLD = 0.5
+MAX_CONFIGS_PER_CHART = 10
+CHECKPOINT_2_RESULTS_DIR = Path("/home/fuzzer/fuzzer/results/checkpoint_2")
 
 
 @dataclass(frozen=True)
@@ -58,11 +61,26 @@ def _parse_iso8601(value: str | None) -> datetime | None:
         return None
 
 
+def _row_datetime(row: dict[str, str]) -> datetime | None:
+    return _parse_iso8601(row.get("created_at") or row.get("datetime_executed"))
+
+
+def _is_interesting_score(*, score: float | None, threshold: float) -> bool:
+    return (score or 0.0) > threshold
+
+
 def _slug(value: str) -> str:
     safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")
     while "--" in safe:
         safe = safe.replace("--", "-")
     return safe or "na"
+
+
+def _chart_config_label(config: str) -> str:
+    label = re.sub(r"([_-])cov-(?:on|off)(?=[_-]|$)", "", config)
+    label = re.sub(r"__+", "_", label)
+    label = re.sub(r"--+", "-", label)
+    return label.strip("_-")
 
 
 def normalize_bug_signature(row: dict[str, str]) -> str:
@@ -92,6 +110,11 @@ def _load_unique_error_line_pairs_rows(run_folder: Path) -> list[dict[str, str]]
         return []
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def _unique_bug_metric_rows(*, run: RunData) -> list[dict[str, str]]:
+    pair_rows = _load_unique_error_line_pairs_rows(run.run_folder)
+    return pair_rows if pair_rows else run.rows
 
 
 def _load_run_data(*, run_folder: Path) -> RunData | None:
@@ -131,6 +154,11 @@ def _group_runs_by_target_config(*, runs: list[RunData]) -> dict[str, dict[str, 
     for run in runs:
         out.setdefault(run.target, {}).setdefault(run.config_name, []).append(run)
     return out
+
+
+def _load_runs_from_batch_folder(*, batch_folder: Path) -> list[RunData]:
+    run_folders = _find_run_folders(batch_folder=batch_folder)
+    return [r for p in run_folders if (r := _load_run_data(run_folder=p)) is not None]
 
 
 def _flatten_config_values(*, value: Any, prefix: str = "") -> dict[str, Any]:
@@ -201,31 +229,40 @@ def _collect_timestamps(rows: list[dict[str, str]]) -> list[datetime]:
 
 
 def compute_cumulative_metrics_over_time(
-    *, rows: list[dict[str, str]], metric: str
+    *,
+    rows: list[dict[str, str]],
+    metric: str,
+    interesting_score_threshold: float = DEFAULT_INTERESTING_SCORE_THRESHOLD,
 ) -> list[tuple[float, int]]:
     if not rows:
         return []
     ordered = sorted(
         rows,
         key=lambda row: (
-            _parse_iso8601(row.get("created_at")) or datetime.max,
+            _row_datetime(row) or datetime.max,
             _safe_int(row.get("iteration")) or 0,
         ),
     )
     first_dt = None
     for row in ordered:
-        candidate = _parse_iso8601(row.get("created_at"))
+        candidate = _row_datetime(row)
         if candidate is not None:
             first_dt = candidate
             break
     if first_dt is None:
         return []
+    last_dt = None
+    for row in reversed(ordered):
+        candidate = _row_datetime(row)
+        if candidate is not None:
+            last_dt = candidate
+            break
 
     points: list[tuple[float, int]] = [(0.0, 0)]
     seen_bugs: set[str] = set()
     count = 0
     for row in ordered:
-        dt = _parse_iso8601(row.get("created_at"))
+        dt = _row_datetime(row)
         if dt is None:
             continue
         status = (row.get("status") or "").strip().lower()
@@ -239,21 +276,32 @@ def compute_cumulative_metrics_over_time(
             count = len(seen_bugs)
         elif metric == "interesting_tests":
             score = _safe_float(row.get("isinteresting_score"))
-            if score is None or score <= INTERESTING_SCORE_THRESHOLD:
+            if not _is_interesting_score(
+                score=score,
+                threshold=interesting_score_threshold,
+            ):
                 continue
             count += 1
         else:
             continue
         points.append((max((dt - first_dt).total_seconds(), 0.0), count))
+    if last_dt is not None:
+        last_x = max((last_dt - first_dt).total_seconds(), 0.0)
+        if points[-1][0] < last_x:
+            points.append((last_x, count))
     return points
 
 
 def _compute_cumulative_metrics_over_iteration(
-    *, rows: list[dict[str, str]], metric: str
+    *,
+    rows: list[dict[str, str]],
+    metric: str,
+    interesting_score_threshold: float = DEFAULT_INTERESTING_SCORE_THRESHOLD,
 ) -> list[tuple[int, int]]:
     if not rows:
         return []
     ordered = sorted(rows, key=lambda row: _safe_int(row.get("iteration")) or 0)
+    last_iteration = max((_safe_int(row.get("iteration")) or 0 for row in ordered), default=0)
     points: list[tuple[int, int]] = [(0, 0)]
     seen_bugs: set[str] = set()
     count = 0
@@ -270,34 +318,52 @@ def _compute_cumulative_metrics_over_iteration(
             count = len(seen_bugs)
         elif metric == "interesting_tests":
             score = _safe_float(row.get("isinteresting_score"))
-            if score is None or score <= INTERESTING_SCORE_THRESHOLD:
+            if not _is_interesting_score(
+                score=score,
+                threshold=interesting_score_threshold,
+            ):
                 continue
             count += 1
         else:
             continue
         points.append((iteration, count))
+    if points[-1][0] < last_iteration:
+        points.append((last_iteration, count))
     return points
 
 
-def compute_run_metrics(*, run: RunData) -> dict[str, Any]:
+def compute_run_metrics(
+    *,
+    run: RunData,
+    interesting_score_threshold: float = DEFAULT_INTERESTING_SCORE_THRESHOLD,
+) -> dict[str, Any]:
     rows = run.rows
+    unique_bug_rows_source = _unique_bug_metric_rows(run=run)
     total_generated = len(rows)
     total_executed = len(rows)
-    bug_rows = [row for row in rows if (row.get("status") or "").strip().lower() in BUG_STATUSES]
+    bug_rows = [
+        row for row in unique_bug_rows_source if (row.get("status") or "").strip().lower() in BUG_STATUSES
+    ]
     unique_bugs = {normalize_bug_signature(row) for row in bug_rows}
     interesting_tests = sum(
         1
         for row in rows
-        if (_safe_float(row.get("isinteresting_score")) or 0.0) > INTERESTING_SCORE_THRESHOLD
+        if _is_interesting_score(
+            score=_safe_float(row.get("isinteresting_score")),
+            threshold=interesting_score_threshold,
+        )
     )
     timestamps = _collect_timestamps(rows)
     first_bug_time: float | None = None
+    bug_timestamps = sorted(
+        dt
+        for row in bug_rows
+        if (dt := _parse_iso8601(row.get("created_at") or row.get("datetime_executed"))) is not None
+    )
     if timestamps:
         start = timestamps[0]
-        bug_times = [_parse_iso8601(row.get("created_at")) for row in bug_rows]
-        bug_times = [t for t in bug_times if t is not None]
-        if bug_times:
-            first_bug_time = max((min(bug_times) - start).total_seconds(), 0.0)
+        if bug_timestamps:
+            first_bug_time = max((bug_timestamps[0] - start).total_seconds(), 0.0)
 
     avg_execution = None
     explicit_execution_times = [
@@ -521,8 +587,11 @@ def _render_table(*, headers: list[str], rows: list[list[str]], table_id: str = 
 
 
 def save_chart_png(fig: Any, output_path: Path) -> Path:
+    import matplotlib.pyplot as plt
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
     return output_path
 
 
@@ -539,19 +608,45 @@ def _render_chart_html(*, title: str, output_path: Path, root: Path, description
 def _plot_grouped_bar(*, title: str, categories: list[str], series: list[tuple[str, list[float]]]) -> Any:
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(10, 4.8))
+    fig, ax = plt.subplots(figsize=(11.5, 4.8))
     if not categories:
         ax.set_title(f"{title} (Data unavailable)")
         return fig
-    width = 0.8 / max(1, len(series))
     x_positions = list(range(len(categories)))
-    for idx, (label, values) in enumerate(series):
-        shifted = [x + idx * width - (len(series) - 1) * width / 2 for x in x_positions]
-        bars = ax.bar(shifted, values, width=width, label=label)
-        for bar, value in zip(bars, values):
-            height = float(value)
-            if not math.isfinite(height):
+    present_series_by_category: list[list[int]] = []
+    max_present = 0
+    for category_idx in range(len(categories)):
+        present = []
+        for series_idx, (_, values) in enumerate(series):
+            if category_idx >= len(values):
                 continue
+            value = float(values[category_idx])
+            if math.isfinite(value):
+                present.append(series_idx)
+        present_series_by_category.append(present)
+        max_present = max(max_present, len(present))
+
+    width = 0.8 / max(1, max_present)
+    for series_idx, (label, values) in enumerate(series):
+        shifted: list[float] = []
+        plotted_values: list[float] = []
+        for category_idx, x in enumerate(x_positions):
+            if category_idx >= len(values):
+                continue
+            value = float(values[category_idx])
+            if not math.isfinite(value):
+                continue
+            present = present_series_by_category[category_idx]
+            if series_idx not in present:
+                continue
+            slot_idx = present.index(series_idx)
+            shifted.append(x + slot_idx * width - (len(present) - 1) * width / 2)
+            plotted_values.append(value)
+        if not plotted_values:
+            continue
+        bars = ax.bar(shifted, plotted_values, width=width, label=label)
+        for bar, value in zip(bars, plotted_values):
+            height = float(value)
             y = height + (0.01 * max(1.0, abs(height)))
             ax.text(
                 bar.get_x() + bar.get_width() / 2.0,
@@ -565,10 +660,14 @@ def _plot_grouped_bar(*, title: str, categories: list[str], series: list[tuple[s
     ax.set_title(title)
     ax.set_xticks(x_positions)
     ax.set_xticklabels(categories, rotation=20, ha="right")
-    ax.legend(loc="best")
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0)
     ax.grid(axis="y", alpha=0.25)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.08, right=0.78, bottom=0.22, top=0.9)
     return fig
+
+
+def _missing_chart_value() -> float:
+    return float("nan")
 
 
 def _plot_lines(
@@ -581,7 +680,7 @@ def _plot_lines(
 ) -> Any:
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(10, 4.8))
+    fig, ax = plt.subplots(figsize=(11.5, 4.8))
     drawn = 0
     max_x = max((float(x) for _, points in lines for x, _ in points), default=None)
     for label, points in lines:
@@ -598,10 +697,32 @@ def _plot_lines(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     if drawn:
-        ax.legend(loc="best")
+        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0)
     ax.grid(alpha=0.25)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.08, right=0.78, bottom=0.18, top=0.9)
     return fig
+
+
+def _top_configs_by_mean_unique_bugs(
+    *,
+    run_metrics: list[dict[str, Any]],
+    target: str,
+    limit: int = MAX_CONFIGS_PER_CHART,
+) -> list[str]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in run_metrics:
+        if str(row["target"]) != target:
+            continue
+        grouped.setdefault(str(row["config"]), []).append(row)
+
+    ranked: list[tuple[str, float, float]] = []
+    for config, rows in grouped.items():
+        mean_unique_bugs = mean(float(row["total_unique_bugs"]) for row in rows)
+        mean_interesting_tests = mean(float(row["total_interesting_tests"]) for row in rows)
+        ranked.append((config, mean_unique_bugs, mean_interesting_tests))
+
+    ranked.sort(key=lambda row: (-row[1], -row[2], row[0]))
+    return [config for config, _, _ in ranked[:limit]]
 
 
 def _mean_curve_from_runs(*, run_curves: list[list[tuple[float, int]]]) -> list[tuple[float, int]]:
@@ -841,13 +962,30 @@ def render_comparison_overview(
             )
         for metric_idx, metric_name in enumerate(("Mean unique bugs", "Mean interesting tests"), start=1):
             categories = sorted(metrics_by_target_config.keys())
-            configs = sorted({cfg for values in metrics_by_target_config.values() for cfg in values.keys()})
+            configs = [
+                row["config"]
+                for row in sorted(
+                    config_aggregates,
+                    key=lambda row: (
+                        -(float(row["mean_unique_bugs"]) if row["mean_unique_bugs"] is not None else -1.0),
+                        -(float(row["mean_interesting_tests"]) if row["mean_interesting_tests"] is not None else -1.0),
+                        str(row["config"]),
+                    ),
+                )
+            ]
+            configs = list(dict.fromkeys(configs))[:MAX_CONFIGS_PER_CHART]
             series = []
             for config in configs:
                 series.append(
                     (
-                        config,
-                        [metrics_by_target_config.get(target, {}).get(config, (0.0, 0.0))[metric_idx - 1] for target in categories],
+                        _chart_config_label(str(config)),
+                        [
+                            metrics_by_target_config.get(target, {}).get(
+                                config,
+                                (_missing_chart_value(), _missing_chart_value()),
+                            )[metric_idx - 1]
+                            for target in categories
+                        ],
                     )
                 )
             fig = _plot_grouped_bar(title=f"Comparison overview: {metric_name}", categories=categories, series=series)
@@ -1030,14 +1168,22 @@ def render_rq1_effectiveness(
     bug_rows_by_config: dict[str, list[list[str]]] = {}
     for target, configs in sorted(runs_by_target_config.items()):
         parts.append(f"<h3>Target: <code>{html.escape(target)}</code></h3>")
+        selected_configs = set(_top_configs_by_mean_unique_bugs(run_metrics=run_metrics, target=target))
         unique_lines_by_config: list[tuple[str, list[tuple[float, int]]]] = []
         interesting_lines_by_config: list[tuple[str, list[tuple[float, int]]]] = []
         for config, runs in sorted(configs.items()):
+            if config not in selected_configs:
+                continue
             bug_run_curves: list[list[tuple[float, int]]] = []
             interesting_run_curves: list[list[tuple[float, int]]] = []
             config_bug_rows: list[list[str]] = []
             for run in sorted(runs, key=lambda r: r.run_id):
-                bug_run_curves.append(compute_cumulative_metrics_over_time(rows=run.rows, metric="unique_bugs"))
+                bug_run_curves.append(
+                    compute_cumulative_metrics_over_time(
+                        rows=_unique_bug_metric_rows(run=run),
+                        metric="unique_bugs",
+                    )
+                )
                 interesting_run_curves.append(compute_cumulative_metrics_over_time(rows=run.rows, metric="interesting_tests"))
                 pair_rows = _load_unique_error_line_pairs_rows(run.run_folder)
                 for row in pair_rows:
@@ -1060,9 +1206,9 @@ def render_rq1_effectiveness(
             mean_bug_curve = _mean_curve_from_runs(run_curves=bug_run_curves)
             mean_interesting_curve = _mean_curve_from_runs(run_curves=interesting_run_curves)
             if mean_bug_curve:
-                unique_lines_by_config.append((f"{config} (mean)", mean_bug_curve))
+                unique_lines_by_config.append((f"{_chart_config_label(config)} (mean)", mean_bug_curve))
             if mean_interesting_curve:
-                interesting_lines_by_config.append((f"{config} (mean)", mean_interesting_curve))
+                interesting_lines_by_config.append((f"{_chart_config_label(config)} (mean)", mean_interesting_curve))
             bug_rows_by_config[f"{target}::{config}"] = config_bug_rows
 
             target_config_metrics = [m for m in run_metrics if m["target"] == target and m["config"] == config]
@@ -1075,6 +1221,10 @@ def render_rq1_effectiveness(
                     f"Most interesting tests: <code>{html.escape(str(best_int_run['run_id']))}</code> ({best_int_run['total_interesting_tests']})."
                     "</p>"
                 )
+        parts.append(
+            f"<p class='meta'>Charts below are limited to the top {MAX_CONFIGS_PER_CHART} configs for this target, "
+            "ranked by mean unique bugs.</p>"
+        )
         fig_bugs = _plot_lines(
             title=f"RQ1 unique bugs vs time (mean per config) — {target}",
             x_label="elapsed seconds",
@@ -1199,8 +1349,16 @@ def render_rq2_efficiency(
         values_by_target: dict[str, dict[str, float]] = {target: {} for target in targets}
         for row in config_aggregates:
             val = row["mean_avg_execution_time_per_test"]
-            values_by_target[str(row["target"])][str(row["config"])] = float(val) if val is not None else 0.0
-        series = [(config, [values_by_target[target].get(config, 0.0) for target in targets]) for config in configs]
+            values_by_target[str(row["target"])][str(row["config"])] = (
+                float(val) if val is not None else _missing_chart_value()
+            )
+        series = [
+            (
+                _chart_config_label(config),
+                [values_by_target[target].get(config, _missing_chart_value()) for target in targets],
+            )
+            for config in configs
+        ]
         fig = _plot_grouped_bar(title="RQ2 average execution time comparison", categories=targets, series=series)
         out = charts_dir / "rq2_avg_execution_time_comparison.png"
         save_chart_png(fig, out)
@@ -1242,7 +1400,24 @@ def render_rq3_baseline_ablation(
     charts_dir: Path,
     report_root: Path,
     baseline_results_dir: Path,
+    interesting_score_threshold: float = DEFAULT_INTERESTING_SCORE_THRESHOLD,
 ) -> str:
+    run_data_by_key = {
+        (run.target, run.config_name, run.run_id): run
+        for configs in runs_by_target_config.values()
+        for runs in configs.values()
+        for run in runs
+    }
+    checkpoint_2_runs = _load_runs_from_batch_folder(batch_folder=CHECKPOINT_2_RESULTS_DIR)
+    checkpoint_2_run_data_by_target = {run.target: run for run in checkpoint_2_runs}
+    checkpoint_2_run_metrics = [
+        compute_run_metrics(
+            run=run,
+            interesting_score_threshold=interesting_score_threshold,
+        )
+        for run in checkpoint_2_runs
+    ]
+    checkpoint_2_metrics_by_target = {str(row["target"]): row for row in checkpoint_2_run_metrics}
     parts = ["<section id='rq3'><h2>RQ3 — Baseline / Ablation</h2>"]
     module_keys = {
         "Mutation": "mutator_version",
@@ -1255,39 +1430,54 @@ def render_rq3_baseline_ablation(
     ablation_rows: list[list[str]] = []
     impact_rows: list[tuple[str, float]] = []
     for target in sorted(runs_by_target_config.keys()):
-        target_aggs = [row for row in config_aggregates if row["target"] == target]
-        if not target_aggs:
+        target_metrics = [row for row in run_metrics if row["target"] == target]
+        if not target_metrics:
             continue
-        best = max(target_aggs, key=lambda row: (row["mean_unique_bugs"] or -1.0, row["mean_interesting_tests"] or -1.0))
-        best_cfg = best["config"]
-        best_runs = runs_by_target_config.get(target, {}).get(str(best_cfg), [])
-        best_config_payload = best_runs[0].config if best_runs else {}
-        for candidate in target_aggs:
-            cfg_name = str(candidate["config"])
+        best_run_metric = max(
+            target_metrics,
+            key=lambda row: (int(row["total_unique_bugs"]), int(row["total_interesting_tests"])),
+        )
+        best_cfg = str(best_run_metric["config"])
+        best_run_id = str(best_run_metric["run_id"])
+        best_run_data = run_data_by_key.get((target, best_cfg, best_run_id))
+        best_config_payload = best_run_data.config if best_run_data is not None else {}
+        candidate_best_by_config: dict[str, dict[str, Any]] = {}
+        for metric in target_metrics:
+            cfg_name = str(metric["config"])
+            previous = candidate_best_by_config.get(cfg_name)
+            if previous is None or (
+                int(metric["total_unique_bugs"]),
+                int(metric["total_interesting_tests"]),
+            ) > (
+                int(previous["total_unique_bugs"]),
+                int(previous["total_interesting_tests"]),
+            ):
+                candidate_best_by_config[cfg_name] = metric
+        for cfg_name, candidate in sorted(candidate_best_by_config.items()):
             if cfg_name == best_cfg:
                 continue
-            candidate_runs = runs_by_target_config.get(target, {}).get(cfg_name, [])
-            if not candidate_runs:
+            candidate_run_data = run_data_by_key.get((target, cfg_name, str(candidate["run_id"])))
+            if candidate_run_data is None:
                 continue
-            candidate_payload = candidate_runs[0].config
+            candidate_payload = candidate_run_data.config
             changed_modules = []
             for label, key in module_keys.items():
                 if best_config_payload.get(key) != candidate_payload.get(key):
                     changed_modules.append(label)
             if len(changed_modules) != 1:
                 continue
-            delta_bugs = float(candidate["mean_unique_bugs"] or 0.0) - float(best["mean_unique_bugs"] or 0.0)
-            delta_interest = float(candidate["mean_interesting_tests"] or 0.0) - float(best["mean_interesting_tests"] or 0.0)
-            best_ttfb = best["mean_time_to_first_bug_seconds"]
-            cand_ttfb = candidate["mean_time_to_first_bug_seconds"]
+            delta_bugs = float(candidate["total_unique_bugs"]) - float(best_run_metric["total_unique_bugs"])
+            delta_interest = float(candidate["total_interesting_tests"]) - float(best_run_metric["total_interesting_tests"])
+            best_ttfb = best_run_metric["time_to_first_bug_seconds"]
+            cand_ttfb = candidate["time_to_first_bug_seconds"]
             delta_ttfb = None
             if best_ttfb is not None and cand_ttfb is not None:
                 delta_ttfb = float(cand_ttfb) - float(best_ttfb)
             ablation_rows.append(
                 [
                     html.escape(target),
-                    html.escape(best_cfg),
-                    html.escape(cfg_name),
+                    html.escape(f"{best_cfg}/{best_run_id}"),
+                    html.escape(f"{cfg_name}/{candidate['run_id']}"),
                     html.escape(changed_modules[0]),
                     html.escape(_to_str(delta_bugs)),
                     html.escape(_to_str(delta_interest)),
@@ -1323,51 +1513,99 @@ def render_rq3_baseline_ablation(
     parts.append("<h3>Part B: Baseline comparison</h3>")
     baseline_rows: list[list[str]] = []
     for target in sorted(runs_by_target_config.keys()):
-        target_aggs = [row for row in config_aggregates if row["target"] == target]
-        if not target_aggs:
+        target_metrics = [row for row in run_metrics if row["target"] == target]
+        if not target_metrics:
             continue
-        best = max(target_aggs, key=lambda row: (row["mean_unique_bugs"] or -1.0, row["mean_interesting_tests"] or -1.0))
-        best_cfg = str(best["config"])
-        our_runs = runs_by_target_config.get(target, {}).get(best_cfg, [])
+        best_run_metric = max(
+            target_metrics,
+            key=lambda row: (int(row["total_unique_bugs"]), int(row["total_interesting_tests"])),
+        )
+        best_cfg = str(best_run_metric["config"])
+        best_run_id = str(best_run_metric["run_id"])
+        our_best_run_data = run_data_by_key.get((target, best_cfg, best_run_id))
 
         baseline = _load_baseline_rows(baseline_dir=baseline_results_dir, target=target)
         selected_baseline = _select_best_baseline_run(rows=baseline)
         selected_baseline_rows = [{k: str(v) for k, v in row.items()} for row in selected_baseline]
-        baseline_interesting = _compute_cumulative_metrics_over_iteration(rows=selected_baseline_rows, metric="interesting_tests")
+        baseline_interesting = _compute_cumulative_metrics_over_iteration(
+            rows=selected_baseline_rows,
+            metric="interesting_tests",
+            interesting_score_threshold=interesting_score_threshold,
+        )
         baseline_bugs = _compute_cumulative_metrics_over_iteration(rows=selected_baseline_rows, metric="unique_bugs")
-        our_interesting_lines = [
-            (f"our/{run.run_id}", _compute_cumulative_metrics_over_iteration(rows=run.rows, metric="interesting_tests"))
-            for run in our_runs
-        ]
-        our_bug_lines = [
-            (f"our/{run.run_id}", _compute_cumulative_metrics_over_iteration(rows=run.rows, metric="unique_bugs"))
-            for run in our_runs
-        ]
+        our_interesting_lines = []
+        our_bug_lines = []
+        if our_best_run_data is not None:
+            our_interesting_lines.append(
+                (
+                    "checkpoint_3",
+                    _compute_cumulative_metrics_over_iteration(
+                        rows=our_best_run_data.rows,
+                        metric="interesting_tests",
+                        interesting_score_threshold=interesting_score_threshold,
+                    ),
+                )
+            )
+            our_bug_lines.append(
+                (
+                    "checkpoint_3",
+                    _compute_cumulative_metrics_over_iteration(
+                        rows=_unique_bug_metric_rows(run=our_best_run_data),
+                        metric="unique_bugs",
+                    ),
+                )
+            )
+
+        checkpoint_2_bug_lines: list[tuple[str, list[tuple[int, int]]]] = []
+        checkpoint_2_metric = checkpoint_2_metrics_by_target.get(target)
+        checkpoint_2_run_data = checkpoint_2_run_data_by_target.get(target)
+        if checkpoint_2_metric is not None and checkpoint_2_run_data is not None:
+            checkpoint_2_bug_lines.append(
+                (
+                    "checkpoint_2",
+                    _compute_cumulative_metrics_over_iteration(
+                        rows=_unique_bug_metric_rows(run=checkpoint_2_run_data),
+                        metric="unique_bugs",
+                    ),
+                )
+            )
 
         fig_bugs = _plot_lines(
             title=f"RQ3 baseline unique bugs vs iteration — {target}",
             x_label="iteration",
             y_label="cumulative unique bugs",
-            lines=our_bug_lines + [("AFL++ baseline", [(float(x), y) for x, y in baseline_bugs])],
+            lines=our_bug_lines + checkpoint_2_bug_lines + [("AFL++ baseline", [(float(x), y) for x, y in baseline_bugs])],
             extend_to_chart_end=True,
         )
         out_bugs = charts_dir / f"rq3_baseline_unique_bugs_vs_time_{_slug(target)}.png"
         save_chart_png(fig_bugs, out_bugs)
         parts.append(_render_chart_html(title=f"Baseline unique bugs comparison ({target})", output_path=out_bugs, root=report_root))
 
-        our_best_run = max((m for m in run_metrics if m["target"] == target and m["config"] == best_cfg), key=lambda x: int(x["total_unique_bugs"]), default=None)
         baseline_rows.append(
             [
                 html.escape(target),
                 "our_fuzzer",
                 html.escape(best_cfg),
-                html.escape(_to_str(best["run_count"])),
-                html.escape(_to_str(best["mean_unique_bugs"])),
-                html.escape(_to_str(best["mean_interesting_tests"])),
-                html.escape(_to_str(best["mean_time_to_first_bug_seconds"])),
-                html.escape(str(our_best_run["run_id"]) if our_best_run else "Data unavailable"),
+                "1",
+                html.escape(_to_str(best_run_metric["total_unique_bugs"])),
+                html.escape(_to_str(best_run_metric["total_interesting_tests"])),
+                html.escape(_to_str(best_run_metric["time_to_first_bug_seconds"])),
+                html.escape(best_run_id),
             ]
         )
+        if checkpoint_2_metric is not None:
+            baseline_rows.append(
+                [
+                    html.escape(target),
+                    "checkpoint_2",
+                    html.escape(str(checkpoint_2_metric["config"])),
+                    "1",
+                    html.escape(_to_str(checkpoint_2_metric["total_unique_bugs"])),
+                    html.escape(_to_str(checkpoint_2_metric["total_interesting_tests"])),
+                    html.escape(_to_str(checkpoint_2_metric["time_to_first_bug_seconds"])),
+                    html.escape(str(checkpoint_2_metric["run_id"])),
+                ]
+            )
         baseline_rows.append(
             [
                 html.escape(target),
@@ -1380,8 +1618,10 @@ def render_rq3_baseline_ablation(
                         sum(
                             1
                             for row in selected_baseline
-                            if float(row.get("isinteresting_score", 0) or 0)
-                            > INTERESTING_SCORE_THRESHOLD
+                            if _is_interesting_score(
+                                score=_safe_float(row.get("isinteresting_score")),
+                                threshold=interesting_score_threshold,
+                            )
                         )
                     )
                 ),
@@ -1390,8 +1630,9 @@ def render_rq3_baseline_ablation(
             ]
         )
         parts.append(
-            f"<p class='meta'>Target <code>{html.escape(target)}</code>: best internal config is "
-            f"<code>{html.escape(best_cfg)}</code>. Baseline curves use iteration as x-axis as requested.</p>"
+            f"<p class='meta'>Target <code>{html.escape(target)}</code>: RQ3 uses only the best internal run "
+            f"<code>{html.escape(best_cfg)}/{html.escape(best_run_id)}</code>, labeled as <code>checkpoint_3</code> in the chart legend. "
+            "Baseline curves use iteration as x-axis as requested.</p>"
         )
 
     parts.append(
@@ -1401,9 +1642,9 @@ def render_rq3_baseline_ablation(
                 "system",
                 "config",
                 "runs",
-                "avg_unique_bugs",
-                "avg_interesting_tests",
-                "avg_time_to_first_bug_s",
+                "unique_bugs",
+                "interesting_tests",
+                "time_to_first_bug_s",
                 "best_run",
             ],
             rows=baseline_rows,
@@ -1426,7 +1667,7 @@ def render_rq4_stability(
         by_target.setdefault(str(row["target"]), []).append(row)
     stability_rows: list[list[str]] = []
     for target, rows in sorted(by_target.items()):
-        labels = [f"{row['config']}/{row['run_id']}" for row in rows]
+        labels = [f"run {idx}" for idx, _ in enumerate(rows, start=1)]
         uniq = [float(row["total_unique_bugs"]) for row in rows]
         interesting = [float(row["total_interesting_tests"]) for row in rows]
         fig = _plot_grouped_bar(
@@ -1480,13 +1721,23 @@ def render_rq4_stability(
     return "".join(parts)
 
 
-def generate_batch_report(*, batch_folder: Path) -> Path | None:
+def generate_batch_report(
+    *,
+    batch_folder: Path,
+    interesting_score_threshold: float = DEFAULT_INTERESTING_SCORE_THRESHOLD,
+) -> Path | None:
     run_folders = _find_run_folders(batch_folder=batch_folder)
     runs = [r for p in run_folders if (r := _load_run_data(run_folder=p)) is not None]
     if not runs:
         return None
 
-    run_metrics = [compute_run_metrics(run=run) for run in runs]
+    run_metrics = [
+        compute_run_metrics(
+            run=run,
+            interesting_score_threshold=interesting_score_threshold,
+        )
+        for run in runs
+    ]
     config_aggregates = compute_config_aggregates(run_metrics=run_metrics)
     setting_impacts = compute_setting_impacts(runs=runs, run_metrics=run_metrics)
     runs_by_target_config = _group_runs_by_target_config(runs=runs)
@@ -1503,6 +1754,7 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
             {
                 "batch_folder": str(batch_folder),
                 "generated_at": generated_at,
+                "interesting_score_threshold": interesting_score_threshold,
                 "run_metrics": run_metrics,
                 "config_aggregates": config_aggregates,
                 "setting_impacts": setting_impacts,
@@ -1541,6 +1793,7 @@ def generate_batch_report(*, batch_folder: Path) -> Path | None:
         charts_dir=charts_dir,
         report_root=batch_folder,
         baseline_results_dir=baseline_results_dir,
+        interesting_score_threshold=interesting_score_threshold,
     )
     rq4 = render_rq4_stability(
         run_metrics=run_metrics,

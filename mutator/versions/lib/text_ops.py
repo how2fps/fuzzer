@@ -266,6 +266,18 @@ def _separator_indexes(
         if char in capabilities.separator_chars
     ]
 
+def _replace_text_range(
+    *,
+    text: str,
+    start: int,
+    end: int,
+    replacement: str,
+) -> str | None:
+    candidate = text[:start] + replacement + text[end:]
+    if candidate == text:
+        return None
+    return sanitize_mutated_text(candidate)
+
 def _mutate_numeric_literal_in_text(*, text: str, rng: random.Random) -> str | None:
     numeric_ranges = _find_numeric_ranges(text=text)
     if not numeric_ranges:
@@ -410,6 +422,144 @@ def _separator_confusion(
     if candidate != text:
         return sanitize_mutated_text(candidate)
     return None
+
+def _structured_range_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    if "-" not in capabilities.literal_chars:
+        return None
+    numeric_ranges = _find_numeric_ranges(text=text)
+    if not numeric_ranges:
+        return None
+    start, end = rng.choice(numeric_ranges)
+    token = text[start:end]
+    if not token:
+        return None
+    separator_candidates = _separator_char_candidates(
+        text=text,
+        capabilities=capabilities,
+        min_occurrences=1,
+    )
+    strategy = rng.choice(
+        ("duplicate", "bounded_suffix", "segment_pair", "drop_left_endpoint_digit")
+    )
+    if strategy == "duplicate":
+        return _replace_text_range(
+            text=text,
+            start=start,
+            end=end,
+            replacement=f"{token}-{token}",
+        )
+    if strategy == "bounded_suffix":
+        if not token.lstrip("-").isdigit():
+            return None
+        base_value = int(token)
+        offset = rng.choice((1, 2, 5, 9))
+        return _replace_text_range(
+            text=text,
+            start=start,
+            end=end,
+            replacement=f"{token}-{base_value + offset}",
+        )
+    if strategy == "drop_left_endpoint_digit":
+        hyphen_indexes = [
+            index
+            for index, char in enumerate(text)
+            if char == "-" and index > 0 and text[index - 1].isdigit()
+        ]
+        if not hyphen_indexes:
+            return None
+        hyphen_index = rng.choice(hyphen_indexes)
+        candidate = text[: hyphen_index - 1] + text[hyphen_index:]
+        if candidate != text:
+            return sanitize_mutated_text(candidate)
+        return None
+    if not separator_candidates:
+        return None
+    separator = rng.choice(separator_candidates)
+    parts = [part for part in text.split(separator) if part]
+    if len(parts) < 2:
+        return None
+    source = rng.choice(parts)
+    peer_choices = [part for part in parts if part != source] or parts
+    peer = rng.choice(peer_choices)
+    if source == peer:
+        return None
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement=f"{source}-{peer}",
+    )
+
+def _wildcard_suffix_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    if "*" not in capabilities.literal_chars:
+        return None
+    separator_candidates = _separator_char_candidates(
+        text=text,
+        capabilities=capabilities,
+        min_occurrences=1,
+    )
+    if not separator_candidates:
+        return None
+    separator = rng.choice(separator_candidates)
+    parts = text.split(separator)
+    if len(parts) < 2:
+        return None
+    non_empty_indexes = [index for index, part in enumerate(parts) if part]
+    if not non_empty_indexes:
+        return None
+    target_index = rng.choice(non_empty_indexes)
+    strategy = rng.choice(("replace_tail", "truncate_tail", "duplicate_tail"))
+    candidate_parts = list(parts)
+    if strategy == "replace_tail":
+        candidate_parts[target_index] = "*"
+    elif strategy == "duplicate_tail":
+        if candidate_parts[target_index] != "*":
+            return None
+        candidate_parts[target_index] = "**"
+    else:
+        candidate_parts = candidate_parts[: target_index + 1]
+        candidate_parts[-1] = "*"
+    candidate = separator.join(candidate_parts)
+    if candidate != text:
+        return sanitize_mutated_text(candidate)
+    return None
+
+def _delimited_numeric_group_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    if not capabilities.paired_delimiters:
+        return None
+    numeric_ranges = _find_numeric_ranges(text=text)
+    if not numeric_ranges:
+        return None
+    start, end = rng.choice(numeric_ranges)
+    token = text[start:end]
+    if not token:
+        return None
+    opener, closer = rng.choice(capabilities.paired_delimiters)
+    inner = token
+    if "-" in capabilities.literal_chars and token.lstrip("-").isdigit():
+        offset = rng.choice((1, 2, 5, 9))
+        inner = f"{token}-{int(token) + offset}"
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement=f"{opener}{inner}{closer}",
+    )
 
 def _numeric_format_surgery(
     *,

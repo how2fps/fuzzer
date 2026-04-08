@@ -13,6 +13,7 @@ from .shared import (
 from .text_ops import (
     _boundary_chars,
     _cross_branch_alternation_splice,
+    _delimited_numeric_group_surgery,
     _duplicate_boundary_token,
     _embed_alternative_fragment,
     _generic_invalidate_text,
@@ -33,8 +34,10 @@ from .text_ops import (
     _replace_quoted_surrogate_pair_escape,
     _segment_count_change,
     _separator_confusion,
+    _structured_range_surgery,
     _trailing_or_leading_extra_data,
     _validate_probability,
+    _wildcard_suffix_surgery,
 )
 
 def _always_supported(_capabilities: GrammarCapabilities) -> bool:
@@ -70,6 +73,21 @@ def _supports_alternation_operator(capabilities: GrammarCapabilities) -> bool:
 
 def _supports_alternative_embed_operator(capabilities: GrammarCapabilities) -> bool:
     return capabilities.has_alternation and capabilities.has_delimiter_literals
+
+def _supports_structured_range_operator(capabilities: GrammarCapabilities) -> bool:
+    return (
+        capabilities.has_numeric_literals
+        and "-" in capabilities.literal_chars
+        and bool(capabilities.separator_chars)
+    )
+
+def _supports_wildcard_suffix_operator(capabilities: GrammarCapabilities) -> bool:
+    return "*" in capabilities.literal_chars and bool(capabilities.separator_chars)
+
+def _supports_delimited_numeric_group_operator(
+    capabilities: GrammarCapabilities,
+) -> bool:
+    return capabilities.has_numeric_literals and bool(capabilities.paired_delimiters)
 
 def _supported_grammar_operator_specs(
     *,
@@ -352,6 +370,39 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
         invalid_weight=1.8,
         supports=_supports_segment_count_operator,
         apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _segment_count_change(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="structured_range_surgery",
+        valid_weight=0.9,
+        invalid_weight=1.6,
+        supports=_supports_structured_range_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _structured_range_surgery(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="wildcard_suffix_surgery",
+        valid_weight=0.8,
+        invalid_weight=1.2,
+        supports=_supports_wildcard_suffix_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _wildcard_suffix_surgery(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="delimited_numeric_group_surgery",
+        valid_weight=0.8,
+        invalid_weight=1.5,
+        supports=_supports_delimited_numeric_group_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _delimited_numeric_group_surgery(
             text=original_text,
             rng=rng,
             capabilities=capabilities,

@@ -1,0 +1,860 @@
+  0           0 RESUME                   0
+
+  1           2 LOAD_CONST               0 (0)
+              4 LOAD_CONST               1 (('ArgumentParser', 'RawDescriptionHelpFormatter'))
+              6 IMPORT_NAME              0 (argparse)
+              8 IMPORT_FROM              1 (ArgumentParser)
+             10 STORE_NAME               1 (ArgumentParser)
+             12 IMPORT_FROM              2 (RawDescriptionHelpFormatter)
+             14 STORE_NAME               2 (RawDescriptionHelpFormatter)
+             16 POP_TOP
+
+  2          18 LOAD_CONST               0 (0)
+             20 LOAD_CONST               2 (('defaultdict',))
+             22 IMPORT_NAME              3 (collections)
+             24 IMPORT_FROM              4 (defaultdict)
+             26 STORE_NAME               4 (defaultdict)
+             28 POP_TOP
+
+  3          30 LOAD_CONST               0 (0)
+             32 LOAD_CONST               3 (None)
+             34 IMPORT_NAME              5 (os)
+             36 STORE_NAME               5 (os)
+
+  5          38 LOAD_CONST               0 (0)
+             40 LOAD_CONST               3 (None)
+             42 IMPORT_NAME              6 (traceback)
+             44 STORE_NAME               6 (traceback)
+
+  6          46 LOAD_CONST               0 (0)
+             48 LOAD_CONST               4 (('IPv4', 'FunctionalBug', 'PerformanceBug', 'BoundaryBug', 'InvalidityBug'))
+             50 IMPORT_NAME              7 (buggy_ipyparse.ipv4_stv)
+             52 IMPORT_FROM              8 (IPv4)
+             54 STORE_NAME               8 (IPv4)
+             56 IMPORT_FROM              9 (FunctionalBug)
+             58 STORE_NAME               9 (FunctionalBug)
+             60 IMPORT_FROM             10 (PerformanceBug)
+             62 STORE_NAME              10 (PerformanceBug)
+             64 IMPORT_FROM             11 (BoundaryBug)
+             66 STORE_NAME              11 (BoundaryBug)
+             68 IMPORT_FROM             12 (InvalidityBug)
+             70 STORE_NAME              12 (InvalidityBug)
+             72 POP_TOP
+
+  7          74 LOAD_CONST               0 (0)
+             76 LOAD_CONST               5 (('ParseException',))
+             78 IMPORT_NAME             13 (pyparsing)
+             80 IMPORT_FROM             14 (ParseException)
+             82 STORE_NAME              14 (ParseException)
+             84 POP_TOP
+
+  8          86 LOAD_CONST               0 (0)
+             88 LOAD_CONST               3 (None)
+             90 IMPORT_NAME             15 (pandas)
+             92 STORE_NAME              16 (pd)
+
+  9          94 LOAD_CONST               0 (0)
+             96 LOAD_CONST               6 (('datetime', 'UTC'))
+             98 IMPORT_NAME             17 (datetime)
+            100 IMPORT_FROM             17 (datetime)
+            102 STORE_NAME              17 (datetime)
+            104 IMPORT_FROM             18 (UTC)
+            106 STORE_NAME              18 (UTC)
+            108 POP_TOP
+
+103         110 LOAD_CONST               7 ('exc')
+            112 LOAD_NAME               19 (Exception)
+            114 BUILD_TUPLE              2
+            116 LOAD_CONST               8 (<code object track_exception at 0x7d0bd79b7480, file "ipv4_parser_stv.py", line 103>)
+            118 MAKE_FUNCTION            4 (annotations)
+            120 STORE_NAME              20 (track_exception)
+
+121         122 LOAD_CONST              41 (('logs', 'tracebacks.log'))
+            124 LOAD_CONST              10 (<code object log_full_traceback at 0x56e5f6517590, file "ipv4_parser_stv.py", line 121>)
+            126 MAKE_FUNCTION            1 (defaults)
+            128 STORE_NAME              21 (log_full_traceback)
+
+139         130 LOAD_CONST              11 (<code object bug_count_to_csv at 0x56e5f65419a0, file "ipv4_parser_stv.py", line 139>)
+            132 MAKE_FUNCTION            0
+            134 STORE_NAME              22 (bug_count_to_csv)
+
+174         136 LOAD_NAME               23 (__name__)
+            138 LOAD_CONST              12 ('__main__')
+            140 COMPARE_OP              40 (==)
+            144 POP_JUMP_IF_FALSE      196 (to 538)
+
+175         146 PUSH_NULL
+            148 LOAD_NAME                1 (ArgumentParser)
+            150 LOAD_CONST              13 ('ipv4 parser')
+            152 LOAD_CONST              14 ('Convert an IPv4 address to a 32-bit integer.')
+            154 LOAD_NAME                2 (RawDescriptionHelpFormatter)
+            156 KW_NAMES                15 (('description', 'formatter_class'))
+            158 CALL                     3
+            166 STORE_NAME              24 (parser)
+
+176         168 LOAD_NAME               24 (parser)
+            170 LOAD_ATTR               51 (NULL|self + add_argument)
+            190 LOAD_CONST              16 ('--ipstr')
+            192 LOAD_CONST              17 ('The IP string to obtain the 32-bit integer from.')
+            194 KW_NAMES                18 (('help',))
+            196 CALL                     2
+            204 POP_TOP
+
+182         206 LOAD_NAME               24 (parser)
+            208 LOAD_ATTR               53 (NULL|self + parse_args)
+            228 CALL                     0
+            236 STORE_NAME              27 (args)
+
+190         238 PUSH_NULL
+            240 LOAD_NAME                4 (defaultdict)
+            242 LOAD_NAME               28 (int)
+            244 CALL                     1
+            252 STORE_NAME              29 (bug_count)
+
+218         254 NOP
+
+219         256 PUSH_NULL
+            258 LOAD_NAME               30 (print)
+            260 LOAD_CONST              19 ('Running the IPv4 parser with ipstr: ')
+            262 LOAD_NAME               27 (args)
+            264 LOAD_ATTR               62 (ipstr)
+            284 FORMAT_VALUE             0
+            286 BUILD_STRING             2
+            288 CALL                     1
+            296 POP_TOP
+
+220         298 PUSH_NULL
+            300 LOAD_NAME                8 (IPv4)
+            302 LOAD_ATTR               64 (parse_string)
+            322 LOAD_NAME               27 (args)
+            324 LOAD_ATTR               62 (ipstr)
+            344 LOAD_CONST              20 (True)
+            346 KW_NAMES                21 (('parse_all',))
+            348 CALL                     2
+            356 STORE_NAME              33 (result)
+
+221         358 PUSH_NULL
+            360 LOAD_NAME               30 (print)
+            362 LOAD_CONST              22 ('Output: ')
+            364 LOAD_NAME               33 (result)
+            366 FORMAT_VALUE             0
+            368 BUILD_STRING             2
+            370 CALL                     1
+            378 POP_TOP
+
+267     >>  380 LOAD_CONST               9 ('logs')
+            382 STORE_NAME              37 (logs_dir)
+
+268         384 PUSH_NULL
+            386 LOAD_NAME                5 (os)
+            388 LOAD_ATTR               76 (makedirs)
+            408 LOAD_NAME               37 (logs_dir)
+            410 LOAD_CONST              20 (True)
+            412 KW_NAMES                37 (('exist_ok',))
+            414 CALL                     2
+            422 POP_TOP
+
+269         424 LOAD_NAME                5 (os)
+            426 LOAD_ATTR               78 (path)
+            446 LOAD_ATTR               81 (NULL|self + join)
+            466 LOAD_NAME               37 (logs_dir)
+            468 LOAD_CONST              38 ('bug_counts.csv')
+            470 CALL                     2
+            478 STORE_NAME              41 (csv_path)
+
+270         480 PUSH_NULL
+            482 LOAD_NAME               22 (bug_count_to_csv)
+            484 LOAD_NAME               29 (bug_count)
+            486 LOAD_NAME               41 (csv_path)
+            488 CALL                     2
+            496 POP_TOP
+
+272         498 PUSH_NULL
+            500 LOAD_NAME               30 (print)
+            502 LOAD_CONST              39 ('Saved bug count report and tracebacks for the bugs encountered!')
+            504 CALL                     1
+            512 POP_TOP
+
+273         514 PUSH_NULL
+            516 LOAD_NAME               30 (print)
+            518 LOAD_CONST              40 ('Final bug count: ')
+            520 LOAD_NAME               29 (bug_count)
+            522 FORMAT_VALUE             0
+            524 BUILD_STRING             2
+            526 CALL                     1
+            534 POP_TOP
+            536 RETURN_CONST             3 (None)
+
+174     >>  538 RETURN_CONST             3 (None)
+        >>  540 PUSH_EXC_INFO
+
+222         542 LOAD_NAME                9 (FunctionalBug)
+            544 CHECK_EXC_MATCH
+            546 POP_JUMP_IF_FALSE       55 (to 658)
+            548 STORE_NAME              34 (e)
+
+223         550 PUSH_NULL
+            552 LOAD_NAME               30 (print)
+            554 LOAD_CONST              23 ('A functional bug has been triggered: ')
+            556 LOAD_NAME               34 (e)
+            558 FORMAT_VALUE             0
+            560 BUILD_STRING             2
+            562 CALL                     1
+            570 POP_TOP
+
+224         572 PUSH_NULL
+            574 LOAD_NAME               21 (log_full_traceback)
+            576 LOAD_NAME               34 (e)
+            578 LOAD_CONST              24 ('functional')
+            580 CALL                     2
+            588 POP_TOP
+
+225         590 PUSH_NULL
+            592 LOAD_NAME               20 (track_exception)
+            594 LOAD_NAME               34 (e)
+            596 CALL                     1
+            604 STORE_NAME              35 (bug_id)
+
+226         606 LOAD_NAME               29 (bug_count)
+            608 LOAD_CONST              24 ('functional')
+            610 BUILD_LIST               1
+            612 LOAD_NAME               35 (bug_id)
+            614 LIST_EXTEND              1
+            616 CALL_INTRINSIC_1         6 (INTRINSIC_LIST_TO_TUPLE)
+            618 COPY                     2
+            620 COPY                     2
+            622 BINARY_SUBSCR
+            626 LOAD_CONST              25 (1)
+            628 BINARY_OP               13 (+=)
+            632 SWAP                     3
+            634 SWAP                     2
+            636 STORE_SUBSCR
+            640 POP_EXCEPT
+            642 LOAD_CONST               3 (None)
+            644 STORE_NAME              34 (e)
+            646 DELETE_NAME             34 (e)
+            648 JUMP_BACKWARD          135 (to 380)
+        >>  650 LOAD_CONST               3 (None)
+            652 STORE_NAME              34 (e)
+            654 DELETE_NAME             34 (e)
+            656 RERAISE                  1
+
+228     >>  658 LOAD_NAME               12 (InvalidityBug)
+            660 CHECK_EXC_MATCH
+            662 POP_JUMP_IF_FALSE       55 (to 774)
+            664 STORE_NAME              34 (e)
+
+229         666 PUSH_NULL
+            668 LOAD_NAME               30 (print)
+            670 LOAD_CONST              26 ('An invalidity bug has been triggered: ')
+            672 LOAD_NAME               34 (e)
+            674 FORMAT_VALUE             0
+            676 BUILD_STRING             2
+            678 CALL                     1
+            686 POP_TOP
+
+230         688 PUSH_NULL
+            690 LOAD_NAME               21 (log_full_traceback)
+            692 LOAD_NAME               34 (e)
+            694 LOAD_CONST              27 ('invalidity')
+            696 CALL                     2
+            704 POP_TOP
+
+231         706 PUSH_NULL
+            708 LOAD_NAME               20 (track_exception)
+            710 LOAD_NAME               34 (e)
+            712 CALL                     1
+            720 STORE_NAME              35 (bug_id)
+
+232         722 LOAD_NAME               29 (bug_count)
+            724 LOAD_CONST              27 ('invalidity')
+            726 BUILD_LIST               1
+            728 LOAD_NAME               35 (bug_id)
+            730 LIST_EXTEND              1
+            732 CALL_INTRINSIC_1         6 (INTRINSIC_LIST_TO_TUPLE)
+            734 COPY                     2
+            736 COPY                     2
+            738 BINARY_SUBSCR
+            742 LOAD_CONST              25 (1)
+            744 BINARY_OP               13 (+=)
+            748 SWAP                     3
+            750 SWAP                     2
+            752 STORE_SUBSCR
+            756 POP_EXCEPT
+            758 LOAD_CONST               3 (None)
+            760 STORE_NAME              34 (e)
+            762 DELETE_NAME             34 (e)
+            764 JUMP_BACKWARD          193 (to 380)
+        >>  766 LOAD_CONST               3 (None)
+            768 STORE_NAME              34 (e)
+            770 DELETE_NAME             34 (e)
+            772 RERAISE                  1
+
+234     >>  774 LOAD_NAME               14 (ParseException)
+            776 CHECK_EXC_MATCH
+            778 POP_JUMP_IF_FALSE       97 (to 974)
+            780 STORE_NAME              34 (e)
+
+235         782 PUSH_NULL
+            784 LOAD_NAME               20 (track_exception)
+            786 LOAD_NAME               34 (e)
+            788 CALL                     1
+            796 STORE_NAME              35 (bug_id)
+
+236         798 LOAD_CONST              28 ('255')
+            800 LOAD_NAME               27 (args)
+            802 LOAD_ATTR               62 (ipstr)
+            822 CONTAINS_OP              0
+            824 POP_JUMP_IF_FALSE       38 (to 902)
+
+237         826 PUSH_NULL
+            828 LOAD_NAME               30 (print)
+            830 LOAD_CONST              29 ('A validity bug has been triggered: ')
+            832 LOAD_NAME               34 (e)
+            834 FORMAT_VALUE             0
+            836 BUILD_STRING             2
+            838 CALL                     1
+            846 POP_TOP
+
+238         848 PUSH_NULL
+            850 LOAD_NAME               21 (log_full_traceback)
+            852 LOAD_NAME               34 (e)
+            854 LOAD_CONST              30 ('validity')
+            856 CALL                     2
+            864 POP_TOP
+
+239         866 LOAD_NAME               29 (bug_count)
+            868 LOAD_CONST              30 ('validity')
+            870 BUILD_LIST               1
+            872 LOAD_NAME               35 (bug_id)
+            874 LIST_EXTEND              1
+            876 CALL_INTRINSIC_1         6 (INTRINSIC_LIST_TO_TUPLE)
+            878 COPY                     2
+            880 COPY                     2
+            882 BINARY_SUBSCR
+            886 LOAD_CONST              25 (1)
+            888 BINARY_OP               13 (+=)
+            892 SWAP                     3
+            894 SWAP                     2
+            896 STORE_SUBSCR
+            900 JUMP_FORWARD            26 (to 954)
+
+241     >>  902 PUSH_NULL
+            904 LOAD_NAME               21 (log_full_traceback)
+            906 LOAD_NAME               34 (e)
+            908 LOAD_CONST              27 ('invalidity')
+            910 CALL                     2
+            918 POP_TOP
+
+242         920 LOAD_NAME               29 (bug_count)
+            922 LOAD_CONST              27 ('invalidity')
+            924 BUILD_LIST               1
+            926 LOAD_NAME               35 (bug_id)
+            928 LIST_EXTEND              1
+            930 CALL_INTRINSIC_1         6 (INTRINSIC_LIST_TO_TUPLE)
+            932 COPY                     2
+            934 COPY                     2
+            936 BINARY_SUBSCR
+            940 LOAD_CONST              25 (1)
+            942 BINARY_OP               13 (+=)
+            946 SWAP                     3
+            948 SWAP                     2
+            950 STORE_SUBSCR
+        >>  954 POP_EXCEPT
+            956 LOAD_CONST               3 (None)
+            958 STORE_NAME              34 (e)
+            960 DELETE_NAME             34 (e)
+            962 EXTENDED_ARG             1
+            964 JUMP_BACKWARD          293 (to 380)
+        >>  966 LOAD_CONST               3 (None)
+            968 STORE_NAME              34 (e)
+            970 DELETE_NAME             34 (e)
+            972 RERAISE                  1
+
+244     >>  974 LOAD_NAME               11 (BoundaryBug)
+            976 CHECK_EXC_MATCH
+            978 POP_JUMP_IF_FALSE       56 (to 1092)
+            980 STORE_NAME              34 (e)
+
+245         982 PUSH_NULL
+            984 LOAD_NAME               30 (print)
+            986 LOAD_CONST              31 ('A boundary bug has been triggered: ')
+            988 LOAD_NAME               34 (e)
+            990 FORMAT_VALUE             0
+            992 BUILD_STRING             2
+            994 CALL                     1
+           1002 POP_TOP
+
+246        1004 PUSH_NULL
+           1006 LOAD_NAME               21 (log_full_traceback)
+           1008 LOAD_NAME               34 (e)
+           1010 LOAD_CONST              32 ('boundary')
+           1012 CALL                     2
+           1020 POP_TOP
+
+247        1022 PUSH_NULL
+           1024 LOAD_NAME               20 (track_exception)
+           1026 LOAD_NAME               34 (e)
+           1028 CALL                     1
+           1036 STORE_NAME              35 (bug_id)
+
+248        1038 LOAD_NAME               29 (bug_count)
+           1040 LOAD_CONST              32 ('boundary')
+           1042 BUILD_LIST               1
+           1044 LOAD_NAME               35 (bug_id)
+           1046 LIST_EXTEND              1
+           1048 CALL_INTRINSIC_1         6 (INTRINSIC_LIST_TO_TUPLE)
+           1050 COPY                     2
+           1052 COPY                     2
+           1054 BINARY_SUBSCR
+           1058 LOAD_CONST              25 (1)
+           1060 BINARY_OP               13 (+=)
+           1064 SWAP                     3
+           1066 SWAP                     2
+           1068 STORE_SUBSCR
+           1072 POP_EXCEPT
+           1074 LOAD_CONST               3 (None)
+           1076 STORE_NAME              34 (e)
+           1078 DELETE_NAME             34 (e)
+           1080 EXTENDED_ARG             1
+           1082 JUMP_BACKWARD          352 (to 380)
+        >> 1084 LOAD_CONST               3 (None)
+           1086 STORE_NAME              34 (e)
+           1088 DELETE_NAME             34 (e)
+           1090 RERAISE                  1
+
+250     >> 1092 LOAD_NAME               10 (PerformanceBug)
+           1094 CHECK_EXC_MATCH
+           1096 POP_JUMP_IF_FALSE       56 (to 1210)
+           1098 STORE_NAME              34 (e)
+
+251        1100 PUSH_NULL
+           1102 LOAD_NAME               30 (print)
+           1104 LOAD_CONST              33 ('A performance bug has been triggered: ')
+           1106 LOAD_NAME               34 (e)
+           1108 FORMAT_VALUE             0
+           1110 BUILD_STRING             2
+           1112 CALL                     1
+           1120 POP_TOP
+
+252        1122 PUSH_NULL
+           1124 LOAD_NAME               21 (log_full_traceback)
+           1126 LOAD_NAME               34 (e)
+           1128 LOAD_CONST              34 ('performance')
+           1130 CALL                     2
+           1138 POP_TOP
+
+253        1140 PUSH_NULL
+           1142 LOAD_NAME               20 (track_exception)
+           1144 LOAD_NAME               34 (e)
+           1146 CALL                     1
+           1154 STORE_NAME              35 (bug_id)
+
+254        1156 LOAD_NAME               29 (bug_count)
+           1158 LOAD_CONST              34 ('performance')
+           1160 BUILD_LIST               1
+           1162 LOAD_NAME               35 (bug_id)
+           1164 LIST_EXTEND              1
+           1166 CALL_INTRINSIC_1         6 (INTRINSIC_LIST_TO_TUPLE)
+           1168 COPY                     2
+           1170 COPY                     2
+           1172 BINARY_SUBSCR
+           1176 LOAD_CONST              25 (1)
+           1178 BINARY_OP               13 (+=)
+           1182 SWAP                     3
+           1184 SWAP                     2
+           1186 STORE_SUBSCR
+           1190 POP_EXCEPT
+           1192 LOAD_CONST               3 (None)
+           1194 STORE_NAME              34 (e)
+           1196 DELETE_NAME             34 (e)
+           1198 EXTENDED_ARG             1
+           1200 JUMP_BACKWARD          411 (to 380)
+        >> 1202 LOAD_CONST               3 (None)
+           1204 STORE_NAME              34 (e)
+           1206 DELETE_NAME             34 (e)
+           1208 RERAISE                  1
+
+256     >> 1210 LOAD_NAME               19 (Exception)
+           1212 CHECK_EXC_MATCH
+           1214 POP_JUMP_IF_FALSE       73 (to 1362)
+           1216 STORE_NAME              34 (e)
+
+257        1218 PUSH_NULL
+           1220 LOAD_NAME               30 (print)
+           1222 LOAD_CONST              35 ('An unknown exception has been triggered. ')
+           1224 LOAD_NAME               34 (e)
+           1226 FORMAT_VALUE             0
+           1228 BUILD_STRING             2
+           1230 CALL                     1
+           1238 POP_TOP
+
+258        1240 PUSH_NULL
+           1242 LOAD_NAME               21 (log_full_traceback)
+           1244 LOAD_NAME               34 (e)
+           1246 LOAD_CONST              36 ('bonus')
+           1248 CALL                     2
+           1256 POP_TOP
+
+259        1258 PUSH_NULL
+           1260 LOAD_NAME                6 (traceback)
+           1262 LOAD_ATTR               72 (print_exc)
+           1282 CALL                     0
+           1290 POP_TOP
+
+260        1292 PUSH_NULL
+           1294 LOAD_NAME               20 (track_exception)
+           1296 LOAD_NAME               34 (e)
+           1298 CALL                     1
+           1306 STORE_NAME              35 (bug_id)
+
+261        1308 LOAD_NAME               29 (bug_count)
+           1310 LOAD_CONST              36 ('bonus')
+           1312 BUILD_LIST               1
+           1314 LOAD_NAME               35 (bug_id)
+           1316 LIST_EXTEND              1
+           1318 CALL_INTRINSIC_1         6 (INTRINSIC_LIST_TO_TUPLE)
+           1320 COPY                     2
+           1322 COPY                     2
+           1324 BINARY_SUBSCR
+           1328 LOAD_CONST              25 (1)
+           1330 BINARY_OP               13 (+=)
+           1334 SWAP                     3
+           1336 SWAP                     2
+           1338 STORE_SUBSCR
+           1342 POP_EXCEPT
+           1344 LOAD_CONST               3 (None)
+           1346 STORE_NAME              34 (e)
+           1348 DELETE_NAME             34 (e)
+           1350 EXTENDED_ARG             1
+           1352 JUMP_BACKWARD          487 (to 380)
+        >> 1354 LOAD_CONST               3 (None)
+           1356 STORE_NAME              34 (e)
+           1358 DELETE_NAME             34 (e)
+           1360 RERAISE                  1
+
+256     >> 1362 RERAISE                  0
+        >> 1364 COPY                     3
+           1366 POP_EXCEPT
+           1368 RERAISE                  1
+ExceptionTable:
+  256 to 378 -> 540 [0]
+  540 to 548 -> 1364 [1] lasti
+  550 to 638 -> 650 [1] lasti
+  650 to 664 -> 1364 [1] lasti
+  666 to 754 -> 766 [1] lasti
+  766 to 780 -> 1364 [1] lasti
+  782 to 952 -> 966 [1] lasti
+  966 to 980 -> 1364 [1] lasti
+  982 to 1070 -> 1084 [1] lasti
+  1084 to 1098 -> 1364 [1] lasti
+  1100 to 1188 -> 1202 [1] lasti
+  1202 to 1216 -> 1364 [1] lasti
+  1218 to 1340 -> 1354 [1] lasti
+  1354 to 1362 -> 1364 [1] lasti
+
+Disassembly of <code object track_exception at 0x7d0bd79b7480, file "ipv4_parser_stv.py", line 103>:
+103           0 RESUME                   0
+
+104           2 LOAD_FAST                0 (exc)
+              4 LOAD_ATTR                0 (__traceback__)
+             24 STORE_FAST               1 (tb)
+
+105          26 LOAD_GLOBAL              3 (NULL + traceback)
+             36 LOAD_ATTR                4 (extract_tb)
+             56 LOAD_FAST                1 (tb)
+             58 CALL                     1
+             66 LOAD_CONST               1 (-1)
+             68 BINARY_SUBSCR
+             72 STORE_FAST               2 (last_frame)
+
+108          74 LOAD_GLOBAL              7 (NULL + type)
+             84 LOAD_FAST                0 (exc)
+             86 CALL                     1
+
+109          94 LOAD_GLOBAL              9 (NULL + str)
+            104 LOAD_FAST                0 (exc)
+            106 CALL                     1
+
+110         114 LOAD_FAST                2 (last_frame)
+            116 LOAD_ATTR               10 (filename)
+
+111         136 LOAD_FAST                2 (last_frame)
+            138 LOAD_ATTR               12 (lineno)
+
+107         158 BUILD_TUPLE              4
+            160 STORE_FAST               3 (bug_id)
+
+113         162 LOAD_GLOBAL             15 (NULL + print)
+            172 LOAD_CONST               2 ('============================================================')
+            174 CALL                     1
+            182 POP_TOP
+
+114         184 LOAD_GLOBAL             15 (NULL + print)
+            194 LOAD_CONST               3 ('TRACEBACK')
+            196 CALL                     1
+            204 POP_TOP
+
+115         206 LOAD_GLOBAL             15 (NULL + print)
+            216 LOAD_CONST               2 ('============================================================')
+            218 CALL                     1
+            226 POP_TOP
+
+116         228 LOAD_GLOBAL              3 (NULL + traceback)
+            238 LOAD_ATTR               16 (print_exc)
+            258 CALL                     0
+            266 POP_TOP
+
+117         268 LOAD_GLOBAL             15 (NULL + print)
+            278 LOAD_CONST               2 ('============================================================')
+            280 CALL                     1
+            288 POP_TOP
+
+119         290 LOAD_FAST                3 (bug_id)
+            292 RETURN_VALUE
+
+Disassembly of <code object log_full_traceback at 0x56e5f6517590, file "ipv4_parser_stv.py", line 121>:
+121           0 RESUME                   0
+
+125           2 LOAD_GLOBAL              1 (NULL + os)
+             12 LOAD_ATTR                2 (makedirs)
+             32 LOAD_FAST                2 (log_dir)
+             34 LOAD_CONST               1 (True)
+             36 KW_NAMES                 2 (('exist_ok',))
+             38 CALL                     2
+             46 POP_TOP
+
+126          48 LOAD_GLOBAL              0 (os)
+             58 LOAD_ATTR                4 (path)
+             78 LOAD_ATTR                7 (NULL|self + join)
+             98 LOAD_FAST                2 (log_dir)
+            100 LOAD_FAST                3 (filename)
+            102 CALL                     2
+            110 STORE_FAST               4 (log_path)
+
+128         112 LOAD_GLOBAL              9 (NULL + datetime)
+            122 LOAD_ATTR               10 (now)
+            142 LOAD_GLOBAL             12 (UTC)
+            152 CALL                     1
+            160 STORE_FAST               5 (timestamp)
+
+130         162 LOAD_GLOBAL             15 (NULL + open)
+            172 LOAD_FAST                4 (log_path)
+            174 LOAD_CONST               3 ('a')
+            176 CALL                     2
+            184 BEFORE_WITH
+            186 STORE_FAST               6 (f)
+
+131         188 LOAD_FAST                6 (f)
+            190 LOAD_ATTR               17 (NULL|self + write)
+            210 LOAD_CONST               4 ('================================================================================\n')
+            212 CALL                     1
+            220 POP_TOP
+
+132         222 LOAD_FAST                6 (f)
+            224 LOAD_ATTR               17 (NULL|self + write)
+            244 LOAD_CONST               5 ('Timestamp : ')
+            246 LOAD_FAST                5 (timestamp)
+            248 FORMAT_VALUE             0
+            250 LOAD_CONST               6 ('\n')
+            252 BUILD_STRING             3
+            254 CALL                     1
+            262 POP_TOP
+
+133         264 LOAD_FAST                6 (f)
+            266 LOAD_ATTR               17 (NULL|self + write)
+            286 LOAD_CONST               7 ('Bug Type  : ')
+            288 LOAD_FAST                1 (bug_type)
+            290 FORMAT_VALUE             0
+            292 LOAD_CONST               6 ('\n')
+            294 BUILD_STRING             3
+            296 CALL                     1
+            304 POP_TOP
+
+134         306 LOAD_FAST                6 (f)
+            308 LOAD_ATTR               17 (NULL|self + write)
+            328 LOAD_CONST               8 ('Exception: ')
+            330 LOAD_GLOBAL             19 (NULL + type)
+            340 LOAD_FAST                0 (exc)
+            342 CALL                     1
+            350 LOAD_ATTR               20 (__name__)
+            370 FORMAT_VALUE             0
+            372 LOAD_CONST               9 (': ')
+            374 LOAD_FAST                0 (exc)
+            376 FORMAT_VALUE             0
+            378 LOAD_CONST              10 ('\n\n')
+            380 BUILD_STRING             5
+            382 CALL                     1
+            390 POP_TOP
+
+135         392 LOAD_FAST                6 (f)
+            394 LOAD_ATTR               17 (NULL|self + write)
+            414 LOAD_CONST              11 ('Traceback:\n')
+            416 CALL                     1
+            424 POP_TOP
+
+136         426 LOAD_FAST                6 (f)
+            428 LOAD_ATTR               17 (NULL|self + write)
+            448 LOAD_CONST              12 ('')
+            450 LOAD_ATTR                7 (NULL|self + join)
+            470 LOAD_GLOBAL             23 (NULL + traceback)
+            480 LOAD_ATTR               24 (format_exception)
+            500 LOAD_FAST                0 (exc)
+            502 CALL                     1
+            510 CALL                     1
+            518 CALL                     1
+            526 POP_TOP
+
+137         528 LOAD_FAST                6 (f)
+            530 LOAD_ATTR               17 (NULL|self + write)
+            550 LOAD_CONST              10 ('\n\n')
+            552 CALL                     1
+            560 POP_TOP
+
+130         562 LOAD_CONST              13 (None)
+            564 LOAD_CONST              13 (None)
+            566 LOAD_CONST              13 (None)
+            568 CALL                     2
+            576 POP_TOP
+            578 RETURN_CONST            13 (None)
+        >>  580 PUSH_EXC_INFO
+            582 WITH_EXCEPT_START
+            584 POP_JUMP_IF_TRUE         1 (to 588)
+            586 RERAISE                  2
+        >>  588 POP_TOP
+            590 POP_EXCEPT
+            592 POP_TOP
+            594 POP_TOP
+            596 RETURN_CONST            13 (None)
+        >>  598 COPY                     3
+            600 POP_EXCEPT
+            602 RERAISE                  1
+ExceptionTable:
+  186 to 560 -> 580 [1] lasti
+  580 to 588 -> 598 [3] lasti
+
+Disassembly of <code object bug_count_to_csv at 0x56e5f65419a0, file "ipv4_parser_stv.py", line 139>:
+139           0 RESUME                   0
+
+140           2 BUILD_LIST               0
+              4 STORE_FAST               2 (rows)
+
+142           6 LOAD_FAST                0 (bug_count)
+              8 POP_JUMP_IF_TRUE        12 (to 34)
+
+143          10 LOAD_GLOBAL              1 (NULL + print)
+             20 LOAD_CONST               1 ('No bugs found. Skipping CSV creation')
+             22 CALL                     1
+             30 POP_TOP
+
+144          32 RETURN_CONST             0 (None)
+
+146     >>   34 LOAD_FAST                0 (bug_count)
+             36 LOAD_ATTR                3 (NULL|self + items)
+             56 CALL                     0
+             64 GET_ITER
+        >>   66 FOR_ITER                47 (to 164)
+             70 UNPACK_SEQUENCE          2
+             74 STORE_FAST               3 (key)
+             76 STORE_FAST               4 (count)
+
+147          78 LOAD_FAST                3 (key)
+             80 UNPACK_SEQUENCE          5
+             84 STORE_FAST               5 (bug_type)
+             86 STORE_FAST               6 (exc_type)
+             88 STORE_FAST               7 (exc_message)
+             90 STORE_FAST               8 (filename)
+             92 STORE_FAST               9 (lineno)
+
+148          94 LOAD_FAST                2 (rows)
+             96 LOAD_ATTR                5 (NULL|self + append)
+
+149         116 LOAD_FAST                5 (bug_type)
+
+150         118 LOAD_FAST                6 (exc_type)
+            120 LOAD_ATTR                6 (__name__)
+
+151         140 LOAD_FAST                7 (exc_message)
+
+152         142 LOAD_FAST                8 (filename)
+
+153         144 LOAD_FAST                9 (lineno)
+
+154         146 LOAD_FAST                4 (count)
+
+148         148 LOAD_CONST               2 (('bug_type', 'exc_type', 'exc_message', 'filename', 'lineno', 'count'))
+            150 BUILD_CONST_KEY_MAP      6
+            152 CALL                     1
+            160 POP_TOP
+            162 JUMP_BACKWARD           49 (to 66)
+
+146     >>  164 END_FOR
+
+157         166 LOAD_GLOBAL              9 (NULL + pd)
+            176 LOAD_ATTR               10 (DataFrame)
+            196 LOAD_FAST                2 (rows)
+            198 CALL                     1
+            206 STORE_FAST              10 (new_df)
+
+159         208 LOAD_GLOBAL             12 (os)
+            218 LOAD_ATTR               14 (path)
+            238 LOAD_ATTR               17 (NULL|self + exists)
+            258 LOAD_FAST                1 (output_path)
+            260 CALL                     1
+            268 POP_JUMP_IF_FALSE       85 (to 440)
+
+160         270 LOAD_GLOBAL              9 (NULL + pd)
+            280 LOAD_ATTR               18 (read_csv)
+            300 LOAD_FAST                1 (output_path)
+            302 CALL                     1
+            310 STORE_FAST              11 (existing_df)
+
+162         312 LOAD_GLOBAL              9 (NULL + pd)
+            322 LOAD_ATTR               20 (concat)
+            342 LOAD_FAST               11 (existing_df)
+            344 LOAD_FAST               10 (new_df)
+            346 BUILD_LIST               2
+            348 LOAD_CONST               3 (True)
+            350 KW_NAMES                 4 (('ignore_index',))
+            352 CALL                     2
+            360 STORE_FAST              12 (combined_df)
+
+164         362 LOAD_FAST               12 (combined_df)
+            364 LOAD_ATTR               23 (NULL|self + groupby)
+
+165         384 BUILD_LIST               0
+            386 LOAD_CONST               5 (('bug_type', 'exc_type', 'exc_message', 'filename', 'lineno'))
+            388 LIST_EXTEND              1
+
+166         390 LOAD_CONST               6 (False)
+
+164         392 KW_NAMES                 7 (('as_index',))
+            394 CALL                     2
+
+167         402 LOAD_CONST               8 ('count')
+
+164         404 BINARY_SUBSCR
+
+167         408 LOAD_ATTR               25 (NULL|self + sum)
+            428 CALL                     0
+
+164         436 STORE_FAST              12 (combined_df)
+            438 JUMP_FORWARD             2 (to 444)
+
+169     >>  440 LOAD_FAST               10 (new_df)
+            442 STORE_FAST              12 (combined_df)
+
+171     >>  444 LOAD_FAST               12 (combined_df)
+            446 LOAD_ATTR               26 (empty)
+            466 POP_JUMP_IF_TRUE        20 (to 508)
+
+172         468 LOAD_FAST               12 (combined_df)
+            470 LOAD_ATTR               29 (NULL|self + to_csv)
+            490 LOAD_FAST                1 (output_path)
+            492 LOAD_CONST               6 (False)
+            494 KW_NAMES                 9 (('index',))
+            496 CALL                     2
+            504 POP_TOP
+            506 RETURN_CONST             0 (None)
+
+171     >>  508 RETURN_CONST             0 (None)

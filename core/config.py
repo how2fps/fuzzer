@@ -39,7 +39,15 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "workers",
         ),
     ),
-    ("seed_scheduler", ("scheduler_kind", "ucb_trace", "ucb_debug_tree")),
+    (
+        "seed_scheduler",
+        (
+            "scheduler_kind",
+            "ucb_trace",
+            "ucb_debug_tree",
+            "heap_startup_min_batches_per_seed",
+        ),
+    ),
     (
         "seed_corpus",
         (
@@ -86,6 +94,7 @@ class FuzzConfig(TypedDict):
     scheduler_kind: str
     ucb_trace: bool
     ucb_debug_tree: bool
+    heap_startup_min_batches_per_seed: int
 
     seed_corpus_version: str
     seed_corpus_initial_draw: str | None
@@ -123,6 +132,7 @@ def get_default_config() -> FuzzConfig:
         "scheduler_kind": "heap",
         "ucb_trace": False,
         "ucb_debug_tree": False,
+        "heap_startup_min_batches_per_seed": 1,
         "seed_corpus_version": "base",
         "seed_corpus_initial_draw": None,
         "seed_preload_mode": "full",
@@ -173,6 +183,7 @@ def _merge_config_values(
 CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "target": ("--target",),
     "scheduler_kind": ("--scheduler",),
+    "heap_startup_min_batches_per_seed": ("--heap-startup-min-batches-per-seed",),
     "mutator_kind": ("--mutator",),
     "grammar_path": ("--grammar-file",),
     "ast_grammar_path": ("--ast-grammar-file",),
@@ -327,6 +338,8 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             f"Invalid scheduler_kind: {config['scheduler_kind']}. Must be one of: {scheduler_choices}"
         )
+    if config["heap_startup_min_batches_per_seed"] < 0:
+        raise ValueError("heap_startup_min_batches_per_seed must be >= 0.")
     if config["mutator_kind"] != "auto":
         raise ValueError(
             f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto."
@@ -500,6 +513,16 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         default="heap",
         choices=list(scheduler_versions()),
         help="Seed scheduler version.",
+    )
+    parser.add_argument(
+        "--heap-startup-min-batches-per-seed",
+        dest="heap_startup_min_batches_per_seed",
+        type=int,
+        default=1,
+        help=(
+            "For heap scheduling, guarantee this many leased batches for each "
+            "startup-preloaded seed before score-based reprioritization takes over."
+        ),
     )
     parser.add_argument(
         "--mutator",
@@ -698,6 +721,8 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
             parser.error("--hours must be positive.")
     if args.seed_preload_total < 0:
         parser.error("--seed-preload-total must be >= 0.")
+    if args.heap_startup_min_batches_per_seed < 0:
+        parser.error("--heap-startup-min-batches-per-seed must be >= 0.")
     if args.memory_telemetry_seconds < 0:
         parser.error("--memory-telemetry-seconds must be >= 0.")
     if args.worker_max_jobs < 0:
@@ -721,6 +746,7 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
     from_args: FuzzConfig = {
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
+        "heap_startup_min_batches_per_seed": args.heap_startup_min_batches_per_seed,
         "mutator_kind": args.mutator_kind,
         "grammar_path": (
             str(args.grammar_path.resolve())
