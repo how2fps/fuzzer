@@ -236,3 +236,30 @@ def run_open_target_with_branches(*, target_name: str, input_data: bytes) -> dic
         "missing_branches": branch_counts["missing_branches"],
         "branch_details_by_file": branch_details_by_file,
     }
+
+def refill_from_uncovered(history: list[str], rng: random.Random) -> tuple[str, ...]:
+    all_items = tuple(grammar_ast.available_coverage_items(mutator_kind="grammar"))
+
+    seen: set[str] = set()
+    for text in history:
+        # Union coverage from all previously seen seeds.
+        seen.update(ast_cov(text))
+
+    missing = [item for item in all_items if item not in seen]
+
+    out: list[str] = []
+    for item in missing:
+        # Bias generation toward AST nodes / productions we have not hit yet.
+        gen = grammar_ast.generate_from_rule(
+            start_rule="start",
+            rng=rng,
+            count=1,
+            min_mutation_rounds=0,
+            max_mutation_rounds=0,
+            preferred_coverage_items=[item],
+            mutator_kind="grammar",
+        )
+        if gen:
+            out.append(gen[0])
+
+    return tuple(out)

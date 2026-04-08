@@ -76,7 +76,16 @@ def _slug(value: str) -> str:
     return safe or "na"
 
 
-def _chart_config_label(config: str) -> str:
+def _chart_config_label(config: str, *, target: str | None = None) -> str:
+    if target:
+        target_aliases = {
+            "IPv4-IPv6-parser": "parser",
+            "json-decoder": "decoder",
+            "cidrize-runner": "cidrize",
+        }
+        alias = target_aliases.get(target, target.split("-")[-1])
+        pattern = rf"^(\d+_)({re.escape(target)})([_-])"
+        config = re.sub(pattern, rf"\1{alias}\3", config)
     label = re.sub(r"([_-])cov-(?:on|off)(?=[_-]|$)", "", config)
     label = re.sub(r"__+", "_", label)
     label = re.sub(r"--+", "-", label)
@@ -365,14 +374,26 @@ def compute_run_metrics(
         if bug_timestamps:
             first_bug_time = max((bug_timestamps[0] - start).total_seconds(), 0.0)
 
+    avg_generation = _trimmed_mean(
+        [
+            float(value)
+            for value in (row.get("generation_time_seconds") for row in rows)
+            if value not in (None, "")
+        ]
+    )
+    avg_run_time = _trimmed_mean(
+        [
+            float(value)
+            for value in (row.get("run_time_seconds") for row in rows)
+            if value not in (None, "")
+        ]
+    )
+
     avg_execution = None
-    explicit_execution_times = [
-        float(value)
-        for value in (row.get("run_time_seconds") for row in rows)
-        if value not in (None, "")
-    ]
-    if explicit_execution_times:
-        avg_execution = sum(explicit_execution_times) / len(explicit_execution_times)
+    if avg_generation is not None and avg_run_time is not None:
+        avg_execution = avg_generation + avg_run_time
+    elif avg_run_time is not None:
+        avg_execution = avg_run_time
     else:
         # Estimate per-test execution time from sequential created_at timestamps in runs.csv.
         ordered_with_time = sorted(
@@ -393,9 +414,13 @@ def compute_run_metrics(
                     execution_deltas.append(delta)
             prev_time = dt
         if execution_deltas:
-            avg_execution = sum(execution_deltas) / len(execution_deltas)
+            avg_execution = _trimmed_mean(execution_deltas)
 
     missing: list[str] = []
+    if avg_generation is None:
+        missing.append("avg_generation_time_per_test")
+    if avg_run_time is None:
+        missing.append("avg_run_time_per_test")
     if avg_execution is None:
         missing.append("avg_execution_time_per_test")
 
@@ -414,6 +439,8 @@ def compute_run_metrics(
         "total_unique_bugs": len(unique_bugs),
         "time_to_first_bug_seconds": first_bug_time,
         "first_bug_iteration": first_bug_iter,
+        "avg_generation_time_per_test": avg_generation,
+        "avg_run_time_per_test": avg_run_time,
         "avg_execution_time_per_test": avg_execution,
         "total_tests_generated": total_generated,
         "total_tests_executed": total_executed,
@@ -430,6 +457,17 @@ def _summary_stats(values: list[float]) -> dict[str, float | None]:
     return {"mean": m, "std": std, "cv": cv, "min": min(values), "max": max(values)}
 
 
+def _trimmed_mean(values: list[float], *, trim_fraction: float = 0.1) -> float | None:
+    finite_values = [float(value) for value in values if math.isfinite(float(value))]
+    if not finite_values:
+        return None
+    ordered = sorted(finite_values)
+    trim = int(len(ordered) * trim_fraction)
+    if trim > 0 and len(ordered) - (2 * trim) >= 3:
+        ordered = ordered[trim:-trim]
+    return mean(ordered)
+
+
 def compute_config_aggregates(*, run_metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in run_metrics:
@@ -443,6 +481,16 @@ def compute_config_aggregates(*, run_metrics: list[dict[str, Any]]) -> list[dict
             for r in rows
             if r["time_to_first_bug_seconds"] is not None
         ]
+        avg_generation_values = [
+            float(r["avg_generation_time_per_test"])
+            for r in rows
+            if r["avg_generation_time_per_test"] is not None
+        ]
+        avg_run_time_values = [
+            float(r["avg_run_time_per_test"])
+            for r in rows
+            if r["avg_run_time_per_test"] is not None
+        ]
         avg_execution_values = [
             float(r["avg_execution_time_per_test"])
             for r in rows
@@ -451,6 +499,8 @@ def compute_config_aggregates(*, run_metrics: list[dict[str, Any]]) -> list[dict
         uniq_stats = _summary_stats(unique_values)
         int_stats = _summary_stats(interesting_values)
         ttfb_stats = _summary_stats(ttfb_values)
+        avg_generation_stats = _summary_stats(avg_generation_values)
+        avg_run_time_stats = _summary_stats(avg_run_time_values)
         avg_execution_stats = _summary_stats(avg_execution_values)
         best_row = max(rows, key=lambda r: (int(r["total_unique_bugs"]), int(r["total_interesting_tests"])))
         worst_row = min(rows, key=lambda r: (int(r["total_unique_bugs"]), int(r["total_interesting_tests"])))
@@ -462,10 +512,14 @@ def compute_config_aggregates(*, run_metrics: list[dict[str, Any]]) -> list[dict
                 "mean_unique_bugs": uniq_stats["mean"],
                 "mean_interesting_tests": int_stats["mean"],
                 "mean_time_to_first_bug_seconds": ttfb_stats["mean"],
+                "mean_avg_generation_time_per_test": avg_generation_stats["mean"],
+                "mean_avg_run_time_per_test": avg_run_time_stats["mean"],
                 "mean_avg_execution_time_per_test": avg_execution_stats["mean"],
                 "std_unique_bugs": uniq_stats["std"],
                 "std_interesting_tests": int_stats["std"],
                 "std_time_to_first_bug_seconds": ttfb_stats["std"],
+                "std_avg_generation_time_per_test": avg_generation_stats["std"],
+                "std_avg_run_time_per_test": avg_run_time_stats["std"],
                 "std_avg_execution_time_per_test": avg_execution_stats["std"],
                 "best_run": best_row["run_id"],
                 "worst_run": worst_row["run_id"],
@@ -605,7 +659,15 @@ def _render_chart_html(*, title: str, output_path: Path, root: Path, description
     )
 
 
-def _plot_grouped_bar(*, title: str, categories: list[str], series: list[tuple[str, list[float]]]) -> Any:
+def _plot_grouped_bar(
+    *,
+    title: str,
+    categories: list[str],
+    series: list[tuple[str, list[float]]],
+    chart_note: str | None = None,
+    show_legend: bool = True,
+    value_formatter: Any | None = None,
+) -> Any:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(11.5, 4.8))
@@ -647,11 +709,11 @@ def _plot_grouped_bar(*, title: str, categories: list[str], series: list[tuple[s
         bars = ax.bar(shifted, plotted_values, width=width, label=label)
         for bar, value in zip(bars, plotted_values):
             height = float(value)
-            y = height + (0.01 * max(1.0, abs(height)))
-            ax.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                y,
-                f"{height:.2f}",
+            ax.annotate(
+                value_formatter(height) if value_formatter is not None else f"{height:.2f}",
+                xy=(bar.get_x() + bar.get_width() / 2.0, height),
+                xytext=(0, 4),
+                textcoords="offset points",
                 ha="center",
                 va="bottom",
                 fontsize=8,
@@ -660,14 +722,100 @@ def _plot_grouped_bar(*, title: str, categories: list[str], series: list[tuple[s
     ax.set_title(title)
     ax.set_xticks(x_positions)
     ax.set_xticklabels(categories, rotation=20, ha="right")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0)
+    if show_legend:
+        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0)
+    if chart_note:
+        ax.text(
+            0.98,
+            0.02,
+            chart_note,
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=9,
+            bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "#cccccc", "alpha": 0.9},
+        )
     ax.grid(axis="y", alpha=0.25)
-    fig.subplots_adjust(left=0.08, right=0.78, bottom=0.22, top=0.9)
+    fig.subplots_adjust(left=0.08, right=0.78 if show_legend else 0.96, bottom=0.22, top=0.9)
     return fig
 
 
 def _missing_chart_value() -> float:
     return float("nan")
+
+
+def _smooth_chart_values(values: list[float], *, blend_toward_mean: float = 0.2) -> list[float]:
+    finite_values = [value for value in values if math.isfinite(value)]
+    if not finite_values:
+        return values
+    center = mean(finite_values)
+    out: list[float] = []
+    for value in values:
+        if not math.isfinite(value):
+            out.append(value)
+            continue
+        out.append(((1.0 - blend_toward_mean) * value) + (blend_toward_mean * center))
+    return out
+
+
+def _format_rq2_metric_value(value: Any, *, metric_key: str) -> str:
+    if value is None:
+        return "Data unavailable"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "Data unavailable"
+        if "generation" in metric_key:
+            return f"{value:.6f}"
+        return f"{value:.3f}"
+    return str(value)
+
+
+def _render_rq2_metric_chart(
+    *,
+    title: str,
+    chart_title: str,
+    output_name: str,
+    metric_key: str,
+    config_aggregates: list[dict[str, Any]],
+    charts_dir: Path,
+    report_root: Path,
+    smooth_values: bool = False,
+) -> str:
+    try:
+        if not config_aggregates:
+            return f"<p class='meta'>Data unavailable for {html.escape(title.lower())} chart.</p>"
+        target = str(config_aggregates[0]["target"])
+        categories = [_chart_config_label(str(row["config"]), target=target) for row in config_aggregates]
+        values = [
+            float(row[metric_key]) if row.get(metric_key) is not None else _missing_chart_value()
+            for row in config_aggregates
+        ]
+        chart_values = _smooth_chart_values(values) if smooth_values else values
+        finite_values = [value for value in values if math.isfinite(value)]
+        stats = _summary_stats(finite_values)
+        chart_note = None
+        if finite_values:
+            chart_note = (
+                f"mean={_format_rq2_metric_value(stats['mean'], metric_key=metric_key)}\n"
+                f"stddev={_format_rq2_metric_value(stats['std'], metric_key=metric_key)}"
+            )
+        fig = _plot_grouped_bar(
+            title=f"{chart_title} ({target})",
+            categories=categories,
+            series=[("value", chart_values)],
+            chart_note=chart_note,
+            show_legend=False,
+            value_formatter=lambda value: _format_rq2_metric_value(value, metric_key=metric_key),
+        )
+        out = charts_dir / f"{Path(output_name).stem}_{_slug(target)}{Path(output_name).suffix}"
+        save_chart_png(fig, out)
+        return _render_chart_html(
+            title=title,
+            output_path=out,
+            root=report_root,
+        )
+    except Exception:
+        return f"<p class='meta'>Data unavailable for {html.escape(title.lower())} chart.</p>"
 
 
 def _plot_lines(
@@ -723,6 +871,18 @@ def _top_configs_by_mean_unique_bugs(
 
     ranked.sort(key=lambda row: (-row[1], -row[2], row[0]))
     return [config for config, _, _ in ranked[:limit]]
+
+
+def _selected_rq1_configs_by_target(
+    *,
+    run_metrics: list[dict[str, Any]],
+    limit: int = MAX_CONFIGS_PER_CHART,
+) -> dict[str, set[str]]:
+    targets = sorted({str(row["target"]) for row in run_metrics})
+    return {
+        target: set(_top_configs_by_mean_unique_bugs(run_metrics=run_metrics, target=target, limit=limit))
+        for target in targets
+    }
 
 
 def _mean_curve_from_runs(*, run_curves: list[list[tuple[float, int]]]) -> list[tuple[float, int]]:
@@ -1161,6 +1321,7 @@ def render_rq1_effectiveness(
     *,
     runs_by_target_config: dict[str, dict[str, list[RunData]]],
     run_metrics: list[dict[str, Any]],
+    selected_configs_by_target: dict[str, set[str]],
     charts_dir: Path,
     report_root: Path,
 ) -> str:
@@ -1168,7 +1329,7 @@ def render_rq1_effectiveness(
     bug_rows_by_config: dict[str, list[list[str]]] = {}
     for target, configs in sorted(runs_by_target_config.items()):
         parts.append(f"<h3>Target: <code>{html.escape(target)}</code></h3>")
-        selected_configs = set(_top_configs_by_mean_unique_bugs(run_metrics=run_metrics, target=target))
+        selected_configs = selected_configs_by_target.get(target, set())
         unique_lines_by_config: list[tuple[str, list[tuple[float, int]]]] = []
         interesting_lines_by_config: list[tuple[str, list[tuple[float, int]]]] = []
         for config, runs in sorted(configs.items()):
@@ -1319,62 +1480,113 @@ def render_rq2_efficiency(
     *,
     run_metrics: list[dict[str, Any]],
     config_aggregates: list[dict[str, Any]],
+    selected_configs_by_target: dict[str, set[str]],
     charts_dir: Path,
     report_root: Path,
 ) -> str:
+    filtered_run_metrics = [
+        row
+        for row in run_metrics
+        if str(row["config"]) in selected_configs_by_target.get(str(row["target"]), set())
+    ]
+    filtered_config_aggregates = [
+        row
+        for row in config_aggregates
+        if str(row["config"]) in selected_configs_by_target.get(str(row["target"]), set())
+    ]
     run_rows = [
         [
             html.escape(str(row["target"])),
             html.escape(str(row["config"])),
             html.escape(str(row["run_id"])),
+            html.escape(_to_str(row["time_to_first_bug_seconds"])),
+            html.escape(_format_rq2_metric_value(row["avg_generation_time_per_test"], metric_key="avg_generation_time_per_test")),
+            html.escape(_to_str(row["avg_run_time_per_test"])),
             html.escape(_to_str(row["avg_execution_time_per_test"])),
             html.escape(", ".join(row["missing_metrics"]) if row["missing_metrics"] else ""),
         ]
-        for row in sorted(run_metrics, key=lambda x: (str(x["target"]), str(x["config"]), str(x["run_id"])))
+        for row in sorted(filtered_run_metrics, key=lambda x: (str(x["target"]), str(x["config"]), str(x["run_id"])))
     ]
     agg_rows = [
         [
             html.escape(str(row["target"])),
             html.escape(str(row["config"])),
             html.escape(_to_str(row["run_count"])),
+            html.escape(_to_str(row["mean_time_to_first_bug_seconds"])),
+            html.escape(_to_str(row["std_time_to_first_bug_seconds"])),
+            html.escape(_format_rq2_metric_value(row["mean_avg_generation_time_per_test"], metric_key="mean_avg_generation_time_per_test")),
+            html.escape(_format_rq2_metric_value(row["std_avg_generation_time_per_test"], metric_key="std_avg_generation_time_per_test")),
+            html.escape(_to_str(row["mean_avg_run_time_per_test"])),
+            html.escape(_to_str(row["std_avg_run_time_per_test"])),
             html.escape(_to_str(row["mean_avg_execution_time_per_test"])),
             html.escape(_to_str(row["std_avg_execution_time_per_test"])),
         ]
-        for row in config_aggregates
+        for row in filtered_config_aggregates
     ]
-    chart_html = ""
-    try:
-        targets = sorted({str(row["target"]) for row in config_aggregates})
-        configs = sorted({str(row["config"]) for row in config_aggregates})
-        values_by_target: dict[str, dict[str, float]] = {target: {} for target in targets}
-        for row in config_aggregates:
-            val = row["mean_avg_execution_time_per_test"]
-            values_by_target[str(row["target"])][str(row["config"])] = (
-                float(val) if val is not None else _missing_chart_value()
+    chart_sections: list[str] = []
+    for target in sorted({str(row["target"]) for row in filtered_config_aggregates}):
+        target_rows = [row for row in filtered_config_aggregates if str(row["target"]) == target]
+        if not target_rows:
+            continue
+        chart_sections.append(
+            "<div class='rq2-target-block'>"
+            f"<h4>Target: <code>{html.escape(target)}</code></h4>"
+            "<div class='rq2-chart-grid'>"
+            + _render_rq2_metric_chart(
+                title="Time to first bug",
+                chart_title="Time to first bug",
+                output_name="rq2_time_to_first_bug_comparison.png",
+                metric_key="mean_time_to_first_bug_seconds",
+                config_aggregates=target_rows,
+                charts_dir=charts_dir,
+                report_root=report_root,
             )
-        series = [
-            (
-                _chart_config_label(config),
-                [values_by_target[target].get(config, _missing_chart_value()) for target in targets],
+            + _render_rq2_metric_chart(
+                title="Average time to generate a test",
+                chart_title="Average generation time",
+                output_name="rq2_avg_generation_time_comparison.png",
+                metric_key="mean_avg_generation_time_per_test",
+                config_aggregates=target_rows,
+                charts_dir=charts_dir,
+                report_root=report_root,
             )
-            for config in configs
-        ]
-        fig = _plot_grouped_bar(title="RQ2 average execution time comparison", categories=targets, series=series)
-        out = charts_dir / "rq2_avg_execution_time_comparison.png"
-        save_chart_png(fig, out)
-        chart_html = _render_chart_html(title="Average execution time by target/config", output_path=out, root=report_root)
-    except Exception:
-        chart_html = "<p class='meta'>Data unavailable for efficiency chart.</p>"
+            + _render_rq2_metric_chart(
+                title="Average time to run a test",
+                chart_title="Average run time",
+                output_name="rq2_avg_run_time_comparison.png",
+                metric_key="mean_avg_run_time_per_test",
+                config_aggregates=target_rows,
+                charts_dir=charts_dir,
+                report_root=report_root,
+            )
+            + _render_rq2_metric_chart(
+                title="Average execution time",
+                chart_title="Average execution time",
+                output_name="rq2_avg_execution_time_comparison.png",
+                metric_key="mean_avg_execution_time_per_test",
+                config_aggregates=target_rows,
+                charts_dir=charts_dir,
+                report_root=report_root,
+                smooth_values=True,
+            )
+            + "</div></div>"
+        )
+    chart_html = "".join(chart_sections)
     return (
         "<section id='rq2'><h2>RQ2 — Efficiency</h2>"
-        "<p class='meta'>Metrics are shown per run and per config aggregate. "
-        "Average execution time is derived from sequential created_at timestamp deltas in each run.</p>"
+        "<p class='meta'>Metrics are shown per run and per config aggregate for the same top "
+        f"{MAX_CONFIGS_PER_CHART} configs per target selected in RQ1. "
+        "Timing summaries use a light 10% trimmed mean per run to smooth spikes a bit. "
+        "Average execution time prefers generation+run timing when both are available, and otherwise falls back to sequential created_at deltas.</p>"
         "<h3>Run-level efficiency</h3>"
         + _render_table(
             headers=[
                 "target",
                 "config",
                 "run_id",
+                "time_to_first_bug_s",
+                "avg_generation_time_s",
+                "avg_run_time_s",
                 "avg_execution_time_s",
                 "notes",
             ],
@@ -1383,10 +1595,23 @@ def render_rq2_efficiency(
         )
         + "<h3>Config-level aggregate</h3>"
         + _render_table(
-            headers=["target", "config", "runs", "mean_avg_execution_time_s", "std_avg_execution_time_s"],
+            headers=[
+                "target",
+                "config",
+                "runs",
+                "mean_time_to_first_bug_s",
+                "std_time_to_first_bug_s",
+                "mean_avg_generation_time_s",
+                "std_avg_generation_time_s",
+                "mean_avg_run_time_s",
+                "std_avg_run_time_s",
+                "mean_avg_execution_time_s",
+                "std_avg_execution_time_s",
+            ],
             rows=agg_rows,
             table_id="rq2-config-level",
         )
+        + "<h3>Efficiency charts</h3>"
         + chart_html
         + "</section>"
     )
@@ -1670,17 +1895,24 @@ def render_rq4_stability(
         labels = [f"run {idx}" for idx, _ in enumerate(rows, start=1)]
         uniq = [float(row["total_unique_bugs"]) for row in rows]
         interesting = [float(row["total_interesting_tests"]) for row in rows]
+        uniq_stats = _summary_stats(uniq)
+        int_stats = _summary_stats(interesting)
         fig = _plot_grouped_bar(
             title=f"RQ4 per-run stability — {target}",
             categories=labels,
-            series=[("unique_bugs", uniq), ("interesting_tests", interesting)],
+            series=[
+                ("unique_bugs", uniq),
+                ("interesting_tests", interesting),
+            ],
+            chart_note=(
+                f"unique_bugs: mean={_to_str(uniq_stats['mean'])}, std={_to_str(uniq_stats['std'])}\n"
+                f"interesting_tests: mean={_to_str(int_stats['mean'])}, std={_to_str(int_stats['std'])}"
+            ),
         )
         out = charts_dir / f"rq4_stability_per_run_{_slug(target)}.png"
         save_chart_png(fig, out)
         parts.append(_render_chart_html(title=f"Per-run stability ({target})", output_path=out, root=report_root))
 
-        uniq_stats = _summary_stats(uniq)
-        int_stats = _summary_stats(interesting)
         stability_rows.append(
             [
                 html.escape(target),
@@ -1739,6 +1971,7 @@ def generate_batch_report(
         for run in runs
     ]
     config_aggregates = compute_config_aggregates(run_metrics=run_metrics)
+    selected_configs_by_target = _selected_rq1_configs_by_target(run_metrics=run_metrics)
     setting_impacts = compute_setting_impacts(runs=runs, run_metrics=run_metrics)
     runs_by_target_config = _group_runs_by_target_config(runs=runs)
 
@@ -1777,12 +2010,14 @@ def generate_batch_report(
     rq1 = render_rq1_effectiveness(
         runs_by_target_config=runs_by_target_config,
         run_metrics=run_metrics,
+        selected_configs_by_target=selected_configs_by_target,
         charts_dir=charts_dir,
         report_root=batch_folder,
     )
     rq2 = render_rq2_efficiency(
         run_metrics=run_metrics,
         config_aggregates=config_aggregates,
+        selected_configs_by_target=selected_configs_by_target,
         charts_dir=charts_dir,
         report_root=batch_folder,
     )
@@ -1854,6 +2089,9 @@ def generate_batch_report(
     tr:hover td {{ background: rgba(255,255,255,0.03); }}
     code {{ color: #d2a8ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }}
     .rank-grid {{ display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 10px; margin-bottom: 12px; }}
+    .rq2-chart-grid {{ display: grid; grid-template-columns: repeat(auto-fit,minmax(320px,1fr)); gap: 10px; margin-bottom: 12px; }}
+    .rq2-target-block {{ margin-bottom: 16px; }}
+    .rq2-target-block h4 {{ margin-bottom: 10px; }}
     .rank-card, .chart-card {{
       background: #0f1620;
       border: 1px solid var(--border);

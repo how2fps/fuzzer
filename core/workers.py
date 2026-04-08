@@ -12,7 +12,7 @@ from collections import deque
 from contextlib import nullcontext
 from multiprocessing import Process, Queue
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from coverage.parser import PythonParser
 from tqdm import tqdm
@@ -36,6 +36,7 @@ from isinteresting import (
     get_covered_edges_from_result,
 )
 from core.mutation_utils import make_discovered_seed
+from core.seed_refill import collect_history_texts, generate_grammar_refill_seeds
 from parser import get_parser
 from core.paths import DISCOVERED_SEED_ORDINAL_BASE
 from rich.live import Live
@@ -155,6 +156,31 @@ def _count_seen_covered_branches(conn: sqlite3.Connection) -> int:
     for file_name, arcs in seen_by_file.items():
         total += len(arcs & _branch_arcs_for_file(file_name))
     return total
+
+
+def _extract_total_branches(result: Mapping[str, Any]) -> int:
+    """Return total branches from the active coverage source when available."""
+    candidates = []
+    closed = result.get("closed_result")
+    open_res = result.get("open_result")
+    if isinstance(closed, Mapping):
+        candidates.append(closed)
+    if isinstance(open_res, Mapping):
+        candidates.append(open_res)
+
+    for candidate in candidates:
+        details = candidate.get("branch_details_by_file")
+        if not isinstance(details, Sequence):
+            continue
+        try:
+            covered = int(candidate.get("covered_branches", 0) or 0)
+            missing = int(candidate.get("missing_branches", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        total = covered + missing
+        if total > 0:
+            return total
+    return 0
 
 
 def _read_rss_kib(pid: int) -> int | None:
@@ -305,6 +331,7 @@ def run_worker_process(
                     "isinteresting_score": score,
                     "signals": signals,
                     "covered_edges": tuple(get_covered_edges_from_result(result)),
+                    "total_branches": _extract_total_branches(result),
                     "parser_result": result if debug_mode else None,
                     "worker_retiring": (
                         worker_max_jobs > 0 and (completed_jobs + 1) >= worker_max_jobs
@@ -371,6 +398,7 @@ def run_fuzzer_multi_worker(
     last_low_value_signature: list[tuple[str, ...] | None] = [None]
     worker_shutdown_grace_seconds = max(5.0, float(config["timeout"]) * 2.0)
     worker_max_jobs = max(0, int(config.get("worker_max_jobs") or 0))
+    seed_refill_mode = str(config.get("seed_refill_mode") or "historical")
     log = get_fuzzer_logger()
     max_iterations = config["max_iterations"]
     debug_mode = is_debug_run(config)
@@ -584,6 +612,69 @@ def run_fuzzer_multi_worker(
             return True
         return False
 
+    def _try_refill_scheduler_from_grammar_coverage() -> bool:
+        refill_limit = max(1, int(config.get("seed_preload_total") or 8))
+        ready_texts = [item.seed.text for item in scheduler.ready_items()]
+        conn_thread = open_results_db(db_path)
+        try:
+            history_texts = collect_history_texts(
+                conn=conn_thread,
+                target=effective_target,
+                ready_texts=ready_texts,
+            )
+            refill = generate_grammar_refill_seeds(
+                history_texts=history_texts,
+                ready_texts=ready_texts,
+                mutator_kind=effective_mutator,
+                rng=rng,
+                count=refill_limit,
+            )
+            if not refill.seeds:
+                return False
+
+            added_count = 0
+            for text in refill.seeds:
+                if not add_seed_input_if_new(
+                    conn_thread,
+                    target=effective_target,
+                    input_text=text,
+                ):
+                    continue
+                candidate = make_generated_seed(
+                    text=text,
+                    family=family,
+                    ordinal=next_discovered_ordinal_holder[0],
+                    source_prefix="grammar",
+                    source_tag="grammar_generated",
+                )
+                candidate_metadata: dict[str, Any] = {
+                    "bucket": candidate.bucket,
+                    "signals": {
+                        "coverage_key": {
+                            "family": candidate.family,
+                            "bucket": candidate.bucket,
+                        },
+                        "status": "grammar_generated",
+                    },
+                }
+                if scheduler_uses_feedback and config["ucb_trace"]:
+                    candidate_metadata["_ucb_trace"] = True
+                scheduler.add(candidate, metadata=candidate_metadata)
+                next_discovered_ordinal_holder[0] += 1
+                added_count += 1
+
+            if added_count > 0:
+                last_low_value_signature[0] = None
+                log.info(
+                    "Grammar refill added %s candidate seeds (%s uncovered grammar items before refill).",
+                    added_count,
+                    len(refill.uncovered_coverage_items),
+                )
+                return True
+            return False
+        finally:
+            conn_thread.close()
+
     def request_handler() -> None:
         nones_sent = 0
         try:
@@ -659,10 +750,14 @@ def run_fuzzer_multi_worker(
                                 and low_value_signature != last_low_value_signature[0]
                             ):
                                 last_low_value_signature[0] = low_value_signature
-                                # Prefer replaying previously successful
-                                # unique-coverage seeds when the pool looks stale.
-                                if _try_refill_scheduler_from_unique_coverage_store():
-                                    cond.notify_all()
+                                if seed_refill_mode == "grammar":
+                                    if _try_refill_scheduler_from_grammar_coverage():
+                                        cond.notify_all()
+                                else:
+                                    # Prefer replaying previously successful
+                                    # unique-coverage seeds when the pool looks stale.
+                                    if _try_refill_scheduler_from_unique_coverage_store():
+                                        cond.notify_all()
                             if current_mutations_left[0] <= 0:
                                 conn_thread = open_results_db(db_path)
                                 try:
@@ -790,12 +885,17 @@ def run_fuzzer_multi_worker(
                             break
                         if not scheduler.empty():
                             continue
-                        if _try_refill_scheduler_from_unique_coverage_store():
-                            cond.notify_all()
-                            continue
-                        if _try_refill_scheduler_from_llm():
-                            cond.notify_all()
-                            continue
+                        if seed_refill_mode == "grammar":
+                            if _try_refill_scheduler_from_grammar_coverage():
+                                cond.notify_all()
+                                continue
+                        else:
+                            if _try_refill_scheduler_from_unique_coverage_store():
+                                cond.notify_all()
+                                continue
+                            if _try_refill_scheduler_from_llm():
+                                cond.notify_all()
+                                continue
                         if total_jobs[0] == 0:
                             total_jobs[0] = iteration_counter[0]
                         reply_queues[wid].put(None)
@@ -1058,6 +1158,7 @@ def run_fuzzer_multi_worker(
                                 cond.notify_all()
                 parser_result = result.pop("parser_result", None)
                 covered_edges = result.pop("covered_edges", ())
+                total_branches = max(0, int(result.pop("total_branches", 0) or 0))
                 result.pop("worker_id", None)
                 result.pop("worker_retiring", None)
                 coverage_key = _coverage_key_from_signals(result.get("signals"))
@@ -1178,6 +1279,7 @@ def run_fuzzer_multi_worker(
                         new_coverage=new_coverage,
                         new_bug=new_bug,
                         covered_branches=covered_branches,
+                        total_branches=total_branches,
                         unique_covered_arcs=unique_covered_arcs,
                         pending_jobs=pending_jobs,
                         scheduler_size=scheduler_size,

@@ -56,6 +56,7 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "seed_preload_mode",
             "seed_preload_total",
             "seed_preload_bucket_ratios",
+            "seed_refill_mode",
             "llm_seed_candidates",
         ),
     ),
@@ -101,6 +102,7 @@ class FuzzConfig(TypedDict):
     seed_preload_mode: str
     seed_preload_total: int
     seed_preload_bucket_ratios: dict[str, float]
+    seed_refill_mode: str
     llm_seed_candidates: int
 
     mutator_kind: str
@@ -138,6 +140,7 @@ def get_default_config() -> FuzzConfig:
         "seed_preload_mode": "full",
         "seed_preload_total": 8,
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
+        "seed_refill_mode": "historical",
         "llm_seed_candidates": 5,
         "mutator_kind": "auto",
         "mutator_version": "base",
@@ -191,6 +194,7 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "debug_mode": ("--debug",),
     "seed_preload_mode": ("--seed-preload-mode",),
     "seed_preload_total": ("--seed-preload-total",),
+    "seed_refill_mode": ("--seed-refill-mode",),
     "ucb_trace": ("--ucb-trace",),
     "ucb_debug_tree": ("--ucb-debug-tree",),
     "max_iterations": ("--iterations",),
@@ -381,6 +385,11 @@ def _validate_config(config: FuzzConfig) -> None:
             )
     if sum(float(v) for v in ratios.values()) <= 0:
         raise ValueError("sum of seed_preload_bucket_ratios values must be > 0.")
+    if config["seed_refill_mode"] not in ("historical", "grammar"):
+        raise ValueError(
+            f"Invalid seed_refill_mode: {config['seed_refill_mode']}. "
+            "Must be historical or grammar."
+        )
     if config["max_hours"] is not None and config["max_iterations"] is not None:
         raise ValueError("Cannot set both max_iterations and max_hours.")
     if config["max_hours"] is not None and config["max_hours"] <= 0:
@@ -578,6 +587,15 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         help="Number of startup seeds to preload when using `ratio_batch` or `sample` mode.",
     )
     parser.add_argument(
+        "--seed-refill-mode",
+        default="historical",
+        choices=["historical", "grammar"],
+        help=(
+            "How to replenish scheduler seeds at runtime: the existing history-based "
+            "refill (`historical`) or grammar-coverage-directed refill (`grammar`)."
+        ),
+    )
+    parser.add_argument(
         "--ucb-trace",
         action="store_true",
         help="Print UCB raw signals, normalized signals, and computed rewards on update.",
@@ -761,6 +779,7 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         "debug_mode": args.debug_mode,
         "seed_preload_mode": args.seed_preload_mode,
         "seed_preload_total": args.seed_preload_total,
+        "seed_refill_mode": args.seed_refill_mode,
         "ucb_trace": args.ucb_trace,
         "ucb_debug_tree": args.ucb_debug_tree,
         "max_iterations": max_iterations,
