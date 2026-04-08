@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import random
-import re
-import threading
-from collections import deque
 
 
 class AdaptiveStrategy:
@@ -67,33 +64,3 @@ class AdaptiveStrategy:
             )
             self.velocities[op] = new_v
             self.weights[op] = max(0.1, x_now + new_v)
-
-
-class TokenPool:
-    def __init__(self, max_size: int = 512) -> None:
-        self.tokens: deque[str] = deque(maxlen=max_size)
-        self.seen: set[str] = set()
-        self.lock = threading.Lock()
-        # Heuristics: quoted strings, words 4+, hex strings, numbers, IPs
-        self.regex = re.compile(
-            r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[a-zA-Z0-9_\-\.\:]{4,})'
-        )
-
-    def ingest(self, text: str) -> None:
-        matches = self.regex.findall(text)
-        with self.lock:
-            for m in matches:
-                # Clean up quotes if present
-                clean = m.strip("\"'")
-                if clean and clean not in self.seen:
-                    if len(self.tokens) >= self.tokens.maxlen:
-                        oldest = self.tokens.popleft()
-                        self.seen.discard(oldest)
-                    self.tokens.append(clean)
-                    self.seen.add(clean)
-
-    def sample(self, rng: random.Random) -> str | None:
-        with self.lock:
-            if not self.tokens:
-                return None
-            return rng.choice(self.tokens)

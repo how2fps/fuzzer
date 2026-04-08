@@ -19,10 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-try:
-    from json_decoder_parser import run_json_decoder_with_branches
-except ImportError:
-    from .json_decoder_parser import run_json_decoder_with_branches
+# json_decoder_parser is imported inside the handler below to avoid top-level load errors.
 
 DEFAULT_TIMEOUT = 10.0
 
@@ -689,6 +686,13 @@ def run_parser(
             scratch_logs = (Path(closed_cwd_override).resolve() / "logs")
             scratch_logs.mkdir(parents=True, exist_ok=True)
             json_log_dir = str(scratch_logs)
+
+        # Import handler here to avoid crashing other targets if json_decoder is missing.
+        try:
+            from json_decoder_parser import run_json_decoder_with_branches
+        except ImportError:
+            from .json_decoder_parser import run_json_decoder_with_branches
+
         json_decoder_info = run_json_decoder_with_branches(
             json_string=input_str,
             log_dir=json_log_dir,

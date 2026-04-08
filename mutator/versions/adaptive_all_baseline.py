@@ -8,7 +8,7 @@ import random
 import threading
 from collections.abc import Callable
 
-from .adaptive_operators import AdaptiveStrategy, TokenPool
+from .adaptive_operators_baseline import AdaptiveStrategy
 from .lib import (
     apply_grammar_operator,
     arithmetic_mutation,
@@ -24,9 +24,6 @@ from .lib import (
 ByteMutator = Callable[..., bytes]
 Operator = Callable[[str, random.Random], str]
 _DEFAULT_MAX_DEPTH = 5
-
-
-_TOKEN_POOL = TokenPool()
 
 
 def _wrap_byte_mutator(func: ByteMutator) -> Operator:
@@ -58,32 +55,9 @@ def _build_unified_ops(*, mutator_kind: str) -> dict[str, Operator]:
             "byte_interesting_val": _wrap_byte_mutator(interesting_value_mutation),
             "byte_delete_block": _wrap_byte_mutator(delete_block_mutation),
             "byte_clone_block": _wrap_byte_mutator(clone_block_mutation),
-            "byte_token_inject": lambda text, rng: _mutate_token_inject(text, rng),
         }
     )
     return ops
-
-
-def _mutate_token_inject(text: str, rng: random.Random) -> str:
-    token = _TOKEN_POOL.sample(rng)
-    if not token:
-        # Fallback to bit_flip if pool is empty
-        mutated_bytes = bit_flip(text.encode("utf-8", errors="replace"), rng)
-        return mutated_bytes.decode("utf-8", errors="ignore")
-
-    # Pick a random spot to insert or replace
-    if not text:
-        return token
-
-    pos = rng.randint(0, len(text))
-    choice = rng.random()
-    if choice < 0.5:
-        # Insert
-        return text[:pos] + token + text[pos:]
-    else:
-        # Replace random chunk
-        end = rng.randint(pos, len(text))
-        return text[:pos] + token + text[end:]
 
 
 class AdaptiveAllMutator:
@@ -108,7 +82,6 @@ class AdaptiveAllMutator:
         return strategy
 
     def mutate(self, text: str, *, mutator_kind: str, rng: random.Random) -> str:
-        _TOKEN_POOL.ingest(text)
         ops = _build_unified_ops(mutator_kind=mutator_kind)
         operator_names = list(ops)
         with self._lock:

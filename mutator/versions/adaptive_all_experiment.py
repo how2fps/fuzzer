@@ -8,7 +8,7 @@ import random
 import threading
 from collections.abc import Callable
 
-from .adaptive_operators import AdaptiveStrategy, TokenPool
+from .adaptive_operators_experiment import AdaptiveStrategy, TokenPool
 from .lib import (
     apply_grammar_operator,
     arithmetic_mutation,
