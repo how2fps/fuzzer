@@ -514,18 +514,20 @@ def make_generated_seed(
     text: str,
     family: str,
     ordinal: int,
+    source_prefix: str = "llm",
+    source_tag: str = "llm_generated",
 ) -> Seed:
     fingerprint = hashlib.sha256(
         f"{family}:{text}".encode("utf-8", errors="replace")
     ).hexdigest()[:16]
-    seed_id = f"llm-{family}-{fingerprint}"
+    seed_id = f"{source_prefix}-{family}-{fingerprint}"
     return Seed(
         seed_id=seed_id,
         family=family,
         bucket="generated",
         label=seed_id,
         text=text,
-        tags=("llm_generated",),
+        tags=(source_tag,),
         expected="",
         ordinal=ordinal,
         fingerprint=fingerprint,

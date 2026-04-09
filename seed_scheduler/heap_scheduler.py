@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import heapq
 from typing import Any, Literal, Sequence
 
@@ -25,11 +26,15 @@ class HeapScheduler(BaseSeedScheduler):
         *,
         priority_mode: PriorityMode = "avg_score",
         bucket_prior: dict[str, float] | None = None,
+        startup_min_batches_per_seed: int = 0,
     ) -> None:
         """Initialize heap-backed priority scheduling configuration and storage."""
         self._priority_mode = priority_mode
         self._bucket_prior = dict(bucket_prior or {})
+        self._startup_min_batches_per_seed = max(0, int(startup_min_batches_per_seed))
         self._heap: list[tuple[float, int, str]] = []
+        self._warm_queue: deque[str] = deque()
+        self._warm_remaining: dict[str, int] = {}
         self._items: dict[str, ScheduledSeed] = {}
         self._seq = 0
         self._heap_counter = 0
@@ -54,11 +59,22 @@ class HeapScheduler(BaseSeedScheduler):
             item.last_isinteresting_score = score
             item.priority = self._compute_priority(item)
         self._items[item_id] = item
-        self._push_heap(item)
+        if self._should_warm_start(metadata_dict):
+            self._warm_remaining[item_id] = self._startup_min_batches_per_seed
+            self._warm_queue.append(item_id)
+        else:
+            self._push_heap(item)
         return item
 
     def next(self) -> ScheduledSeed:
         """Pop and return the highest-priority valid scheduled item."""
+        while self._warm_queue:
+            item_id = self._warm_queue.popleft()
+            if item_id not in self._items:
+                continue
+            item = self._items[item_id]
+            item.times_selected += 1
+            return item
         while self._heap:
             _neg_prio, _order, item_id = heapq.heappop(self._heap)
             if item_id not in self._items:
@@ -70,29 +86,27 @@ class HeapScheduler(BaseSeedScheduler):
 
     def empty(self) -> bool:
         """Return True when the heap has no ready entries."""
-        return len(self._heap) <= 0
+        return len(self) <= 0
 
     def __len__(self) -> int:
         """Return the number of heap entries currently ready for selection."""
-        return len(self._heap)
+        return len(self._ready_ids())
 
     def stats(self) -> dict[str, Any]:
         """Return priority scheduler metrics for logging and debugging."""
         return {
             "kind": "heap",
             "priority_mode": self._priority_mode,
+            "warm_ready": sum(
+                1 for item_id in self._warm_queue if item_id in self._items
+            ),
             "ready": len(self),
             "total_items": len(self._items),
         }
 
     def ready_items(self) -> list[ScheduledSeed]:
         """Return unique ready items currently represented in the heap."""
-        ready_ids = {
-            item_id
-            for _neg_prio, _order, item_id in self._heap
-            if item_id in self._items
-        }
-        return [self._items[item_id] for item_id in sorted(ready_ids)]
+        return [self._items[item_id] for item_id in self._ready_ids()]
 
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
         """Return a priority-ordered snapshot of tracked scheduler items."""
@@ -110,6 +124,7 @@ class HeapScheduler(BaseSeedScheduler):
                 "times_selected": item.times_selected,
                 "last_isinteresting_score": item.last_isinteresting_score,
                 "avg_isinteresting_score": item.avg_isinteresting_score,
+                "startup_batches_remaining": self._warm_remaining.get(item.item_id, 0),
             }
             for item in ordered
         ]
@@ -126,6 +141,16 @@ class HeapScheduler(BaseSeedScheduler):
             item.total_isinteresting_score += float(sum(batch_scores))
             item.last_isinteresting_score = float(batch_scores[-1])
         item.priority = self._compute_priority(item)
+        remaining = self._warm_remaining.get(item.item_id, 0)
+        if remaining > 0:
+            remaining -= 1
+            if remaining > 0:
+                self._warm_remaining[item.item_id] = remaining
+                self._warm_queue.append(item.item_id)
+            else:
+                self._warm_remaining.pop(item.item_id, None)
+                self._push_heap(item)
+            return
         self._push_heap(item)
 
     def _compute_priority(self, item: ScheduledSeed) -> float:
@@ -134,6 +159,24 @@ class HeapScheduler(BaseSeedScheduler):
         if self._priority_mode == "last_score":
             return base + float(item.last_isinteresting_score or 0.0)
         return base + item.avg_isinteresting_score
+
+    def _ready_ids(self) -> list[str]:
+        ready_ids: list[str] = []
+        seen: set[str] = set()
+        for item_id in self._warm_queue:
+            if item_id in self._items and item_id not in seen:
+                ready_ids.append(item_id)
+                seen.add(item_id)
+        for _neg_prio, _order, item_id in self._heap:
+            if item_id in self._items and item_id not in seen:
+                ready_ids.append(item_id)
+                seen.add(item_id)
+        return ready_ids
+
+    def _should_warm_start(self, metadata: dict[str, Any]) -> bool:
+        return self._startup_min_batches_per_seed > 0 and bool(
+            metadata.get("startup_preloaded")
+        )
 
     def _push_heap(self, item: ScheduledSeed) -> None:
         """Push a scheduled item onto the heap using max-priority ordering."""

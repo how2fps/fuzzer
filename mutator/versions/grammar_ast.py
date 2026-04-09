@@ -81,6 +81,7 @@ class ParseTreeNode(SeedTreeNode):
     children: list["ParseTreeNode"] = field(default_factory=list)
     ref_name: str | None = None
     grammar_node: Node | None = None
+    choice_index: int | None = None
 
     def walk_mutable_nodes(self) -> list[SeedTreeNode]:
         nodes: list[SeedTreeNode] = [self]
@@ -437,6 +438,7 @@ class Grammar:
         *,
         active_counts: dict[str, int],
         max_depth: int,
+        preferred_coverage_items: set[str] | None = None,
     ) -> str:
         normalized_name = _normalize_rule_name(name)
         if normalized_name not in self.rules:
@@ -455,6 +457,8 @@ class Grammar:
             rng,
             active_counts=next_counts,
             max_depth=max_depth,
+            preferred_coverage_items=preferred_coverage_items,
+            current_rule_name=normalized_name,
         )
 
     def _generate_node(
@@ -464,6 +468,8 @@ class Grammar:
         *,
         active_counts: dict[str, int],
         max_depth: int,
+        preferred_coverage_items: set[str] | None = None,
+        current_rule_name: str | None = None,
     ) -> str:
         if isinstance(node, Literal):
             return node.value
@@ -484,6 +490,8 @@ class Grammar:
                     rng,
                     active_counts=active_counts,
                     max_depth=max_depth,
+                    preferred_coverage_items=preferred_coverage_items,
+                    current_rule_name=current_rule_name,
                 )
                 for child in node.nodes
             )
@@ -491,13 +499,37 @@ class Grammar:
             options = list(node.options)
             if not options:
                 return ""
-            for option in rng.sample(options, k=len(options)):
+            option_order = list(range(len(options)))
+            if preferred_coverage_items:
+                scored_options = []
+                for index, option in enumerate(options):
+                    score = _alternation_preference_score(
+                        option=option,
+                        option_index=index,
+                        current_rule_name=current_rule_name,
+                        grammar=self,
+                        preferred_coverage_items=preferred_coverage_items,
+                    )
+                    scored_options.append((score, rng.random(), index))
+                option_order = [
+                    index
+                    for _score, _tie_breaker, index in sorted(
+                        scored_options,
+                        key=lambda item: (-item[0], item[1]),
+                    )
+                ]
+            else:
+                option_order = rng.sample(option_order, k=len(option_order))
+            for option_index in option_order:
+                option = options[option_index]
                 try:
                     return self._generate_node(
                         option,
                         rng,
                         active_counts=active_counts,
                         max_depth=max_depth,
+                        preferred_coverage_items=preferred_coverage_items,
+                        current_rule_name=current_rule_name,
                     )
                 except _GenerationError:
                     continue
@@ -506,7 +538,18 @@ class Grammar:
             low = min(node.min_r, node.max_r)
             high = max(node.min_r, node.max_r)
             counts = list(range(low, high + 1))
-            for count in sorted(counts, key=lambda item: (item, rng.random())):
+            if preferred_coverage_items and _node_matches_preferred_coverage(
+                node=node.node,
+                grammar=self,
+                preferred_coverage_items=preferred_coverage_items,
+            ):
+                counts = sorted(
+                    counts,
+                    key=lambda item: (0 if item > 0 else 1, item, rng.random()),
+                )
+            else:
+                counts = sorted(counts, key=lambda item: (item, rng.random()))
+            for count in counts:
                 try:
                     return "".join(
                         self._generate_node(
@@ -514,6 +557,8 @@ class Grammar:
                             rng,
                             active_counts=active_counts,
                             max_depth=max_depth,
+                            preferred_coverage_items=preferred_coverage_items,
+                            current_rule_name=current_rule_name,
                         )
                         for _ in range(count)
                     )
@@ -528,6 +573,7 @@ class Grammar:
                 rng,
                 active_counts=active_counts,
                 max_depth=max_depth,
+                preferred_coverage_items=preferred_coverage_items,
             )
         return ""
 
@@ -537,12 +583,18 @@ class Grammar:
         rng: random.Random,
         *,
         max_depth: int = _DEFAULT_MAX_GENERATION_DEPTH,
+        preferred_coverage_items: list[str] | None = None,
     ) -> str:
         return self._generate_rule(
             start,
             rng,
             active_counts={},
             max_depth=max_depth,
+            preferred_coverage_items=(
+                {_normalize_coverage_item_name(item) for item in preferred_coverage_items}
+                if preferred_coverage_items
+                else None
+            ),
         )
 
     def generate_from_node(
@@ -551,12 +603,20 @@ class Grammar:
         rng: random.Random,
         *,
         max_depth: int = _DEFAULT_MAX_GENERATION_DEPTH,
+        preferred_coverage_items: list[str] | None = None,
+        current_rule_name: str | None = None,
     ) -> str:
         return self._generate_node(
             node,
             rng,
             active_counts={},
             max_depth=max_depth,
+            preferred_coverage_items=(
+                {_normalize_coverage_item_name(item) for item in preferred_coverage_items}
+                if preferred_coverage_items
+                else None
+            ),
+            current_rule_name=current_rule_name,
         )
 
     def mutate(
@@ -795,7 +855,7 @@ def _match_node(
                 )
             )
     elif isinstance(node, Alternation):
-        for option in node.options:
+        for option_index, option in enumerate(node.options):
             for matched_child, end in _match_node(
                 node=option,
                 text=text,
@@ -810,6 +870,7 @@ def _match_node(
                             text=text[pos:end],
                             children=[matched_child],
                             grammar_node=node,
+                            choice_index=option_index,
                         ),
                         end,
                     )
@@ -863,6 +924,128 @@ def _match_repeat_node(
 
     dfs(pos, 0, [])
     return results
+
+
+def _normalize_coverage_item_name(name: str) -> str:
+    if name.startswith("rule:"):
+        return f"rule:{_normalize_rule_name(name[5:])}"
+    if name.startswith("production:"):
+        parts = name.split(":", 2)
+        if len(parts) == 3 and parts[1]:
+            return f"production:{_normalize_rule_name(parts[1])}:{parts[2]}"
+    return name
+
+
+def _coverage_item_rule_name(item: str) -> str | None:
+    normalized = _normalize_coverage_item_name(item)
+    if normalized.startswith("rule:"):
+        return normalized[5:]
+    if normalized.startswith("production:"):
+        parts = normalized.split(":", 2)
+        if len(parts) == 3 and parts[1]:
+            return parts[1]
+    return None
+
+
+def _reachable_rule_names_from_node(
+    node: Node,
+    *,
+    grammar: Grammar,
+    active_rule_names: set[str] | None = None,
+) -> set[str]:
+    if isinstance(node, Ref):
+        names = {node.name}
+        if node.name not in grammar.rules:
+            return names
+        if active_rule_names is not None and node.name in active_rule_names:
+            return names
+        next_active = set(active_rule_names or set())
+        next_active.add(node.name)
+        names.update(
+            _reachable_rule_names_from_node(
+                grammar.rules[node.name],
+                grammar=grammar,
+                active_rule_names=next_active,
+            )
+        )
+        return names
+    if isinstance(node, Sequence):
+        names: set[str] = set()
+        for child in node.nodes:
+            names.update(
+                _reachable_rule_names_from_node(
+                    child,
+                    grammar=grammar,
+                    active_rule_names=active_rule_names,
+                )
+            )
+        return names
+    if isinstance(node, Alternation):
+        names: set[str] = set()
+        for option in node.options:
+            names.update(
+                _reachable_rule_names_from_node(
+                    option,
+                    grammar=grammar,
+                    active_rule_names=active_rule_names,
+                )
+            )
+        return names
+    if isinstance(node, Repeat):
+        return _reachable_rule_names_from_node(
+            node.node,
+            grammar=grammar,
+            active_rule_names=active_rule_names,
+        )
+    return set()
+
+
+def _node_matches_preferred_coverage(
+    *,
+    node: Node,
+    grammar: Grammar,
+    preferred_coverage_items: set[str],
+) -> bool:
+    preferred_rule_names = {
+        rule_name
+        for item in preferred_coverage_items
+        for rule_name in [_coverage_item_rule_name(item)]
+        if rule_name is not None
+    }
+    if not preferred_rule_names:
+        return False
+    reachable = _reachable_rule_names_from_node(node, grammar=grammar)
+    return bool(reachable & preferred_rule_names)
+
+
+def _alternation_preference_score(
+    *,
+    option: Node,
+    option_index: int,
+    current_rule_name: str | None,
+    grammar: Grammar,
+    preferred_coverage_items: set[str],
+) -> int:
+    score = 0
+    if current_rule_name is not None:
+        production_item = f"production:{_normalize_rule_name(current_rule_name)}:{option_index}"
+        if production_item in preferred_coverage_items:
+            score += 1000
+
+    preferred_rule_names = {
+        rule_name
+        for item in preferred_coverage_items
+        for rule_name in [_coverage_item_rule_name(item)]
+        if rule_name is not None
+    }
+    if not preferred_rule_names:
+        return score
+
+    reachable = _reachable_rule_names_from_node(option, grammar=grammar)
+    if current_rule_name is not None and current_rule_name in preferred_rule_names:
+        score += 100
+    score += len(reachable & preferred_rule_names) * 10
+    return score
 
 
 def _referenced_rule_names(node: Node) -> set[str]:
@@ -1001,6 +1184,56 @@ def _default_start_rule(grammar: Grammar) -> str:
     return grammar.start_rule or next(iter(grammar.rules))
 
 
+def _collect_reachable_rule_names(
+    *,
+    grammar: Grammar,
+    start_rule: str,
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    queue = [_normalize_rule_name(start_rule)]
+    while queue:
+        rule_name = queue.pop(0)
+        if rule_name in seen or rule_name not in grammar.rules:
+            continue
+        seen.add(rule_name)
+        ordered.append(rule_name)
+        for child_name in sorted(_collect_direct_ref_names(grammar.rules[rule_name])):
+            if child_name not in seen:
+                queue.append(child_name)
+    return ordered
+
+
+def _collect_coverage_items_from_parse_tree(
+    *,
+    tree: ParseTreeNode,
+    root_rule_name: str,
+    grammar: Grammar,
+) -> set[str]:
+    items = {f"rule:{_normalize_rule_name(root_rule_name)}"}
+    normalized_root_rule = _normalize_rule_name(root_rule_name)
+    root_node = grammar.rules.get(normalized_root_rule)
+    if isinstance(root_node, Alternation) and tree.choice_index is not None:
+        items.add(f"production:{normalized_root_rule}:{tree.choice_index}")
+
+    def _visit(node: ParseTreeNode) -> None:
+        if node.ref_name:
+            normalized_ref_name = _normalize_rule_name(node.ref_name)
+            items.add(f"rule:{normalized_ref_name}")
+            child = node.children[0] if node.children else None
+            if (
+                child is not None
+                and child.choice_index is not None
+                and isinstance(grammar.rules.get(normalized_ref_name), Alternation)
+            ):
+                items.add(f"production:{normalized_ref_name}:{child.choice_index}")
+        for child in node.children:
+            _visit(child)
+
+    _visit(tree)
+    return items
+
+
 def _parse_tree_root_wrapper_depth(node: ParseTreeNode) -> int:
     depth = 0
     current = node
@@ -1043,6 +1276,56 @@ def _exact_parse_profile(
     if best_match is None:
         return None
     return (best_match[1], best_match[2])
+
+
+def available_coverage_items(*, mutator_kind: str = "grammar") -> list[str]:
+    """Return ordered grammar coverage items reachable from the default start rule."""
+    grammar = _resolved_base_grammar(mutator_kind=mutator_kind)
+    start_rule = _default_start_rule(grammar)
+    ordered_items: list[str] = []
+    for rule_name in _collect_reachable_rule_names(grammar=grammar, start_rule=start_rule):
+        ordered_items.append(f"rule:{rule_name}")
+        rule_node = grammar.rules.get(rule_name)
+        if isinstance(rule_node, Alternation):
+            for option_index in range(len(rule_node.options)):
+                ordered_items.append(f"production:{rule_name}:{option_index}")
+    return ordered_items
+
+
+def coverage_items_for_text(
+    *,
+    text: str,
+    mutator_kind: str = "grammar",
+) -> set[str]:
+    """Return covered grammar rules and top-level productions for one input text."""
+    if not text:
+        return set()
+    grammar = _resolved_base_grammar(mutator_kind=mutator_kind)
+    start_rule = _default_start_rule(grammar)
+    matched_start_tree = _match_exact_node(
+        node=grammar.rules[start_rule],
+        text=text,
+        grammar=grammar,
+    )
+    if matched_start_tree is not None:
+        return _collect_coverage_items_from_parse_tree(
+            tree=matched_start_tree,
+            root_rule_name=start_rule,
+            grammar=grammar,
+        )
+    parse_profile = _exact_parse_profile(
+        text=text,
+        grammar=grammar,
+        requested_start_rule=start_rule,
+    )
+    if parse_profile is None:
+        return set()
+    matched_rule_name, tree = parse_profile
+    return _collect_coverage_items_from_parse_tree(
+        tree=tree,
+        root_rule_name=matched_rule_name,
+        grammar=grammar,
+    )
 
 
 def _build_from_ast_spec(*, mutator_kind: str) -> Grammar:
@@ -1225,6 +1508,7 @@ def generate_without_seed(
     mutator_kind: str,
     rng: random.Random,
     count: int = 1,
+    preferred_coverage_items: list[str] | None = None,
 ) -> list[str]:
     """Generate unique seedless candidates from the built grammar."""
     if count <= 0:
@@ -1242,7 +1526,11 @@ def generate_without_seed(
         for _round in range(rng.randint(0, 3)):
             grammar.mutate(rng, preferred_rule_names=preferred)
         try:
-            generated = grammar.generate(start_rule, rng)
+            generated = grammar.generate(
+                start_rule,
+                rng,
+                preferred_coverage_items=preferred_coverage_items,
+            )
         except _GenerationError:
             continue
         if generated in seen:
@@ -1260,6 +1548,7 @@ def generate_from_rule(
     min_mutation_rounds: int = 0,
     max_mutation_rounds: int = 3,
     preferred_rule_names: list[str] | None = None,
+    preferred_coverage_items: list[str] | None = None,
     mutator_kind: str = "grammar",
 ) -> list[str]:
     """Generate unique candidates from a specific start rule."""
@@ -1282,7 +1571,11 @@ def generate_from_rule(
         for _round in range(rng.randint(min_mutation_rounds, max_mutation_rounds)):
             grammar.mutate(rng, preferred_rule_names=preferred)
         try:
-            generated = grammar.generate(normalized_start_rule, rng)
+            generated = grammar.generate(
+                normalized_start_rule,
+                rng,
+                preferred_coverage_items=preferred_coverage_items,
+            )
         except _GenerationError:
             continue
         if generated in seen:
@@ -1410,10 +1703,12 @@ __all__ = [
     "Ref",
     "build",
     "configure",
+    "coverage_items_for_text",
     "generate_from_rule",
     "generate_without_seed",
     "mutate",
     "mutate_from_rule",
+    "available_coverage_items",
     "parse",
     "parse_from_rule",
     "tokenize",

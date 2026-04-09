@@ -134,6 +134,7 @@ class RunDashboard:
     errors_found: int = 0
     unique_bugs_found: int = 0
     covered_branches_total: int = 0
+    total_branches: int = 0
     unique_covered_arcs: int = 0
     scheduler_size: int = 0
     queue_size: int = 0
@@ -249,6 +250,7 @@ class RunDashboard:
         new_coverage: bool,
         new_bug: bool,
         covered_branches: int,
+        total_branches: int = 0,
         unique_covered_arcs: int,
         pending_jobs: int,
         scheduler_size: int,
@@ -265,6 +267,7 @@ class RunDashboard:
         self.last_event = event
         self.last_mutated_input = self._preview_input(mutated_input)
         self.covered_branches_total = max(0, int(covered_branches))
+        self.total_branches = max(self.total_branches, max(0, int(total_branches)))
         self.unique_covered_arcs = max(0, int(unique_covered_arcs))
 
         if score >= self.interesting_score_threshold:
@@ -329,6 +332,12 @@ class RunDashboard:
 
     def _summary_table(self) -> Table:
         table = Table.grid(expand=True)
+        covered_branches_text = str(self.covered_branches_total)
+        if self.total_branches > 0:
+            ratio = (self.covered_branches_total / float(self.total_branches)) * 100.0
+            covered_branches_text = (
+                f"{self.covered_branches_total} / {self.total_branches} ({ratio:.1f}%)"
+            )
         values = [
             ("Status", self._status_text()),
             ("Exec/s", Text(f"{self._exec_rate():.1f}", style="bold white")),
@@ -350,7 +359,7 @@ class RunDashboard:
             (
                 "Covered Branches",
                 Text(
-                    str(self.covered_branches_total),
+                    covered_branches_text,
                     style="bold magenta" if self.covered_branches_total else "dim",
                 ),
             ),

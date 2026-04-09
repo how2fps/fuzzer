@@ -1,0 +1,184 @@
+from __future__ import annotations
+
+import random
+import sqlite3
+from dataclasses import dataclass
+from typing import Sequence
+
+from mutator.versions import grammar_ast
+
+
+@dataclass(frozen=True)
+class GrammarRefillResult:
+    seeds: tuple[str, ...]
+    observed_coverage_items: tuple[str, ...]
+    uncovered_coverage_items: tuple[str, ...]
+
+
+def _coverage_item_rule_name(item: str) -> str | None:
+    if item.startswith("rule:") and len(item) > len("rule:"):
+        return item[len("rule:"):]
+    if item.startswith("production:"):
+        parts = item.split(":", 2)
+        if len(parts) == 3 and parts[1]:
+            return parts[1]
+    return None
+
+
+def collect_history_texts(
+    *,
+    conn: sqlite3.Connection,
+    target: str,
+    ready_texts: Sequence[str] = (),
+) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def _record(text: str) -> None:
+        if not text or text in seen:
+            return
+        seen.add(text)
+        ordered.append(text)
+
+    for text in ready_texts:
+        _record(text)
+
+    rows = conn.execute(
+        """
+        SELECT seed_text, mutated_input
+        FROM runs
+        WHERE target = ?
+        ORDER BY id DESC
+        """,
+        (target,),
+    )
+    for seed_text, mutated_input in rows:
+        _record(str(mutated_input or ""))
+        _record(str(seed_text or ""))
+
+    return ordered
+
+
+def generate_grammar_refill_seeds(
+    *,
+    history_texts: Sequence[str],
+    ready_texts: Sequence[str] = (),
+    mutator_kind: str,
+    rng: random.Random,
+    count: int,
+) -> GrammarRefillResult:
+    if count <= 0:
+        return GrammarRefillResult(seeds=(), observed_coverage_items=(), uncovered_coverage_items=())
+
+    available_items = tuple(grammar_ast.available_coverage_items(mutator_kind=mutator_kind))
+    if not available_items:
+        return GrammarRefillResult(seeds=(), observed_coverage_items=(), uncovered_coverage_items=())
+
+    observed_items: set[str] = set()
+    known_texts: set[str] = set()
+
+    def _record_coverage(text: str) -> None:
+        if not text or text in known_texts:
+            return
+        known_texts.add(text)
+        observed_items.update(
+            grammar_ast.coverage_items_for_text(
+                text=text,
+                mutator_kind=mutator_kind,
+            )
+        )
+
+    for text in ready_texts:
+        _record_coverage(text)
+    for text in history_texts:
+        _record_coverage(text)
+        if len(observed_items) >= len(available_items):
+            break
+
+    uncovered_items = tuple(item for item in available_items if item not in observed_items)
+    grammar = grammar_ast.build(mutator_kind=mutator_kind)
+    start_rule = grammar.start_rule or next(iter(grammar.rules))
+
+    selected_seeds: list[str] = []
+    generated_items: set[str] = set()
+    seen_candidates: set[str] = set(known_texts)
+    available_set = set(available_items)
+
+    def _pick_best_candidate(*, focus_items: Sequence[str]) -> tuple[str | None, set[str]]:
+        if not focus_items:
+            return None, set()
+        best_text: str | None = None
+        best_items: set[str] = set()
+        best_score = (-1, -1, -1)
+        attempt_budget = max(24, min(160, len(focus_items) * 10))
+        covered_so_far = observed_items | generated_items
+
+        for attempt in range(attempt_budget):
+            focus_item = (
+                focus_items[attempt % len(focus_items)]
+                if attempt < len(focus_items)
+                else rng.choice(list(focus_items))
+            )
+            focus_rule = _coverage_item_rule_name(focus_item)
+            generated = grammar_ast.generate_from_rule(
+                start_rule=start_rule,
+                rng=rng,
+                count=1,
+                min_mutation_rounds=0,
+                max_mutation_rounds=0,
+                preferred_rule_names=[focus_rule] if focus_rule else None,
+                preferred_coverage_items=[focus_item],
+                mutator_kind=mutator_kind,
+            )
+            if not generated:
+                continue
+            candidate = generated[0]
+            if not candidate or candidate in seen_candidates:
+                continue
+            candidate_items = grammar_ast.coverage_items_for_text(
+                text=candidate,
+                mutator_kind=mutator_kind,
+            )
+            if not candidate_items:
+                continue
+            new_items = candidate_items - covered_so_far
+            score = (
+                len(new_items),
+                len(candidate_items & set(focus_items)),
+                len(candidate_items & available_set),
+            )
+            if best_text is None or score > best_score:
+                best_text = candidate
+                best_items = candidate_items
+                best_score = score
+                if focus_item in new_items:
+                    break
+
+        return best_text, best_items
+
+    while len(selected_seeds) < count:
+        remaining_items = [
+            item
+            for item in available_items
+            if item not in observed_items and item not in generated_items
+        ]
+        focus_items = remaining_items or list(available_items)
+        best_text, best_items = _pick_best_candidate(focus_items=focus_items)
+        if best_text is None:
+            break
+        selected_seeds.append(best_text)
+        seen_candidates.add(best_text)
+        generated_items.update(best_items)
+
+    return GrammarRefillResult(
+        seeds=tuple(selected_seeds),
+        observed_coverage_items=tuple(item for item in available_items if item in observed_items),
+        uncovered_coverage_items=tuple(uncovered_items),
+    )
+
+
+__all__ = [
+    "GrammarRefillResult",
+    "collect_history_texts",
+    "generate_grammar_refill_seeds",
+]

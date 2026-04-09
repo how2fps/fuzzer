@@ -28,6 +28,7 @@ COVERAGE_TARGET_NAME = "json_open"
 _TARGETS_BASE = Path(__file__).resolve().parent.parent / "targets"
 
 JSON_OPEN_SCRIPT = Path(__file__).resolve().parent / "json_open_runner.py"
+IPYPARSE_SCRIPT = Path(__file__).resolve().parent / "ipyparse_runner.py"
 TARGETS: dict[str, dict[str, Any]] = {
     "cidrize-runner": {
         "path": "cidrize-runner",
@@ -71,8 +72,7 @@ TARGETS: dict[str, dict[str, Any]] = {
         "command": {
             "argv": [
                 sys.executable,
-                "-c",
-                "import sys; sys.path.insert(0, 'src'); from ipyparse.ipv4 import parse; print(parse(sys.stdin.read().strip()))",
+                str(IPYPARSE_SCRIPT),
             ],
             "input_via_stdin": True,
         },

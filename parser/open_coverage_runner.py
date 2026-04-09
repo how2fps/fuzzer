@@ -21,6 +21,13 @@ except ImportError:
         sys.path.insert(0, str(THIS_DIR))
     from json_open_runner import run_json_open
 
+try:
+    from .ipyparse_runner import run_ipyparse
+except ImportError:
+    if str(THIS_DIR) not in sys.path:
+        sys.path.insert(0, str(THIS_DIR))
+    from ipyparse_runner import run_ipyparse
+
 
 def _path_relative_to_root(path: str | None) -> str | None:
     if path is None:
@@ -182,29 +189,10 @@ def _run_cidrize_open(*, input_data: bytes) -> dict[str, Any]:
 
 
 def _run_ipyparse_open(*, input_data: bytes) -> dict[str, Any]:
-    ipyparse_src = ROOT_DIR / "targets" / "ipyparse" / "src"
-    if str(ipyparse_src) not in sys.path:
-        sys.path.insert(0, str(ipyparse_src))
-
-    from ipyparse.ipv4 import parse  # type: ignore[import-not-found]
-
-    input_str = input_data.decode("utf-8", errors="replace").strip()
-    bug_signature: dict[str, Any] | None = None
-    try:
-        parse(input_str)
-    except Exception as exc:
-        details = _track_exception(exc)
-        bug_type = "invalidity" if details.get("exception_type") == "ParseException" else "bonus"
-        bug_signature = {
-            "type": bug_type,
-            "exception": details.get("exception_type"),
-            "message": details.get("message"),
-            "file": details.get("file"),
-            "line": details.get("line"),
-        }
+    result = run_ipyparse(input_data=input_data)
     return {
-        "status": "ok" if bug_signature is None else "bug",
-        "bug_signature": bug_signature,
+        "status": result.get("status", "ok"),
+        "bug_signature": result.get("bug_signature"),
     }
 
 
@@ -248,3 +236,30 @@ def run_open_target_with_branches(*, target_name: str, input_data: bytes) -> dic
         "missing_branches": branch_counts["missing_branches"],
         "branch_details_by_file": branch_details_by_file,
     }
+
+def refill_from_uncovered(history: list[str], rng: random.Random) -> tuple[str, ...]:
+    all_items = tuple(grammar_ast.available_coverage_items(mutator_kind="grammar"))
+
+    seen: set[str] = set()
+    for text in history:
+        # Union coverage from all previously seen seeds.
+        seen.update(ast_cov(text))
+
+    missing = [item for item in all_items if item not in seen]
+
+    out: list[str] = []
+    for item in missing:
+        # Bias generation toward AST nodes / productions we have not hit yet.
+        gen = grammar_ast.generate_from_rule(
+            start_rule="start",
+            rng=rng,
+            count=1,
+            min_mutation_rounds=0,
+            max_mutation_rounds=0,
+            preferred_coverage_items=[item],
+            mutator_kind="grammar",
+        )
+        if gen:
+            out.append(gen[0])
+
+    return tuple(out)

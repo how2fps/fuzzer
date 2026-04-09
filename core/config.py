@@ -39,7 +39,15 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "workers",
         ),
     ),
-    ("seed_scheduler", ("scheduler_kind", "ucb_trace", "ucb_debug_tree")),
+    (
+        "seed_scheduler",
+        (
+            "scheduler_kind",
+            "ucb_trace",
+            "ucb_debug_tree",
+            "heap_startup_min_batches_per_seed",
+        ),
+    ),
     (
         "seed_corpus",
         (
@@ -48,6 +56,7 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "seed_preload_mode",
             "seed_preload_total",
             "seed_preload_bucket_ratios",
+            "seed_refill_mode",
             "llm_seed_candidates",
         ),
     ),
@@ -86,12 +95,14 @@ class FuzzConfig(TypedDict):
     scheduler_kind: str
     ucb_trace: bool
     ucb_debug_tree: bool
+    heap_startup_min_batches_per_seed: int
 
     seed_corpus_version: str
     seed_corpus_initial_draw: str | None
     seed_preload_mode: str
     seed_preload_total: int
     seed_preload_bucket_ratios: dict[str, float]
+    seed_refill_mode: str
     llm_seed_candidates: int
 
     mutator_kind: str
@@ -123,11 +134,13 @@ def get_default_config() -> FuzzConfig:
         "scheduler_kind": "heap",
         "ucb_trace": False,
         "ucb_debug_tree": False,
+        "heap_startup_min_batches_per_seed": 1,
         "seed_corpus_version": "base",
         "seed_corpus_initial_draw": None,
         "seed_preload_mode": "full",
         "seed_preload_total": 8,
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
+        "seed_refill_mode": "historical",
         "llm_seed_candidates": 5,
         "mutator_kind": "auto",
         "mutator_version": "base",
@@ -173,6 +186,7 @@ def _merge_config_values(
 CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "target": ("--target",),
     "scheduler_kind": ("--scheduler",),
+    "heap_startup_min_batches_per_seed": ("--heap-startup-min-batches-per-seed",),
     "mutator_kind": ("--mutator",),
     "grammar_path": ("--grammar-file",),
     "ast_grammar_path": ("--ast-grammar-file",),
@@ -180,6 +194,7 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "debug_mode": ("--debug",),
     "seed_preload_mode": ("--seed-preload-mode",),
     "seed_preload_total": ("--seed-preload-total",),
+    "seed_refill_mode": ("--seed-refill-mode",),
     "ucb_trace": ("--ucb-trace",),
     "ucb_debug_tree": ("--ucb-debug-tree",),
     "max_iterations": ("--iterations",),
@@ -327,6 +342,8 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             f"Invalid scheduler_kind: {config['scheduler_kind']}. Must be one of: {scheduler_choices}"
         )
+    if config["heap_startup_min_batches_per_seed"] < 0:
+        raise ValueError("heap_startup_min_batches_per_seed must be >= 0.")
     if config["mutator_kind"] != "auto":
         raise ValueError(
             f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto."
@@ -368,6 +385,11 @@ def _validate_config(config: FuzzConfig) -> None:
             )
     if sum(float(v) for v in ratios.values()) <= 0:
         raise ValueError("sum of seed_preload_bucket_ratios values must be > 0.")
+    if config["seed_refill_mode"] not in ("historical", "grammar"):
+        raise ValueError(
+            f"Invalid seed_refill_mode: {config['seed_refill_mode']}. "
+            "Must be historical or grammar."
+        )
     if config["max_hours"] is not None and config["max_iterations"] is not None:
         raise ValueError("Cannot set both max_iterations and max_hours.")
     if config["max_hours"] is not None and config["max_hours"] <= 0:
@@ -502,6 +524,16 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         help="Seed scheduler version.",
     )
     parser.add_argument(
+        "--heap-startup-min-batches-per-seed",
+        dest="heap_startup_min_batches_per_seed",
+        type=int,
+        default=1,
+        help=(
+            "For heap scheduling, guarantee this many leased batches for each "
+            "startup-preloaded seed before score-based reprioritization takes over."
+        ),
+    )
+    parser.add_argument(
         "--mutator",
         dest="mutator_kind",
         default="auto",
@@ -553,6 +585,15 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         type=int,
         default=8,
         help="Number of startup seeds to preload when using `ratio_batch` or `sample` mode.",
+    )
+    parser.add_argument(
+        "--seed-refill-mode",
+        default="historical",
+        choices=["historical", "grammar"],
+        help=(
+            "How to replenish scheduler seeds at runtime: the existing history-based "
+            "refill (`historical`) or grammar-coverage-directed refill (`grammar`)."
+        ),
     )
     parser.add_argument(
         "--ucb-trace",
@@ -698,6 +739,8 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
             parser.error("--hours must be positive.")
     if args.seed_preload_total < 0:
         parser.error("--seed-preload-total must be >= 0.")
+    if args.heap_startup_min_batches_per_seed < 0:
+        parser.error("--heap-startup-min-batches-per-seed must be >= 0.")
     if args.memory_telemetry_seconds < 0:
         parser.error("--memory-telemetry-seconds must be >= 0.")
     if args.worker_max_jobs < 0:
@@ -721,6 +764,7 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
     from_args: FuzzConfig = {
         "target": args.target,
         "scheduler_kind": args.scheduler_kind,
+        "heap_startup_min_batches_per_seed": args.heap_startup_min_batches_per_seed,
         "mutator_kind": args.mutator_kind,
         "grammar_path": (
             str(args.grammar_path.resolve())
@@ -735,6 +779,7 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         "debug_mode": args.debug_mode,
         "seed_preload_mode": args.seed_preload_mode,
         "seed_preload_total": args.seed_preload_total,
+        "seed_refill_mode": args.seed_refill_mode,
         "ucb_trace": args.ucb_trace,
         "ucb_debug_tree": args.ucb_debug_tree,
         "max_iterations": max_iterations,

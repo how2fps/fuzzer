@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import random
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -307,6 +308,68 @@ def get_unique_coverage_seed_inputs(
                 "input_text": str(row[1] or ""),
                 "seed_family": str(row[2] or ""),
                 "seed_bucket": str(row[3] or ""),
+            }
+        )
+    return out
+
+
+def get_coverage_replay_seed_inputs(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    rng: random.Random,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
+    """
+    Return a randomized replay set for previously novel coverage paths.
+
+    Coverage keys are sampled uniformly from the coverage store, then each chosen
+    path replays a random historical input that reached that same coverage key.
+    """
+    stored = get_unique_coverage_seed_inputs(conn, target=target)
+    if not stored:
+        return []
+
+    rng.shuffle(stored)
+    if limit is not None and limit > 0:
+        stored = stored[: min(len(stored), int(limit))]
+
+    coverage_keys = [entry["coverage_key"] for entry in stored if entry["coverage_key"]]
+    inputs_by_key: dict[str, list[str]] = {}
+    if coverage_keys:
+        placeholders = ", ".join("?" for _ in coverage_keys)
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT coverage_key, mutated_input
+            FROM runs
+            WHERE target = ?
+              AND coverage_key IN ({placeholders})
+              AND COALESCE(mutated_input, '') <> ''
+            """,
+            (target, *coverage_keys),
+        ).fetchall()
+        for coverage_key, mutated_input in rows:
+            key = str(coverage_key or "")
+            text = str(mutated_input or "")
+            if not key or not text:
+                continue
+            inputs_by_key.setdefault(key, []).append(text)
+
+    out: list[dict[str, str]] = []
+    for entry in stored:
+        candidates = list(inputs_by_key.get(entry["coverage_key"], ()))
+        stored_input = entry["input_text"]
+        if stored_input and stored_input not in candidates:
+            candidates.append(stored_input)
+        if not candidates:
+            continue
+        chosen_input = rng.choice(candidates)
+        out.append(
+            {
+                "coverage_key": entry["coverage_key"],
+                "input_text": chosen_input,
+                "seed_family": entry["seed_family"],
+                "seed_bucket": entry["seed_bucket"],
             }
         )
     return out
