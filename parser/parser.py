@@ -24,6 +24,17 @@ try:
 except ImportError:
     from .json_decoder_parser import run_json_decoder_with_branches
 
+try:
+    from qemu_coverage_runner import (
+        qemu_coverage_enabled,
+        run_target_with_qemu_coverage,
+    )
+except ImportError:
+    from .qemu_coverage_runner import (
+        qemu_coverage_enabled,
+        run_target_with_qemu_coverage,
+    )
+
 DEFAULT_TIMEOUT = 10.0
 
 COVERAGE_TARGET_NAME = "json_open"
@@ -36,6 +47,7 @@ TARGETS: dict[str, dict[str, Any]] = {
     "cidrize-runner": {
         "path": "cidrize-runner",
         "oracle": "cidrize",
+        "qemu_coverage": {"enabled": True},
         "command": {
             "argv_template": [
                 "bin/{platform}-cidrize-runner{exe_suffix}",
@@ -52,6 +64,7 @@ TARGETS: dict[str, dict[str, Any]] = {
     "IPv4-IPv6-parser": {
         "path": "IPv4-IPv6-parser",
         "oracle": "ipyparse",
+        "qemu_coverage": {"enabled": True},
         "command": {
             "argv_template": [
                 "bin/{platform}-{ip_version}-parser{exe_suffix}",
@@ -627,6 +640,32 @@ if __name__ == "__main__":
     return out
 
 
+def _apply_coverage_payload(
+    *,
+    result: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    details = payload.get("branch_details_by_file")
+    has_details = isinstance(details, list) and any(
+        isinstance(file_entry, dict) and file_entry.get("covered_branches")
+        for file_entry in details
+    )
+    if has_details or payload.get("covered_branches") is not None or payload.get("missing_branches") is not None:
+        for key in (
+            "covered_branches",
+            "missing_branches",
+            "branch_details_by_file",
+            "total_branches",
+        ):
+            if key not in payload:
+                continue
+            result[key] = payload.get(key)
+    for key in ("coverage_backend", "coverage_error", "showmap_returncode"):
+        if key not in payload:
+            continue
+        result[key] = payload.get(key)
+
+
 def run_parser(
     *,
     input_data: bytes | None = None,
@@ -636,6 +675,7 @@ def run_parser(
     print_json: bool = False,
     seed_family: str | None = None,
     enable_open_coverage: bool = False,
+    enable_qemu_coverage: bool = False,
     closed_cwd_override: Path | str | None = None,
     parser_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -718,6 +758,39 @@ def run_parser(
             seed_family=seed_family,
             process_cwd=closed_cwd_override,
         )
+        if enable_qemu_coverage and qemu_coverage_enabled(
+            entry=entry,
+            parser_config=parser_config,
+        ):
+            try:
+                argv, input_via_stdin = _resolve_command(
+                    target_name=target,
+                    entry=entry,
+                    target_dir=target_dir,
+                    input_data=data,
+                    seed_family=seed_family,
+                )
+            except ValueError as exc:
+                result["coverage_backend"] = "afl-qemu-showmap"
+                result["coverage_error"] = str(exc)
+                result["total_branches"] = None
+            else:
+                qemu_payload = run_target_with_qemu_coverage(
+                    target_name=target,
+                    argv=argv,
+                    cwd=(
+                        Path(closed_cwd_override).resolve()
+                        if closed_cwd_override is not None
+                        else target_dir
+                    ),
+                    input_data=data,
+                    input_via_stdin=input_via_stdin,
+                    timeout=timeout,
+                    entry=entry,
+                    parser_config=parser_config,
+                )
+                if isinstance(qemu_payload, dict):
+                    _apply_coverage_payload(result=result, payload=qemu_payload)
 
     open_name = entry.get("oracle")
     if open_name is not None:

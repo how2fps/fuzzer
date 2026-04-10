@@ -49,6 +49,8 @@ Defaults shown below match `core.config.get_default_config()`.
 | `seed_corpus` | `run_startup_generated_unmutated_first` | `true` / `false` | `false` |
 | `mutator` | `mutator_kind` | `auto`, `json`, `ip` | `auto` |
 | `mutator` | `mutator_version` | `base`, `byte_havoc`, `grammar_ast`, `adaptive_all` | `base` |
+| `mutator` | `mutation_chain_continue_probability` | float in `[0.0, 1.0)` | `0.2` |
+| `mutator` | `mutation_chain_max_depth` | integer `>= 1` | `8` |
 | `mutator` | `grammar_path` | file path string or `null` | `null` |
 | `mutator` | `ast_grammar_path` | file path string or `null` | `null` |
 | `mutator` | `grammar_rules_file` | file path string or `null` | `null` |
@@ -56,6 +58,7 @@ Defaults shown below match `core.config.get_default_config()`.
 | `parser` | `parser_version` | `base` | `base` |
 | `parser` | `parser_config` | nested object for custom targets | `{}` |
 | `parser` | `enable_open_coverage` | `true` / `false` | `false` |
+| `parser` | `enable_qemu_coverage` | `true` / `false` | `false` |
 | `power_scheduler` | `power_scheduler_version` | `annealing`, `base`, `constant`, `hybrid` | `base` |
 
 ## Built-in targets
@@ -118,6 +121,7 @@ Example `configs/my_run.json` using the nested module form:
   "parser": {
     "parser_version": "base",
     "enable_open_coverage": false,
+    "enable_qemu_coverage": false,
     "parser_config": {}
   },
   "power_scheduler": {
@@ -139,3 +143,5 @@ file `configs/_template_custom_target.json` shows the full shape.
 - `parser_config.targets.<name>.command.append_input_as_final_arg`: if `false`, do not append the input as the last CLI arg when not using stdin.
 - `parser_config.targets.<name>.oracle`: optional paired open/oracle target name.
 - `parser_config.targets.<name>.coverage.enabled`: set `true` only for open targets already supported by `parser/open_coverage_runner.py`.
+- `parser_config.qemu_coverage.showmap_command`: optional override command for `afl-showmap` / AFL-QEMU collection.
+- `parser_config.targets.<name>.qemu_coverage.enabled`: mark a closed target as eligible for QEMU-backed bitmap coverage.

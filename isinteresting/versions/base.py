@@ -1,6 +1,6 @@
 """
-Base interestingness: AFL-style scoring (status, differential, coverage,
-new branches from seen_branches DB, rare-bug from runs DB).
+Base interestingness: AFL-style scoring (status, differential, new covered
+arcs from seen_branches DB, rare-bug from runs DB).
 Seen_branches insertion is done by main, not here.
 """
 from __future__ import annotations
@@ -85,64 +85,39 @@ def _differential_score(
     return 0.0
 
 
-def _coverage_score(
-    *,
-    covered_branches: int | None,
-    missing_branches: int | None,
-) -> float:
-    """
-    Compute a simple coverage-based score from aggregate branch counts.
-    """
-    if covered_branches is None or missing_branches is None:
-        return 0.0
-
-    try:
-        covered = int(covered_branches)
-        missing = int(missing_branches)
-    except (TypeError, ValueError):
-        return 0.0
-
-    if covered < 0 or missing < 0:
-        return 0.0
-
-    total = covered + missing
-    if total <= 0:
-        return 0.0
-
-    ratio = covered / float(total)
-    # Prefer inputs that execute more of the available branches.
-    return max(0.0, min(ratio, 1.0))
-
-
-def _has_coverage_counts(
-    *,
-    covered_branches: int | None,
-    missing_branches: int | None,
-) -> bool:
-    return covered_branches is not None and missing_branches is not None
-
-
 def get_covered_edges_from_result(result: Mapping[str, Any]) -> set[tuple[str, int, int]]:
     """Extract (file, from_line, to_line) for all covered branches. Used by main to insert into seen_branches."""
     closed_raw = result.get("closed_result") if isinstance(result, Mapping) else None
     closed = _as_mapping(closed_raw)
     if closed is None:
         return set()
+    shadow_raw = result.get("shadow_result") if isinstance(result, Mapping) else None
+    shadow_res = _as_mapping(shadow_raw) if shadow_raw is not None else None
     open_raw = result.get("open_result") if isinstance(result, Mapping) else None
     open_res = _as_mapping(open_raw) if open_raw is not None else None
-    coverage_source = _select_coverage_source(closed=closed, open_res=open_res)
+    coverage_source = _select_coverage_source(
+        closed=closed,
+        shadow_res=shadow_res,
+        open_res=open_res,
+    )
     return _get_covered_edges(coverage_source)
 
 
 def get_coverage_source_kind_from_result(result: Mapping[str, Any]) -> str:
-    """Return `closed`, `open`, or `none` for the coverage source selected for a result."""
+    """Return `closed`, `shadow`, `open`, or `none` for the selected coverage source."""
     closed_raw = result.get("closed_result") if isinstance(result, Mapping) else None
     closed = _as_mapping(closed_raw)
     if closed is None:
         return "none"
+    shadow_raw = result.get("shadow_result") if isinstance(result, Mapping) else None
+    shadow_res = _as_mapping(shadow_raw) if shadow_raw is not None else None
     open_raw = result.get("open_result") if isinstance(result, Mapping) else None
     open_res = _as_mapping(open_raw) if open_raw is not None else None
-    return _coverage_source_kind(closed=closed, open_res=open_res)
+    return _coverage_source_kind(
+        closed=closed,
+        shadow_res=shadow_res,
+        open_res=open_res,
+    )
 
 
 def _has_coverage_fields(value: Mapping[str, Any] | None) -> bool:
@@ -151,16 +126,21 @@ def _has_coverage_fields(value: Mapping[str, Any] | None) -> bool:
     covered = value.get("covered_branches")
     missing = value.get("missing_branches")
     details = value.get("branch_details_by_file")
-    return covered is not None and missing is not None and isinstance(details, Sequence)
+    if covered is not None and missing is not None and isinstance(details, Sequence):
+        return True
+    return bool(_get_covered_edges(value))
 
 
 def _coverage_source_kind(
     *,
     closed: Mapping[str, Any],
+    shadow_res: Mapping[str, Any] | None,
     open_res: Mapping[str, Any] | None,
 ) -> str:
     if _has_coverage_fields(closed):
         return "closed"
+    if _has_coverage_fields(shadow_res):
+        return "shadow"
     if _has_coverage_fields(open_res):
         return "open"
     return "none"
@@ -169,11 +149,19 @@ def _coverage_source_kind(
 def _select_coverage_source(
     *,
     closed: Mapping[str, Any],
+    shadow_res: Mapping[str, Any] | None,
     open_res: Mapping[str, Any] | None,
 ) -> Mapping[str, Any]:
-    if _coverage_source_kind(closed=closed, open_res=open_res) == "closed":
+    source_kind = _coverage_source_kind(
+        closed=closed,
+        shadow_res=shadow_res,
+        open_res=open_res,
+    )
+    if source_kind == "closed":
         return closed
-    if _coverage_source_kind(closed=closed, open_res=open_res) == "open":
+    if source_kind == "shadow" and shadow_res is not None:
+        return shadow_res
+    if source_kind == "open" and open_res is not None:
         return open_res
     return closed
 
@@ -209,8 +197,24 @@ def _get_covered_edges(closed: Mapping[str, Any]) -> set[tuple[str, int, int]]:
 
 def _new_edges_score(conn: sqlite3.Connection, edges: set[tuple[str, int, int]]) -> float:
     """Read-only: which result edges are absent from seen_branches; AFL-style score. No insert."""
-    if not edges:
+    stats = _new_edges_stats(conn, edges)
+    if stats is None:
         return 0.0
+    new_count, edge_count = stats
+    if edge_count <= 0:
+        return 0.0
+    new_ratio = new_count / float(edge_count)
+    new_edge_presence = min(float(new_count), 1.0)
+    return (0.5 * new_edge_presence) + (0.5 * min(new_ratio, 1.0))
+
+
+def _new_edges_stats(
+    conn: sqlite3.Connection,
+    edges: set[tuple[str, int, int]],
+) -> tuple[int, int] | None:
+    """Return (new_edge_count, total_edge_count) for this input against seen_branches."""
+    if not edges:
+        return (0, 0)
     new_count = 0
     try:
         # Indexed lookups on PRIMARY KEY (file, from_line, to_line) — avoid full-table scans
@@ -223,10 +227,17 @@ def _new_edges_score(conn: sqlite3.Connection, edges: set[tuple[str, int, int]])
             if row is None:
                 new_count += 1
     except sqlite3.OperationalError:
-        return 0.0
-    new_ratio = new_count / float(len(edges))
-    new_edge_presence = min(float(new_count), 1.0)
-    return (0.5 * new_edge_presence) + (0.5 * min(new_ratio, 1.0))
+        return None
+    return (new_count, len(edges))
+
+
+def _coverage_backend_name(value: Mapping[str, Any] | None) -> str:
+    if value is None:
+        return ""
+    backend = value.get("coverage_backend")
+    if not isinstance(backend, str):
+        return ""
+    return backend.strip().lower()
 
 
 def _repeat_bug_count(
@@ -384,6 +395,9 @@ def compute_interestingness(
     if closed is None:
         return 0.0
 
+    shadow_raw = top.get("shadow_result")
+    shadow_res = _as_mapping(shadow_raw) if shadow_raw is not None else None
+
     open_raw = top.get("open_result")
     open_res = _as_mapping(open_raw) if open_raw is not None else None
 
@@ -393,11 +407,16 @@ def compute_interestingness(
     closed_bug = _as_mapping(closed.get("bug_signature"))
     open_bug = _as_mapping(open_res.get("bug_signature")) if open_res else None
 
-    coverage_source = _select_coverage_source(closed=closed, open_res=open_res)
-    coverage_source_kind = _coverage_source_kind(closed=closed, open_res=open_res)
-    covered_branches = coverage_source.get("covered_branches")
-    missing_branches = coverage_source.get("missing_branches")
-
+    coverage_source = _select_coverage_source(
+        closed=closed,
+        shadow_res=shadow_res,
+        open_res=open_res,
+    )
+    coverage_source_kind = _coverage_source_kind(
+        closed=closed,
+        shadow_res=shadow_res,
+        open_res=open_res,
+    )
     s_status = _status_score(closed_status=closed_status)
     s_diff = _differential_score(
         closed_status=closed_status,
@@ -405,30 +424,30 @@ def compute_interestingness(
         closed_bug=closed_bug,
         open_bug=open_bug,
     )
-    s_cov = _coverage_score(
-        covered_branches=covered_branches,
-        missing_branches=missing_branches,
-    )
-    has_coverage_counts = _has_coverage_counts(
-        covered_branches=covered_branches,
-        missing_branches=missing_branches,
-    )
+    coverage_backend = _coverage_backend_name(coverage_source)
     repeat_bug_count: int | None = None
     repeat_bug_site_count: int | None = None
     repeat_exception_site_count: int | None = None
     s_new = 0.0
+    new_arc_count = 0
+    edge_count = 0
     s_rare = 0.0
     s_bug_site = 0.0
     s_exception_site = 0.0
     new_edge_weight = 2.0
+    base_new_edge_weight = new_edge_weight
     rare_bug_weight = 0.9
     bug_site_weight = 1.2
     exception_site_weight = 0.7
-    metric_max = 2.0 + (1.0 if has_coverage_counts else 0.0)
+    metric_max = 2.0
+    used_db_edge_metrics = False
 
     if sqlite_conn is not None:
         try:
             edges = _get_covered_edges(coverage_source)
+            edge_stats = _new_edges_stats(sqlite_conn, edges)
+            if edge_stats is not None:
+                new_arc_count, edge_count = edge_stats
             repeat_bug_count = _repeat_bug_count(
                 sqlite_conn, closed_status, closed_bug, target
             )
@@ -442,6 +461,7 @@ def compute_interestingness(
             s_rare = _rare_bug_score(repeat_bug_count)
             s_bug_site = _rare_bug_score(repeat_bug_site_count)
             s_exception_site = _rare_bug_score(repeat_exception_site_count)
+            used_db_edge_metrics = True
             metric_max += (
                 new_edge_weight
                 + rare_bug_weight
@@ -456,6 +476,9 @@ def compute_interestingness(
             conn = open_results_db(path)
             try:
                 edges = _get_covered_edges(coverage_source)
+                edge_stats = _new_edges_stats(conn, edges)
+                if edge_stats is not None:
+                    new_arc_count, edge_count = edge_stats
                 repeat_bug_count = _repeat_bug_count(
                     conn, closed_status, closed_bug, target
                 )
@@ -469,6 +492,7 @@ def compute_interestingness(
                 s_rare = _rare_bug_score(repeat_bug_count)
                 s_bug_site = _rare_bug_score(repeat_bug_site_count)
                 s_exception_site = _rare_bug_score(repeat_exception_site_count)
+                used_db_edge_metrics = True
                 metric_max += (
                     new_edge_weight
                     + rare_bug_weight
@@ -480,8 +504,27 @@ def compute_interestingness(
         except (sqlite3.Error, OSError):
             pass
 
-    if open_res is not None:
+    if new_arc_count > 0:
+        if coverage_backend == "afl-qemu-showmap":
+            # For blackbox/QEMU coverage, fresh arcs in the actual binary are the
+            # most trustworthy exploration signal we have.
+            s_new = max(s_new, 0.75)
+            new_edge_weight = max(new_edge_weight, 3.0)
+    if used_db_edge_metrics and new_edge_weight > base_new_edge_weight:
+        metric_max += (new_edge_weight - base_new_edge_weight)
+
+    if open_res is not None and coverage_source_kind == "open":
         return 1.0 if s_new > 0.0 else 0.0
+    if (
+        coverage_source_kind == "shadow"
+        and s_new <= 0.0
+        and s_status <= 0.0
+        and s_diff <= 0.0
+        and s_bug_site <= 0.0
+        and s_exception_site <= 0.0
+        and s_rare <= 0.0
+    ):
+        return 0.0
 
     # Keep rewarding novel coverage signals, but damp bug-related rewards when
     # the same bug signature has already been observed many times.
@@ -496,7 +539,7 @@ def compute_interestingness(
     coverage_factor = 1.0
     if coverage_source_kind == "open":
         coverage_factor = 0.2 + (0.8 * support_signal)
-    metric_sum = ((s_status + s_diff) * repeated_bug_factor) + (s_cov * coverage_factor)
+    metric_sum = (s_status + s_diff) * repeated_bug_factor
     metric_sum += (s_new * new_edge_weight * coverage_factor)
     metric_sum += (s_rare * rare_bug_weight)
     metric_sum += (s_bug_site * bug_site_weight) + (

@@ -35,6 +35,8 @@ Arguments:
 - **target**: target name (key in `TARGETS`).
 - **timeout**: per‑run timeout in seconds (default `10.0`).
 - **print_json**: if `True`, pretty‑prints the result JSON to stdout.
+- **enable_open_coverage**: when `True`, collect branch coverage for supported open/oracle targets.
+- **enable_qemu_coverage**: when `True`, collect AFL-QEMU bitmap coverage for supported closed/binary targets using `afl-showmap -Q`.
 
 Exactly one of `input_data` or `input_path` must be provided; if neither is given, `run_parser` reads from stdin.
 
@@ -74,6 +76,13 @@ For any target, `run_parser` returns a dict of the form:
 For closed targets with an open equivalent (`cidrize-runner`, `IPv4-IPv6-parser`), the result also includes:
 
 - **open_result**: another result dict in the same format, produced by running the open target against the same input.
+
+When QEMU coverage is enabled for a supported closed target, the closed result may also include:
+
+- **coverage_backend**: currently `afl-qemu-showmap`.
+- **covered_branches**: number of bitmap slots observed in the AFL-QEMU trace.
+- **missing_branches**: `None` because the total number of basic blocks / edges is not known a priori.
+- **branch_details_by_file**: pseudo-edge coverage under a synthetic file label such as `qemu_bitmap:cidrize-runner`.
 
 For the `json-decoder` target, an additional field is included:
 

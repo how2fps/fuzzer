@@ -23,6 +23,8 @@ from .types import ScheduledSeed
 RECENT_NOVELTY_WINDOW = 16
 RECENT_NOVELTY_REWARD = 0.35
 SAME_COVERAGE_STREAK_PENALTY = 0.20
+UCB_REWARD_EMA_ALPHA = 0.15
+ISINTERESTING_SCORE_REWARD_WEIGHT = 0.75
 
 
 def _short_hash(obj: Any) -> str:
@@ -565,9 +567,15 @@ class _TreeNode:
     rr_index: int = 0
 
     def update_stats(self, reward: float) -> None:
-        """Update running UCB reward statistics with a new observed reward."""
+        """Update running UCB reward statistics using a discounted EMA."""
         self.n_selected += 1
-        self.q_avg_reward += (reward - self.q_avg_reward) / self.n_selected
+        if self.n_selected == 1:
+            self.q_avg_reward = reward
+            return
+        self.q_avg_reward = (
+            ((1.0 - UCB_REWARD_EMA_ALPHA) * self.q_avg_reward)
+            + (UCB_REWARD_EMA_ALPHA * reward)
+        )
 
 
 class UCBTreeScheduler(BaseSeedScheduler):
@@ -578,7 +586,7 @@ class UCBTreeScheduler(BaseSeedScheduler):
     Reward is computed from `signals` inside `update()` (Option A).
     """
 
-    def __init__(self, *, ucb_c: float = 1.0, max_seeds_per_leaf: int = 8) -> None:
+    def __init__(self, *, ucb_c: float = 1.0, max_seeds_per_leaf: int = 16) -> None:
         """Initialize tree structure and UCB exploration parameters."""
         self._ucb_c = float(ucb_c)
         self._max_seeds_per_leaf = int(max_seeds_per_leaf)
@@ -667,6 +675,7 @@ class UCBTreeScheduler(BaseSeedScheduler):
         )
         reward = self._reward_from_signals(
             normalized_signals,
+            isinteresting_score=isinteresting_score,
             recent_novelty_rate=recent_novelty_rate,
             same_coverage_streak=same_coverage_streak,
         )
@@ -891,6 +900,7 @@ class UCBTreeScheduler(BaseSeedScheduler):
         self,
         signals: dict[str, Any] | None,
         *,
+        isinteresting_score: float | None = None,
         recent_novelty_rate: float = 0.0,
         same_coverage_streak: int = 0,
     ) -> float:
@@ -898,6 +908,16 @@ class UCBTreeScheduler(BaseSeedScheduler):
         if not signals:
             return 0.0
         reward = 0.0
+        score_component = isinteresting_score
+        if score_component is None:
+            raw_score = signals.get("isinteresting")
+            if isinstance(raw_score, (int, float)):
+                score_component = float(raw_score)
+        if score_component is not None:
+            reward += ISINTERESTING_SCORE_REWARD_WEIGHT * max(
+                0.0,
+                min(float(score_component), 1.0),
+            )
         if bool(signals.get("new_coverage")):
             reward += 1.0
         if bool(signals.get("new_bug")):

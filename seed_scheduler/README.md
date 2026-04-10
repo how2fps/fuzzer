@@ -30,7 +30,7 @@ scheduler = make_scheduler("queue")  # FIFO baseline
 # or
 scheduler = make_scheduler("heap", priority_mode="avg_score")
 # or
-scheduler = make_scheduler("ucb_tree", ucb_c=1.0, max_seeds_per_leaf=8)
+scheduler = make_scheduler("ucb_tree", ucb_c=1.0, max_seeds_per_leaf=16)
 # or
 scheduler = make_scheduler("thompson", rng_seed=42)
 ```

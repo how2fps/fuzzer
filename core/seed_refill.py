@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Sequence
 
+from core.fuzzer_logging import get_fuzzer_logger
 from mutator.versions import grammar_ast
 
 
@@ -21,6 +22,26 @@ def _coverage_item_rule_name(item: str) -> str | None:
     if item.startswith("production:"):
         parts = item.split(":", 2)
         if len(parts) == 3 and parts[1]:
+            return parts[1]
+    if item.startswith("site:"):
+        parts = item.split(":")
+        if len(parts) == 6 and parts[4]:
+            return parts[4]
+    if item.startswith("depth:"):
+        parts = item.split(":", 2)
+        if len(parts) == 3 and parts[1]:
+            return parts[1]
+    if item.startswith("repeat:"):
+        parts = item.split(":", 4)
+        if len(parts) == 5 and parts[1]:
+            return parts[1]
+    if item.startswith("charclass:"):
+        parts = item.split(":", 4)
+        if len(parts) == 5 and parts[1]:
+            return parts[1]
+    if item.startswith("number:"):
+        parts = item.split(":", 4)
+        if len(parts) == 5 and parts[1]:
             return parts[1]
     return None
 
@@ -66,6 +87,7 @@ def generate_grammar_refill_seeds(
     mutator_kind: str,
     rng: random.Random,
     count: int,
+    debug_label: str | None = None,
 ) -> GrammarRefillResult:
     if count <= 0:
         return GrammarRefillResult(seeds=(), observed_coverage_items=(), uncovered_coverage_items=())
@@ -73,6 +95,9 @@ def generate_grammar_refill_seeds(
     available_items = tuple(grammar_ast.available_coverage_items(mutator_kind=mutator_kind))
     if not available_items:
         return GrammarRefillResult(seeds=(), observed_coverage_items=(), uncovered_coverage_items=())
+
+    log = get_fuzzer_logger() if debug_label else None
+    progress_interval = max(1, count // 8)
 
     observed_items: set[str] = set()
     known_texts: set[str] = set()
@@ -104,14 +129,14 @@ def generate_grammar_refill_seeds(
     seen_candidates: set[str] = set(known_texts)
     available_set = set(available_items)
 
-    def _pick_best_candidate(*, focus_items: Sequence[str]) -> tuple[str | None, set[str]]:
+    def _pick_best_candidate(*, focus_items: Sequence[str]) -> tuple[str | None, set[str], int]:
         if not focus_items:
-            return None, set()
+            return None, set(), 0
         best_text: str | None = None
         best_items: set[str] = set()
         best_score = (-1, -1, -1)
         attempt_budget = max(24, min(160, len(focus_items) * 10))
-        covered_so_far = observed_items | generated_items
+        covered_so_far = (observed_items | generated_items) & available_set
 
         for attempt in range(attempt_budget):
             focus_item = (
@@ -141,11 +166,12 @@ def generate_grammar_refill_seeds(
             )
             if not candidate_items:
                 continue
-            new_items = candidate_items - covered_so_far
+            tracked_candidate_items = candidate_items & available_set
+            new_items = tracked_candidate_items - covered_so_far
             score = (
                 len(new_items),
-                len(candidate_items & set(focus_items)),
-                len(candidate_items & available_set),
+                len(tracked_candidate_items & set(focus_items)),
+                len(tracked_candidate_items),
             )
             if best_text is None or score > best_score:
                 best_text = candidate
@@ -154,7 +180,16 @@ def generate_grammar_refill_seeds(
                 if focus_item in new_items:
                     break
 
-        return best_text, best_items
+        return best_text, best_items, attempt_budget
+
+    if log is not None:
+        log.info(
+            "%s: scanning %s history texts and %s ready texts for %s grammar seeds.",
+            debug_label,
+            len(history_texts),
+            len(ready_texts),
+            count,
+        )
 
     while len(selected_seeds) < count:
         remaining_items = [
@@ -163,12 +198,40 @@ def generate_grammar_refill_seeds(
             if item not in observed_items and item not in generated_items
         ]
         focus_items = remaining_items or list(available_items)
-        best_text, best_items = _pick_best_candidate(focus_items=focus_items)
+        best_text, best_items, attempt_budget = _pick_best_candidate(
+            focus_items=focus_items
+        )
         if best_text is None:
+            if log is not None:
+                log.warning(
+                    "%s: hit grammar refill retry limit after %s attempts while searching for seed %s/%s (%s focus items remaining).",
+                    debug_label,
+                    attempt_budget,
+                    len(selected_seeds) + 1,
+                    count,
+                    len(focus_items),
+                )
             break
         selected_seeds.append(best_text)
         seen_candidates.add(best_text)
         generated_items.update(best_items)
+        if log is not None and (
+            len(selected_seeds) == 1
+            or len(selected_seeds) == count
+            or len(selected_seeds) % progress_interval == 0
+        ):
+            uncovered_remaining = sum(
+                1
+                for item in available_items
+                if item not in observed_items and item not in generated_items
+            )
+            log.info(
+                "%s: generated %s/%s grammar seeds (%s uncovered grammar items remaining).",
+                debug_label,
+                len(selected_seeds),
+                count,
+                uncovered_remaining,
+            )
 
     return GrammarRefillResult(
         seeds=tuple(selected_seeds),
