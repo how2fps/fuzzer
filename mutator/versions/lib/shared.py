@@ -48,6 +48,7 @@ GrammarCapabilityPredicate: TypeAlias = Callable[["GrammarCapabilities"], bool]
 @dataclass(frozen=True)
 class GrammarCapabilities:
     literal_chars: frozenset[str]
+    non_alnum_chars: frozenset[str]
     separator_chars: frozenset[str]
     quote_chars: frozenset[str]
     paired_delimiters: tuple[tuple[str, str], ...]

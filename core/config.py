@@ -17,6 +17,7 @@ from parser import (
 )
 from power_scheduler import list_versions as power_scheduler_versions
 from seed_corpus import canonicalize_version as canonicalize_seed_corpus_version
+from seed_corpus import get_version_spec
 from seed_corpus import list_versions as seed_corpus_versions
 from seed_scheduler import list_versions as scheduler_versions
 
@@ -111,7 +112,7 @@ class FuzzConfig(TypedDict):
     seed_corpus_version: str
     seed_corpus_initial_draw: str | None
     seed_preload_mode: str
-    seed_preload_total: int
+    seed_preload_total: int | None
     seed_preload_bucket_ratios: dict[str, float]
     seed_refill_mode: str
     llm_seed_candidates: int
@@ -403,7 +404,17 @@ def _validate_config(config: FuzzConfig) -> None:
             f"Invalid seed_corpus_initial_draw: {draw!r}. "
             "Must be null, bucketed, random, or full."
         )
-    if config["seed_preload_total"] < 0:
+    preload_total = config["seed_preload_total"]
+    if preload_total is None:
+        corpus_version = canonicalize_seed_corpus_version(
+            str(config["seed_corpus_version"])
+        )
+        if get_version_spec(corpus_version).startup_mode != "grammar_bootstrap":
+            raise ValueError(
+                "seed_preload_total may only be null when seed_corpus_version is "
+                "regex-noseed (grammar bootstrap)."
+            )
+    elif preload_total < 0:
         raise ValueError("seed_preload_total must be >= 0.")
     ratios = config["seed_preload_bucket_ratios"]
     if not isinstance(ratios, dict) or not ratios:

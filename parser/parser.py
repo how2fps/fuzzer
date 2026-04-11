@@ -16,8 +16,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+from core.behavioral_signals import enrich_execution_result
 
 try:
     from json_decoder_parser import run_json_decoder_with_branches
@@ -53,6 +56,7 @@ TARGETS: dict[str, dict[str, Any]] = {
                 "bin/{platform}-cidrize-runner{exe_suffix}",
                 "--func",
                 "cidrize",
+                "--raise-errors",
                 "--ipstr",
             ],
             "input_via_stdin": False,
@@ -61,6 +65,33 @@ TARGETS: dict[str, dict[str, Any]] = {
         # Windows binary startup is slow; give it extra headroom.
         "timeout": 25.0,
     },
+    "ipv4-parser": {
+        "path": "IPv4-IPv6-parser",
+        "oracle": "ipyparse",
+        "qemu_coverage": {"enabled": True},
+        "command": {
+            "argv_template": [
+                "bin/{platform}-ipv4-parser{exe_suffix}",
+                "--ipstr",
+            ],
+            "input_via_stdin": False,
+        },
+        "open": False,
+    },
+    "ipv6-parser": {
+        "path": "IPv4-IPv6-parser",
+        "oracle": "ipyparse",
+        "qemu_coverage": {"enabled": True},
+        "command": {
+            "argv_template": [
+                "bin/{platform}-ipv6-parser{exe_suffix}",
+                "--ipstr",
+            ],
+            "input_via_stdin": False,
+        },
+        "open": False,
+    },
+    # Legacy combined target that auto-selects the IPv4 vs IPv6 binary.
     "IPv4-IPv6-parser": {
         "path": "IPv4-IPv6-parser",
         "oracle": "ipyparse",
@@ -77,7 +108,7 @@ TARGETS: dict[str, dict[str, Any]] = {
     "cidrize": {
         "path": "cidrize",
         "command": {
-            "argv": ["uv", "run", "cidr"],
+            "argv": ["uv", "run", "cidr", "--"],
             "input_via_stdin": False,
         },
         "coverage": {"enabled": True},
@@ -335,21 +366,52 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
         out["file"] = m.group(1)
         out["line"] = m.group(2)
 
-    last_line = None
-    for line in reversed(stderr.strip().splitlines()):
-        line = line.strip()
-        if line and not line.startswith("File ") and "Traceback" not in line:
-            last_line = line
+    stripped_lines = [ln.strip() for ln in stderr.strip().splitlines() if ln.strip()]
+
+    def _is_structural_traceback_line(line: str) -> bool:
+        return (
+            line.startswith("File ")
+            or "Traceback" in line
+            or line.startswith("During handling of the above exception")
+        )
+
+    def _looks_like_exception_name(name: str) -> bool:
+        final_segment = name.rsplit(".", 1)[-1].strip()
+        return bool(final_segment) and bool(re.match(r"^[A-Z][A-Za-z0-9_]*$", final_segment))
+
+    exc_line_index: int | None = None
+    exc_match: re.Match[str] | None = None
+    for idx in range(len(stripped_lines) - 1, -1, -1):
+        line = stripped_lines[idx]
+        if _is_structural_traceback_line(line):
+            continue
+        candidate = re.match(r"^(\w+(?:\.\w+)*)\s*:\s*(.*)$", line)
+        if candidate and candidate.group(1).lower() != "warning" and _looks_like_exception_name(
+            candidate.group(1)
+        ):
+            exc_line_index = idx
+            exc_match = candidate
             break
-    if last_line:
-        exc_match = re.match(r"^(\w+(?:\.\w+)*)\s*:\s*(.*)$", last_line)
-        if exc_match:
-            if exc_match.group(1).lower() == "warning":
-                return out
-            out["type"] = "exception"
-            out["exception"] = exc_match.group(1)
-            out["message"] = exc_match.group(2).strip() or None
-        else:
+
+    if exc_match is not None and exc_line_index is not None:
+        message_parts = [exc_match.group(2).strip()] if exc_match.group(2).strip() else []
+        for cont in stripped_lines[exc_line_index + 1 :]:
+            if _is_structural_traceback_line(cont):
+                break
+            next_match = re.match(r"^(\w+(?:\.\w+)*)\s*:\s*(.*)$", cont)
+            if next_match and _looks_like_exception_name(next_match.group(1)):
+                break
+            message_parts.append(cont)
+        out["type"] = "exception"
+        out["exception"] = exc_match.group(1)
+        out["message"] = "\n".join(message_parts) or None
+    else:
+        last_line = None
+        for line in reversed(stripped_lines):
+            if not _is_structural_traceback_line(line):
+                last_line = line
+                break
+        if last_line:
             out["type"] = "message"
             out["message"] = last_line
 
@@ -370,7 +432,9 @@ def _resolve_argv(
         else:
             argv.append(part)
     if append_input_as_final_arg and input_arg is not None:
-        if argv and argv[-1].startswith("--") and "=" not in argv[-1]:
+        if argv and argv[-1] == "--":
+            argv.append(input_arg)
+        elif argv and argv[-1].startswith("--") and "=" not in argv[-1]:
             argv[-1] = f"{argv[-1]}={input_arg}"
         else:
             argv.append(input_arg)
@@ -472,6 +536,7 @@ def run_target(
     run_cwd = Path(process_cwd).resolve() if process_cwd is not None else target_dir
     if process_cwd is not None:
         run_cwd.mkdir(parents=True, exist_ok=True)
+    run_started_at = time.perf_counter()
     try:
         proc = subprocess.run(
             argv,
@@ -522,6 +587,30 @@ def run_target(
 
     if bug_sig.get("type") and result.get("status") == "ok":
         result["status"] = "bug"
+
+    stdout_obj: dict[str, Any] | None = None
+    try:
+        parsed_stdout = json.loads(stdout)
+        stdout_obj = parsed_stdout if isinstance(parsed_stdout, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        stdout_obj = None
+    if isinstance(stdout_obj, dict):
+        semantic_output = None
+        for key in ("semantic_output", "decoded", "parsed"):
+            if key in stdout_obj:
+                semantic_output = stdout_obj.get(key)
+                break
+        if semantic_output is not None:
+            result["semantic_output"] = semantic_output
+
+    execution_time_seconds = time.perf_counter() - run_started_at
+    enrich_execution_result(
+        result,
+        stdout=stdout,
+        stderr=stderr,
+        execution_time_seconds=execution_time_seconds,
+        returncode=returncode,
+    )
 
     return result
 
@@ -729,16 +818,22 @@ def run_parser(
             scratch_logs = (Path(closed_cwd_override).resolve() / "logs")
             scratch_logs.mkdir(parents=True, exist_ok=True)
             json_log_dir = str(scratch_logs)
+        handler_started_at = time.perf_counter()
         json_decoder_info = run_json_decoder_with_branches(
             json_string=input_str,
             log_dir=json_log_dir,
         )
+        handler_execution_time_seconds = time.perf_counter() - handler_started_at
 
         base_result: dict[str, Any] = {
             "target": target,
             "bug_signature": None,
         }
         base_result.update(json_decoder_info)
+        enrich_execution_result(
+            base_result,
+            execution_time_seconds=handler_execution_time_seconds,
+        )
         result = base_result
     else:
         target_dir = resolve_target_dir(target=target, parser_config=parser_config)
@@ -850,6 +945,7 @@ def run_parser(
                         open_result["bug_signature"] = coverage_open_result[
                             "bug_signature"
                         ]
+                enrich_execution_result(open_result)
             result["open_result"] = open_result
         else:
             result["open_result"] = {
@@ -858,6 +954,7 @@ def run_parser(
                 "error": f"Open target directory not found: {open_dir}",
                 "bug_signature": None,
             }
+            enrich_execution_result(result["open_result"])
 
     open_result = None
     if isinstance(result, dict) and "open_result" in result:

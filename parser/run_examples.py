@@ -41,11 +41,11 @@ def example_from_file(input_file: str | Path = "sample_input.txt") -> None:
     """Run parser with input from a file. Use input_path for file-based input."""
     result = run_parser(
         input_path=input_file,
-        target="IPv4-IPv6-parser",
+        target="ipv6-parser",
         timeout=10.0,
         print_json=False,
     )
-    print("Example 2 (file, IPv4-IPv6-parser): status =", result.get("status"))
+    print("Example 2 (file, ipv6-parser): status =", result.get("status"))
 
 
 # -----------------------------------------------------------------------------

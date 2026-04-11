@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
@@ -197,11 +198,42 @@ class RunDashboard:
             "exec_per_second": self._exec_rate(),
         }
 
+    def refresh_counts_from_db(self, db_path: Path | str, *, target: str | None = None) -> None:
+        path = Path(db_path)
+        if not path.is_file():
+            return
+        from core.db_utils import get_run_summary
+        from core.sqlite_conn import open_results_db
+
+        conn = open_results_db(path)
+        try:
+            summary = get_run_summary(conn, target=target or self.target)
+        finally:
+            conn.close()
+        self._apply_run_summary(summary)
+
+    def _apply_run_summary(self, summary: Mapping[str, Any]) -> None:
+        self.total_results = int(summary.get("total_results", self.total_results) or 0)
+        self.interesting_results = int(
+            summary.get("interesting_results", self.interesting_results) or 0
+        )
+        status_counts = summary.get("status_counts")
+        if not isinstance(status_counts, Mapping):
+            status_counts = {}
+        self.crashes_found = int(status_counts.get("crash", self.crashes_found) or 0)
+        self.timeouts_found = int(status_counts.get("timeout", self.timeouts_found) or 0)
+        self.errors_found = int(status_counts.get("error", self.errors_found) or 0)
+        self.unique_bugs_found = int(
+            summary.get("unique_bug_count", self.unique_bugs_found) or 0
+        )
+
     def save_artifacts(self, dest_dir: Path | str) -> tuple[Path, Path]:
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         snapshot_path = dest / "final_dashboard_stats.json"
         text_path = dest / "final_dashboard.txt"
+        db_path = dest / "runs.db"
+        self.refresh_counts_from_db(db_path, target=self.target)
 
         with snapshot_path.open("w", encoding="utf-8") as handle:
             json.dump(self.snapshot(), handle, indent=2, sort_keys=True)

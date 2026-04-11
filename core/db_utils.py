@@ -56,6 +56,40 @@ def _compute_same_coverage_streak(rows: list[sqlite3.Row | tuple[Any, ...]]) -> 
     return streak
 
 
+def _compute_recent_arc_novelty_rate(rows: list[sqlite3.Row | tuple[Any, ...]]) -> float:
+    if not rows:
+        return 0.0
+    window = rows[-RECENT_NOVELTY_WINDOW:]
+    hits = 0
+    for row in window:
+        new_coverage = int(row[0] or 0)
+        new_edge_count = int(row[3] or 0)
+        if new_coverage > 0 or new_edge_count > 0:
+            hits += 1
+    return hits / float(len(window))
+
+
+def _compute_same_arc_streak(rows: list[sqlite3.Row | tuple[Any, ...]]) -> int:
+    streak = 0
+    last_key: str | None = None
+    for row in reversed(rows):
+        coverage_key = _normalize_coverage_key(row[1])
+        new_coverage = int(row[0] or 0)
+        new_edge_count = int(row[3] or 0)
+        if new_coverage > 0 or new_edge_count > 0:
+            break
+        if coverage_key is None:
+            break
+        if last_key is None:
+            last_key = coverage_key
+            streak = 1
+            continue
+        if coverage_key != last_key:
+            break
+        streak += 1
+    return streak
+
+
 def get_seed_stats_from_db(
     conn: sqlite3.Connection,
     corpus: Any,
@@ -74,7 +108,8 @@ def get_seed_stats_from_db(
         SELECT seed_id,
                COUNT(*) AS fuzz_count,
                AVG(isinteresting_score) AS avg_isinteresting_score,
-               SUM(CASE WHEN status IN ('bug', 'crash', 'timeout') THEN 1 ELSE 0 END) AS bug_count
+               SUM(CASE WHEN status IN ('bug', 'crash', 'timeout') THEN 1 ELSE 0 END) AS bug_count,
+               SUM(COALESCE(new_edge_count, 0)) AS arc_gain_count
         FROM runs
         WHERE target = ?
         GROUP BY seed_id
@@ -83,15 +118,16 @@ def get_seed_stats_from_db(
     )
     by_seed_id: dict[str, dict[str, Any]] = {}
     for row in cur:
-        seed_id, fuzz_count, avg_score, bug_count = row
+        seed_id, fuzz_count, avg_score, bug_count, arc_gain_count = row
         by_seed_id[str(seed_id)] = {
             "fuzz_count": fuzz_count or 0,
             "avg_isinteresting_score": float(avg_score) if avg_score is not None else None,
             "bug_count": bug_count or 0,
+            "arc_gain_count": arc_gain_count or 0,
         }
     history_cur = conn.execute(
         """
-        SELECT seed_id, COALESCE(new_coverage, 0), coverage_key, status
+        SELECT seed_id, COALESCE(new_coverage, 0), coverage_key, status, COALESCE(new_edge_count, 0)
         FROM runs
         WHERE target = ?
         ORDER BY id ASC
@@ -101,7 +137,7 @@ def get_seed_stats_from_db(
     history_by_seed_id: dict[str, list[tuple[Any, ...]]] = {}
     for row in history_cur:
         seed_id = str(row[0])
-        history_by_seed_id.setdefault(seed_id, []).append((row[1], row[2], row[3]))
+        history_by_seed_id.setdefault(seed_id, []).append((row[1], row[2], row[3], row[4]))
     stats: list[SeedStats] = []
     for seed in seeds:
         row = by_seed_id.get(seed.seed_id, {})
@@ -111,11 +147,15 @@ def get_seed_stats_from_db(
             "fuzz_count": row.get("fuzz_count", 0),
             "recent_novelty_rate": _compute_recent_novelty_rate(history),
             "same_coverage_streak": _compute_same_coverage_streak(history),
+            "recent_arc_novelty_rate": _compute_recent_arc_novelty_rate(history),
+            "same_arc_streak": _compute_same_arc_streak(history),
         }
         if row.get("avg_isinteresting_score") is not None:
             stat["avg_isinteresting_score"] = row["avg_isinteresting_score"]
         if row.get("bug_count", 0) > 0:
             stat["bug_count"] = row["bug_count"]
+        if row.get("arc_gain_count", 0) > 0:
+            stat["arc_gain_count"] = row["arc_gain_count"]
         stats.append(stat)
     return stats
 
@@ -166,6 +206,7 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             iteration INTEGER NOT NULL,
             seed_id TEXT NOT NULL,
+            seed_bucket TEXT,
             seed_text TEXT,
             mutated_input TEXT NOT NULL,
             generation_time_seconds REAL,
@@ -178,7 +219,23 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             line INTEGER,
             coverage_key TEXT,
             new_coverage INTEGER,
+            new_bug INTEGER,
+            new_diff_behavior INTEGER,
+            new_error_site INTEGER,
+            new_edge_count INTEGER,
+            rare_edge_score REAL,
             isinteresting_score REAL,
+            parse_category TEXT,
+            output_signature TEXT,
+            error_code TEXT,
+            diff_behavior_key TEXT,
+            diff_pattern_key TEXT,
+            mismatch_type_key TEXT,
+            structure_key TEXT,
+            length_bucket TEXT,
+            representative_key TEXT,
+            late_parse_depth REAL,
+            execution_stability_bonus REAL,
             target TEXT,
             created_at TEXT NOT NULL
         )
@@ -222,6 +279,18 @@ def init_results_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS edge_observations (
+            target TEXT NOT NULL,
+            file TEXT NOT NULL,
+            from_line INTEGER NOT NULL,
+            to_line INTEGER NOT NULL,
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (target, file, from_line, to_line)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_runs_mutated_input_target
         ON runs (mutated_input, target)
         """
@@ -234,10 +303,44 @@ def init_results_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN generation_time_seconds REAL")
     if "run_time_seconds" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN run_time_seconds REAL")
+    if "seed_bucket" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN seed_bucket TEXT")
     if "coverage_key" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN coverage_key TEXT")
     if "new_coverage" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN new_coverage INTEGER")
+    if "new_bug" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN new_bug INTEGER")
+    if "new_diff_behavior" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN new_diff_behavior INTEGER")
+    if "new_error_site" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN new_error_site INTEGER")
+    if "new_edge_count" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN new_edge_count INTEGER")
+    if "rare_edge_score" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN rare_edge_score REAL")
+    if "parse_category" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN parse_category TEXT")
+    if "output_signature" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN output_signature TEXT")
+    if "error_code" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN error_code TEXT")
+    if "diff_behavior_key" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN diff_behavior_key TEXT")
+    if "diff_pattern_key" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN diff_pattern_key TEXT")
+    if "mismatch_type_key" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN mismatch_type_key TEXT")
+    if "structure_key" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN structure_key TEXT")
+    if "length_bucket" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN length_bucket TEXT")
+    if "representative_key" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN representative_key TEXT")
+    if "late_parse_depth" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN late_parse_depth REAL")
+    if "execution_stability_bonus" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN execution_stability_bonus REAL")
     conn.commit()
 
 
@@ -404,6 +507,7 @@ def insert_run(
     *,
     iteration: int,
     seed_id: str,
+    seed_bucket: str | None = None,
     seed_text: str,
     mutated_input: str,
     generation_time_seconds: float | None,
@@ -412,7 +516,23 @@ def insert_run(
     bug_signature: dict[str, Any] | None,
     coverage_key: str | None,
     new_coverage: bool,
+    new_bug: bool | None = None,
+    new_diff_behavior: bool | None = None,
+    new_error_site: bool | None = None,
+    new_edge_count: int | None = None,
+    rare_edge_score: float | None = None,
     isinteresting_score: float,
+    parse_category: str | None = None,
+    output_signature: str | None = None,
+    error_code: str | None = None,
+    diff_behavior_key: str | None = None,
+    diff_pattern_key: str | None = None,
+    mismatch_type_key: str | None = None,
+    structure_key: str | None = None,
+    length_bucket: str | None = None,
+    representative_key: str | None = None,
+    late_parse_depth: float | None = None,
+    execution_stability_bonus: float | None = None,
     target: str,
 ) -> None:
     bug_type = (bug_signature or {}).get("type")
@@ -424,14 +544,19 @@ def insert_run(
         line_raw).isdigit() else None
     conn.execute(
         """INSERT INTO runs (
-            iteration, seed_id, seed_text, mutated_input, generation_time_seconds,
-            run_time_seconds, status, bug_type, exception, message, file, line,
-            coverage_key, new_coverage,
-            isinteresting_score, target, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            iteration, seed_id, seed_bucket, seed_text, mutated_input,
+            generation_time_seconds, run_time_seconds, status, bug_type, exception,
+            message, file, line, coverage_key, new_coverage, new_bug,
+            new_diff_behavior, new_error_site, new_edge_count, rare_edge_score,
+            isinteresting_score, parse_category, output_signature, error_code,
+            diff_behavior_key, diff_pattern_key, mismatch_type_key, structure_key, length_bucket,
+            representative_key, late_parse_depth, execution_stability_bonus,
+            target, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             iteration,
             seed_id,
+            seed_bucket or "",
             seed_text or "",
             mutated_input,
             generation_time_seconds,
@@ -444,12 +569,54 @@ def insert_run(
             line,
             coverage_key,
             int(bool(new_coverage)),
+            int(bool(new_bug)),
+            int(bool(new_diff_behavior)),
+            int(bool(new_error_site)),
+            int(new_edge_count) if new_edge_count is not None else 0,
+            float(rare_edge_score) if rare_edge_score is not None else 0.0,
             isinteresting_score,
+            parse_category,
+            output_signature,
+            error_code,
+            diff_behavior_key,
+            diff_pattern_key,
+            mismatch_type_key,
+            structure_key,
+            length_bucket,
+            representative_key,
+            float(late_parse_depth) if late_parse_depth is not None else 0.0,
+            (
+                float(execution_stability_bonus)
+                if execution_stability_bonus is not None
+                else 0.0
+            ),
             target,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
     conn.commit()
+
+
+def increment_edge_observations(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    edges: Iterable[tuple[str, int, int]],
+) -> None:
+    wrote_any = False
+    for file_name, from_line, to_line in edges:
+        conn.execute(
+            """
+            INSERT INTO edge_observations (target, file, from_line, to_line, hit_count)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(target, file, from_line, to_line)
+            DO UPDATE SET hit_count = hit_count + 1
+            """,
+            (target, file_name, from_line, to_line),
+        )
+        wrote_any = True
+    if wrote_any:
+        conn.commit()
 
 
 def input_already_run(
@@ -598,13 +765,14 @@ def get_run_summary(
             """
             SELECT COUNT(*) FROM (
                 SELECT DISTINCT
-                    COALESCE(status, ''),
-                    COALESCE(bug_type, ''),
-                    COALESCE(exception, ''),
                     COALESCE(file, ''),
+                    COALESCE(bug_type, ''),
                     COALESCE(line, -1)
                 FROM runs
-                WHERE target = ? AND COALESCE(status, '') IN ('bug', 'crash', 'timeout', 'error')
+                WHERE target = ?
+                  AND COALESCE(status, '') IN ('bug', 'crash', 'timeout')
+                  AND file IS NOT NULL
+                  AND line IS NOT NULL
             )
             """,
             (target,),

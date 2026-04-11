@@ -5,11 +5,19 @@ Seen_branches insertion is done by main, not here.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from core.behavioral_signals import (
+    build_differential_behavior,
+    describe_input_structure,
+    execution_stability_bonus,
+    late_parse_depth_from_result,
+    partial_parse_success,
+)
 from core.sqlite_conn import open_results_db
 
 
@@ -195,6 +203,14 @@ def _get_covered_edges(closed: Mapping[str, Any]) -> set[tuple[str, int, int]]:
     return edges
 
 
+def _coverage_key_from_edges(edges: set[tuple[str, int, int]]) -> str:
+    if not edges:
+        return ""
+    ordered = sorted(edges)
+    raw = repr(ordered).encode("utf-8", errors="replace")
+    return "COV:" + hashlib.sha256(raw).hexdigest()[:16]
+
+
 def _new_edges_score(conn: sqlite3.Connection, edges: set[tuple[str, int, int]]) -> float:
     """Read-only: which result edges are absent from seen_branches; AFL-style score. No insert."""
     stats = _new_edges_stats(conn, edges)
@@ -238,6 +254,108 @@ def _coverage_backend_name(value: Mapping[str, Any] | None) -> str:
     if not isinstance(backend, str):
         return ""
     return backend.strip().lower()
+
+
+def _edge_novelty_metrics(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    edges: set[tuple[str, int, int]],
+) -> tuple[int, float]:
+    if not edges:
+        return (0, 0.0)
+    new_count = 0
+    rare_total = 0.0
+    try:
+        for file_name, from_line, to_line in edges:
+            seen_row = conn.execute(
+                """
+                SELECT 1
+                FROM seen_branches
+                WHERE file = ? AND from_line = ? AND to_line = ?
+                LIMIT 1
+                """,
+                (file_name, from_line, to_line),
+            ).fetchone()
+            if seen_row is None:
+                new_count += 1
+            count_row = conn.execute(
+                """
+                SELECT hit_count
+                FROM edge_observations
+                WHERE target = ? AND file = ? AND from_line = ? AND to_line = ?
+                LIMIT 1
+                """,
+                (target, file_name, from_line, to_line),
+            ).fetchone()
+            if count_row is None:
+                if seen_row is None:
+                    rare_total += 1.0
+                continue
+            hit_count = int(count_row[0])
+            rare_total += 1.0 / (1.0 + float(hit_count))
+    except sqlite3.OperationalError:
+        return (0, 0.0)
+    return (new_count, min(1.0, rare_total / float(len(edges))))
+
+
+def _is_first_diff_behavior(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    diff_pattern_key: str,
+) -> bool:
+    if not diff_pattern_key:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM runs
+            WHERE target = ? AND COALESCE(diff_pattern_key, '') = COALESCE(?, '')
+            LIMIT 1
+            """,
+            (target, diff_pattern_key),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is None
+
+
+def _input_structure_novelty(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    coverage_key: str,
+    structure_key: str,
+    length_bucket: str,
+) -> float:
+    if not structure_key:
+        return 0.0
+
+    def _exists(column: str, value: str) -> bool:
+        row = conn.execute(
+            f"""
+            SELECT 1
+            FROM runs
+            WHERE target = ?
+              AND COALESCE(coverage_key, '') = COALESCE(?, '')
+              AND COALESCE({column}, '') = COALESCE(?, '')
+            LIMIT 1
+            """,
+            (target, coverage_key, value),
+        ).fetchone()
+        return row is not None
+
+    try:
+        novelty = 0.0
+        if not _exists("structure_key", structure_key):
+            novelty += 0.7
+        if length_bucket and not _exists("length_bucket", length_bucket):
+            novelty += 0.3
+        return min(1.0, novelty)
+    except sqlite3.OperationalError:
+        return 0.0
 
 
 def _repeat_bug_count(
@@ -400,159 +518,114 @@ def compute_interestingness(
 
     open_raw = top.get("open_result")
     open_res = _as_mapping(open_raw) if open_raw is not None else None
-
-    closed_status = _normalize_status(closed.get("status"))
-    open_status = _normalize_status(open_res.get("status")) if open_res else None
-
-    closed_bug = _as_mapping(closed.get("bug_signature"))
-    open_bug = _as_mapping(open_res.get("bug_signature")) if open_res else None
-
+    input_text = str(kwargs.get("input_text") or "")
     coverage_source = _select_coverage_source(
         closed=closed,
         shadow_res=shadow_res,
         open_res=open_res,
     )
-    coverage_source_kind = _coverage_source_kind(
-        closed=closed,
-        shadow_res=shadow_res,
-        open_res=open_res,
-    )
-    s_status = _status_score(closed_status=closed_status)
-    s_diff = _differential_score(
-        closed_status=closed_status,
-        open_status=open_status,
-        closed_bug=closed_bug,
-        open_bug=open_bug,
-    )
-    coverage_backend = _coverage_backend_name(coverage_source)
-    repeat_bug_count: int | None = None
-    repeat_bug_site_count: int | None = None
-    repeat_exception_site_count: int | None = None
-    s_new = 0.0
-    new_arc_count = 0
-    edge_count = 0
-    s_rare = 0.0
-    s_bug_site = 0.0
-    s_exception_site = 0.0
-    new_edge_weight = 2.0
-    base_new_edge_weight = new_edge_weight
-    rare_bug_weight = 0.9
-    bug_site_weight = 1.2
-    exception_site_weight = 0.7
-    metric_max = 2.0
-    used_db_edge_metrics = False
+    edges = _get_covered_edges(coverage_source)
+    coverage_key = _coverage_key_from_edges(edges)
+    closed_status = _normalize_status(closed.get("status"))
+    closed_bug = _as_mapping(closed.get("bug_signature"))
 
-    if sqlite_conn is not None:
-        try:
-            edges = _get_covered_edges(coverage_source)
-            edge_stats = _new_edges_stats(sqlite_conn, edges)
-            if edge_stats is not None:
-                new_arc_count, edge_count = edge_stats
-            repeat_bug_count = _repeat_bug_count(
-                sqlite_conn, closed_status, closed_bug, target
-            )
-            repeat_bug_site_count = _repeat_bug_site_count(
-                sqlite_conn, closed_status, closed_bug, target
-            )
-            repeat_exception_site_count = _repeat_exception_site_count(
-                sqlite_conn, closed_status, closed_bug, target
-            )
-            s_new = _new_edges_score(sqlite_conn, edges)
-            s_rare = _rare_bug_score(repeat_bug_count)
-            s_bug_site = _rare_bug_score(repeat_bug_site_count)
-            s_exception_site = _rare_bug_score(repeat_exception_site_count)
-            used_db_edge_metrics = True
-            metric_max += (
-                new_edge_weight
-                + rare_bug_weight
-                + bug_site_weight
-                + exception_site_weight
-            )
-        except (sqlite3.Error, OSError):
-            pass
-    elif db_path and Path(db_path).exists():
+    conn = sqlite_conn
+    close_conn = False
+    if conn is None and db_path and Path(db_path).exists():
         path = Path(db_path) if isinstance(db_path, str) else db_path
         try:
             conn = open_results_db(path)
-            try:
-                edges = _get_covered_edges(coverage_source)
-                edge_stats = _new_edges_stats(conn, edges)
-                if edge_stats is not None:
-                    new_arc_count, edge_count = edge_stats
-                repeat_bug_count = _repeat_bug_count(
-                    conn, closed_status, closed_bug, target
+            close_conn = True
+        except (sqlite3.Error, OSError):
+            conn = None
+
+    new_edges_signal = 0.0
+    rare_edges_signal = 0.0
+    new_diff_behavior_signal = 0.0
+    new_error_site_signal = 0.0
+    input_structure_novelty_signal = 0.0
+    late_parse_depth_signal = max(
+        late_parse_depth_from_result(result=top, input_text=input_text),
+        partial_parse_success(result=top, input_text=input_text),
+    )
+    execution_stability_signal = execution_stability_bonus(
+        closed_result=closed,
+        open_result=open_res,
+    )
+    diff_behavior = build_differential_behavior(
+        closed_result=closed,
+        open_result=open_res,
+    )
+    diff_pattern_key = (
+        str(diff_behavior.get("pattern_key") or "")
+        if isinstance(diff_behavior, dict)
+        else ""
+    )
+    structure_key = ""
+    length_bucket = ""
+    if input_text:
+        structure_info = describe_input_structure(input_text)
+        structure_key = str(structure_info.get("token_structure_key") or "")
+        length_bucket = str(structure_info.get("length_bucket") or "")
+
+    if conn is not None:
+        try:
+            new_edge_count, rare_edges_signal = _edge_novelty_metrics(
+                conn,
+                target=target,
+                edges=edges,
+            )
+            new_edges_signal = 1.0 if new_edge_count > 0 else 0.0
+            if diff_pattern_key and _is_first_diff_behavior(
+                conn,
+                target=target,
+                diff_pattern_key=diff_pattern_key,
+            ):
+                new_diff_behavior_signal = 1.0
+            if input_text:
+                input_structure_novelty_signal = _input_structure_novelty(
+                    conn,
+                    target=target,
+                    coverage_key=coverage_key,
+                    structure_key=structure_key,
+                    length_bucket=length_bucket,
                 )
-                repeat_bug_site_count = _repeat_bug_site_count(
-                    conn, closed_status, closed_bug, target
-                )
-                repeat_exception_site_count = _repeat_exception_site_count(
-                    conn, closed_status, closed_bug, target
-                )
-                s_new = _new_edges_score(conn, edges)
-                s_rare = _rare_bug_score(repeat_bug_count)
-                s_bug_site = _rare_bug_score(repeat_bug_site_count)
-                s_exception_site = _rare_bug_score(repeat_exception_site_count)
-                used_db_edge_metrics = True
-                metric_max += (
-                    new_edge_weight
-                    + rare_bug_weight
-                    + bug_site_weight
-                    + exception_site_weight
-                )
-            finally:
-                conn.close()
+            repeat_bug_site_count = _repeat_bug_site_count(
+                conn,
+                closed_status,
+                closed_bug,
+                target,
+            )
+            repeat_exception_site_count = _repeat_exception_site_count(
+                conn,
+                closed_status,
+                closed_bug,
+                target,
+            )
+            if (
+                repeat_bug_site_count is not None
+                and repeat_bug_site_count == 0
+            ) or (
+                repeat_exception_site_count is not None
+                and repeat_exception_site_count == 0
+            ):
+                new_error_site_signal = 1.0
         except (sqlite3.Error, OSError):
             pass
+        finally:
+            if close_conn:
+                conn.close()
 
-    if new_arc_count > 0:
-        if coverage_backend == "afl-qemu-showmap":
-            # For blackbox/QEMU coverage, fresh arcs in the actual binary are the
-            # most trustworthy exploration signal we have.
-            s_new = max(s_new, 0.75)
-            new_edge_weight = max(new_edge_weight, 3.0)
-    if used_db_edge_metrics and new_edge_weight > base_new_edge_weight:
-        metric_max += (new_edge_weight - base_new_edge_weight)
-
-    if open_res is not None and coverage_source_kind == "open":
-        return 1.0 if s_new > 0.0 else 0.0
-    if (
-        coverage_source_kind == "shadow"
-        and s_new <= 0.0
-        and s_status <= 0.0
-        and s_diff <= 0.0
-        and s_bug_site <= 0.0
-        and s_exception_site <= 0.0
-        and s_rare <= 0.0
-    ):
-        return 0.0
-
-    # Keep rewarding novel coverage signals, but damp bug-related rewards when
-    # the same bug signature has already been observed many times.
-    repeated_bug_factor = _repeat_bug_factor(repeat_bug_count)
-    support_signal = max(
-        (s_status * repeated_bug_factor),
-        s_diff,
-        s_bug_site,
-        s_exception_site,
-        s_rare,
+    weighted_sum = (
+        (5.0 * new_edges_signal)
+        + (3.0 * rare_edges_signal)
+        + (4.0 * new_diff_behavior_signal)
+        + (3.0 * new_error_site_signal)
+        + (2.0 * late_parse_depth_signal)
+        + (2.0 * input_structure_novelty_signal)
     )
-    coverage_factor = 1.0
-    if coverage_source_kind == "open":
-        coverage_factor = 0.2 + (0.8 * support_signal)
-    metric_sum = (s_status + s_diff) * repeated_bug_factor
-    metric_sum += (s_new * new_edge_weight * coverage_factor)
-    metric_sum += (s_rare * rare_bug_weight)
-    metric_sum += (s_bug_site * bug_site_weight) + (
-        s_exception_site * exception_site_weight
-    )
+    if weighted_sum > 0.0:
+        weighted_sum += 1.0 * execution_stability_signal
 
-    if metric_max <= 0.0:
-        return 0.0
-    weighted_score = metric_sum / metric_max
-    if coverage_source_kind == "open":
-        score = weighted_score
-    else:
-        # Blend through s_new so any positive new-coverage signal becomes a lower
-        # bound on the final score instead of just another additive term.
-        score = s_new + ((1.0 - s_new) * weighted_score)
-    return max(0.0, min(1.0, float(score)))
+    score = min(1.0, weighted_sum / 8.0)
+    return max(0.0, float(score))

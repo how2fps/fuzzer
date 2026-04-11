@@ -8,6 +8,8 @@ from seed_corpus import Seed
 
 from .types import ScheduledSeed
 
+DEFAULT_INTERESTING_SCORE_THRESHOLD = 0.5
+
 
 class BaseSeedScheduler(ABC):
     """Common interface for scheduler backends that manage `ScheduledSeed` items."""
@@ -56,16 +58,49 @@ class BaseSeedScheduler(ABC):
             return True
         signals_raw = metadata_dict.get("signals")
         signals = signals_raw if isinstance(signals_raw, Mapping) else {}
-        return any(
+
+        def _signal_score(name: str) -> float:
+            raw = signals.get(name)
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _metadata_score(name: str) -> float:
+            raw = metadata_dict.get(name)
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+
+        interesting_score = max(
+            _metadata_score("initial_isinteresting_score"),
+            _metadata_score("isinteresting_score"),
+            _signal_score("isinteresting"),
+            _signal_score("isinteresting_score"),
+        )
+        has_strong_novelty = any(
             bool(signals.get(key))
             for key in (
                 "new_coverage",
                 "new_bug",
                 "new_bug_site",
                 "new_exception_site",
+                "new_error_site",
                 "new_differential_behavior",
             )
         )
+        if has_strong_novelty:
+            return True
+
+        has_soft_semantic_novelty = (
+            bool(_signal_score("input_structure_novelty") > 0.0)
+            or bool(_signal_score("late_parse_depth") >= 0.6)
+            or bool(_signal_score("partial_parse_success") > 0.0)
+        )
+        if not has_soft_semantic_novelty:
+            return False
+        return interesting_score >= DEFAULT_INTERESTING_SCORE_THRESHOLD
 
     @abstractmethod
     def add(self, seed: Seed, *, metadata: dict[str, Any] | None = None) -> ScheduledSeed:

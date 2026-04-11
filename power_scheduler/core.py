@@ -20,6 +20,9 @@ class SeedStats(TypedDict, total=False):
     bug_count: int
     recent_novelty_rate: float
     same_coverage_streak: int
+    arc_gain_count: int
+    recent_arc_novelty_rate: float
+    same_arc_streak: int
 
 
 def compute_power_schedule(

@@ -77,6 +77,8 @@ def _chart_config_label(config: str, *, target: str | None = None) -> str:
     if target:
         target_aliases = {
             "IPv4-IPv6-parser": "parser",
+            "ipv4-parser": "ipv4",
+            "ipv6-parser": "ipv6",
             "json-decoder": "decoder",
             "cidrize-runner": "cidrize",
         }

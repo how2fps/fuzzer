@@ -25,6 +25,16 @@ DEFAULT_TARGET_DESCRIPTIONS: dict[str, str] = {
         "objects/arrays, long strings, escapes, unicode, boundary numbers, and "
         "malformed near-valid delimiters."
     ),
+    "ipv4-parser": (
+        "Parses IPv4 textual addresses. Useful cases include canonical dotted "
+        "quads, leading-zero and width stressors, prefix-like suffixes, range-ish "
+        "endings, and malformed separators or octets close to valid syntax."
+    ),
+    "ipv6-parser": (
+        "Parses IPv6 textual addresses. Useful cases include canonical and "
+        "compressed forms, embedded IPv4 tails, whitespace/formatting stressors, "
+        "prefix-like suffixes, and malformed separators close to valid syntax."
+    ),
     "IPv4-IPv6-parser": (
         "Parses IPv4 and IPv6 textual addresses. Useful cases include canonical "
         "addresses, compressed IPv6, whitespace/formatting stressors, prefix-like "

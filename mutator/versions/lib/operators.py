@@ -13,7 +13,9 @@ from .shared import (
 from .text_ops import (
     _alphabetic_label_substitution,
     _boundary_chars,
+    _duplicate_separator_once,
     _cross_branch_alternation_splice,
+    _extend_delimited_list_once,
     _descending_range_surgery,
     _delimited_numeric_group_surgery,
     _duplicate_boundary_token,
@@ -27,13 +29,14 @@ from .text_ops import (
     _mixed_separator_family_graft,
     _mutate_numeric_literal_in_text,
     _mutate_numeric_special_literal_in_text,
-    _mutate_separator_char_in_text,
     _mutate_uppercase_literal_corruption,
     _mutate_text_from_original,
     _mutation_mode_probabilities,
     _neighbor_boundary_numeric_surgery,
     _numeric_format_surgery,
     _prefix_text_with_bom,
+    _insert_boundary_whitespace_once,
+    _replace_numeric_tail_with_boundary,
     _repetition_amplification_surgery,
     _remove_balanced_token,
     _replace_quoted_invalid_surrogate_escape,
@@ -45,7 +48,8 @@ from .text_ops import (
     _token_whitespace_surgery,
     _trailing_or_leading_extra_data,
     _validate_probability,
-    _wildcard_suffix_surgery,
+    _non_alnum_run_surgery,
+    _zero_pad_numeric_token,
 )
 
 def _always_supported(_capabilities: GrammarCapabilities) -> bool:
@@ -74,7 +78,7 @@ def _supports_delimiter_invalidator(capabilities: GrammarCapabilities) -> bool:
     )
 
 def _supports_boundary_operator(capabilities: GrammarCapabilities) -> bool:
-    return bool(_boundary_chars(capabilities=capabilities))
+    return bool(capabilities.quote_chars or capabilities.paired_delimiters)
 
 def _supports_alternation_operator(capabilities: GrammarCapabilities) -> bool:
     return capabilities.has_alternation
@@ -89,8 +93,8 @@ def _supports_structured_range_operator(capabilities: GrammarCapabilities) -> bo
         and bool(capabilities.separator_chars)
     )
 
-def _supports_wildcard_suffix_operator(capabilities: GrammarCapabilities) -> bool:
-    return "*" in capabilities.literal_chars and bool(capabilities.separator_chars)
+def _supports_non_alnum_run_operator(capabilities: GrammarCapabilities) -> bool:
+    return bool(capabilities.non_alnum_chars)
 
 def _supports_delimited_numeric_group_operator(
     capabilities: GrammarCapabilities,
@@ -137,6 +141,38 @@ def _supports_neighbor_boundary_numeric_operator(
 
 def _supports_descending_range_operator(capabilities: GrammarCapabilities) -> bool:
     return capabilities.has_numeric_literals and "-" in capabilities.literal_chars
+
+
+def _supports_clean_separator_duplicate_operator(
+    capabilities: GrammarCapabilities,
+) -> bool:
+    return bool(capabilities.separator_chars)
+
+
+def _supports_clean_numeric_padding_operator(
+    capabilities: GrammarCapabilities,
+) -> bool:
+    return _supports_numeric_operator(capabilities)
+
+
+def _supports_clean_numeric_tail_operator(
+    capabilities: GrammarCapabilities,
+) -> bool:
+    return _supports_numeric_operator(capabilities) and bool(
+        capabilities.separator_chars or _boundary_chars(capabilities=capabilities)
+    )
+
+
+def _supports_clean_boundary_whitespace_operator(
+    capabilities: GrammarCapabilities,
+) -> bool:
+    return bool(capabilities.separator_chars or _boundary_chars(capabilities=capabilities))
+
+
+def _supports_clean_delimited_extension_operator(
+    capabilities: GrammarCapabilities,
+) -> bool:
+    return bool(capabilities.paired_delimiters) and bool(capabilities.separator_chars)
 
 def _supported_grammar_operator_specs(
     *,
@@ -373,6 +409,60 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
         ),
     ),
     GrammarOperatorSpec(
+        name="clean_duplicate_separator_once",
+        valid_weight=0.5,
+        invalid_weight=2.0,
+        supports=_supports_clean_separator_duplicate_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _duplicate_separator_once(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="clean_zero_pad_numeric_token",
+        valid_weight=1.6,
+        invalid_weight=1.2,
+        supports=_supports_clean_numeric_padding_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _zero_pad_numeric_token(
+            text=original_text,
+            rng=rng,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="clean_replace_numeric_tail",
+        valid_weight=1.0,
+        invalid_weight=1.8,
+        supports=_supports_clean_numeric_tail_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _replace_numeric_tail_with_boundary(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="clean_insert_boundary_whitespace",
+        valid_weight=0.4,
+        invalid_weight=1.8,
+        supports=_supports_clean_boundary_whitespace_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _insert_boundary_whitespace_once(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="clean_extend_delimited_list",
+        valid_weight=1.1,
+        invalid_weight=1.8,
+        supports=_supports_clean_delimited_extension_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _extend_delimited_list_once(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
         name="mutate_numeric_literal",
         valid_weight=2.0,
         invalid_weight=1.5,
@@ -424,17 +514,6 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
         ),
     ),
     GrammarOperatorSpec(
-        name="mutate_separator_char",
-        valid_weight=1.5,
-        invalid_weight=0.0,
-        supports=_supports_separator_operator,
-        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _mutate_separator_char_in_text(
-            text=original_text,
-            rng=rng,
-            capabilities=capabilities,
-        ),
-    ),
-    GrammarOperatorSpec(
         name="separator_run_surgery",
         valid_weight=0.0,
         invalid_weight=3.0,
@@ -458,11 +537,13 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
     ),
     GrammarOperatorSpec(
         name="alphabetic_label_substitution",
-        valid_weight=0.3,
-        invalid_weight=0.6,
+        valid_weight=0.4,
+        invalid_weight=1.4,
         supports=_supports_alphabetic_label_operator,
         apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _alphabetic_label_substitution(
             text=original_text,
+            grammar_spec=grammar_spec,
+            max_depth=max_depth,
             rng=rng,
             capabilities=capabilities,
         ),
@@ -525,11 +606,11 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
         ),
     ),
     GrammarOperatorSpec(
-        name="wildcard_suffix_surgery",
-        valid_weight=0.8,
-        invalid_weight=1.2,
-        supports=_supports_wildcard_suffix_operator,
-        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _wildcard_suffix_surgery(
+        name="non_alnum_run_surgery",
+        valid_weight=0.9,
+        invalid_weight=2.4,
+        supports=_supports_non_alnum_run_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _non_alnum_run_surgery(
             text=original_text,
             rng=rng,
             capabilities=capabilities,

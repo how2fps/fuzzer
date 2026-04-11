@@ -66,6 +66,8 @@ Defaults shown below match `core.config.get_default_config()`.
 These are the built-in parser targets currently available in the repo:
 
 - `cidrize-runner`
+- `ipv4-parser`
+- `ipv6-parser`
 - `IPv4-IPv6-parser`
 - `cidrize`
 - `ipyparse`

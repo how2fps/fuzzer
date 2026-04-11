@@ -21,11 +21,11 @@ def initial_scheduler_seeds(
     corpus: Any,
     target: str,
     preload_mode: str,
-    preload_total: int,
+    preload_total: int | None,
     rng: random.Random,
     bucket_ratios: dict[str, float] | None = None,
 ) -> list[Seed]:
-    if preload_total <= 0:
+    if preload_total is None or preload_total <= 0:
         return []
     ratios = bucket_ratios if bucket_ratios is not None else DEFAULT_PRELOAD_BUCKET_RATIOS
     if preload_mode == "full":

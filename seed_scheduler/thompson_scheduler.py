@@ -8,7 +8,7 @@ from typing import Any
 
 from seed_corpus import Seed
 
-from .base import BaseSeedScheduler
+from .base import BaseSeedScheduler, DEFAULT_INTERESTING_SCORE_THRESHOLD
 from .types import ScheduledSeed
 
 RECENT_NOVELTY_WINDOW = 16
@@ -98,9 +98,15 @@ def _extract_feature_ids(signals: dict[str, Any] | None) -> list[str]:
     coverage_key = signals.get("coverage_key")
     if coverage_key not in (None, "", [], {}):
         flat_features.append("coverage-key:" + _stable_hash(coverage_key))
+    representative_key = signals.get("representative_key")
+    if representative_key not in (None, "", [], {}):
+        flat_features.append("rep-key:" + str(representative_key))
     bug_key = signals.get("bug_key")
     if bug_key not in (None, "", [], {}):
         flat_features.append("bug-key:" + str(bug_key))
+    diff_pattern_key = signals.get("diff_pattern_key")
+    if diff_pattern_key not in (None, "", [], {}):
+        flat_features.append("diff-key:" + str(diff_pattern_key))
     if flat_features:
         return flat_features
 
@@ -146,13 +152,22 @@ def _is_success(
         novelty_flags = (
             bool(signals.get("new_coverage")),
             bool(signals.get("new_bug")),
+            bool(signals.get("new_error_site")),
             bool(signals.get("new_differential_behavior")),
         )
         if any(novelty_flags):
             return True
-        if any(flag_key in signals for flag_key in ("new_coverage", "new_bug", "new_differential_behavior")):
+        if any(
+            flag_key in signals
+            for flag_key in (
+                "new_coverage",
+                "new_bug",
+                "new_error_site",
+                "new_differential_behavior",
+            )
+        ):
             return False
-    return bool(isinteresting_score > 0)
+    return bool(isinteresting_score >= DEFAULT_INTERESTING_SCORE_THRESHOLD)
 
 
 def _track_item_recency(
@@ -174,7 +189,12 @@ def _track_item_recency(
             coverage_key = str(raw_coverage_key)
         novelty = any(
             bool(signals.get(key))
-            for key in ("new_coverage", "new_bug", "new_differential_behavior")
+            for key in (
+                "new_coverage",
+                "new_bug",
+                "new_error_site",
+                "new_differential_behavior",
+            )
         )
 
     if novelty:

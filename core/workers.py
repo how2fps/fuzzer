@@ -24,6 +24,7 @@ from core.db_utils import (
     add_unique_coverage_seed_input,
     add_seed_input_if_new,
     get_coverage_replay_seed_inputs,
+    increment_edge_observations,
     input_already_run,
     insert_run,
     insert_seen_edges_into_conn,
@@ -50,33 +51,54 @@ from seed_scheduler import (
 _BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
 
 
-def _mutate_with_exponential_chaining(
-    *,
-    seed_text: str,
-    mutate_fn: Callable[..., str],
-    mutator_kind: str,
-    rng: random.Random,
-    continue_probability: float,
-    max_depth: int,
-) -> str:
-    """
-    Mutate at least once, then keep mutating the latest child with geometric decay.
+def _bug_key_from_result(result: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"bug", "crash", "timeout"}:
+        return None
+    signature = result.get("bug_signature") or {}
+    if not isinstance(signature, Mapping):
+        return None
+    file_name = str(signature.get("file") or "").strip()
+    bug_type = str(signature.get("type") or "").strip()
+    line = str(signature.get("line") or "").strip()
+    if not file_name or not bug_type or not line:
+        return None
+    return (file_name, bug_type, line)
 
-    With a fixed `continue_probability`, the probability of reaching depth `d`
-    falls off exponentially as `continue_probability ** (d - 1)`.
-    """
-    candidate = seed_text
-    for depth in range(max(1, max_depth)):
-        candidate = mutate_fn(
-            candidate,
-            mutator_kind=mutator_kind,
-            rng=rng,
-        )
-        if depth + 1 >= max_depth:
-            break
-        if continue_probability <= 0.0 or rng.random() >= continue_probability:
-            break
-    return candidate
+
+def _load_seen_bug_keys(
+    *,
+    conn: sqlite3.Connection,
+    target: str,
+) -> set[tuple[str, str, str]]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT file, bug_type, line
+        FROM runs
+        WHERE target = ?
+          AND status IN ('bug', 'crash', 'timeout')
+          AND file IS NOT NULL
+          AND line IS NOT NULL
+          AND COALESCE(bug_type, '') != ''
+        """,
+        (target,),
+    ).fetchall()
+    return {
+        (str(file_name).strip(), str(bug_type).strip(), str(line).strip())
+        for file_name, bug_type, line in rows
+    }
+
+
+def _claim_new_bug_flag(
+    *,
+    seen_bug_keys: set[tuple[str, str, str]],
+    result: Mapping[str, Any],
+) -> bool:
+    bug_key = _bug_key_from_result(result)
+    if bug_key is None or bug_key in seen_bug_keys:
+        return False
+    seen_bug_keys.add(bug_key)
+    return True
 
 
 def _build_execution_batch(
@@ -444,6 +466,7 @@ def run_worker_process(
                 result=result,
                 db_path=db_path,
                 target=work.get("target", ""),
+                input_text=mutated_text,
                 sqlite_conn=db_conn,
             )
             closed = result.get("closed_result", {})
@@ -455,6 +478,7 @@ def run_worker_process(
                 iteration=iteration,
                 seed_id=seed_id,
                 score=score,
+                input_text=mutated_text,
                 sqlite_conn=db_conn,
             )
             result_queue.put(
@@ -548,7 +572,7 @@ def run_fuzzer_multi_worker(
     max_iterations = config["max_iterations"]
     debug_mode = is_debug_run(config)
     use_live_ui = not debug_mode
-    seen_bug_keys: set[tuple[str, str, str, str, str]] = set()
+    seen_bug_keys = _load_seen_bug_keys(conn=conn, target=effective_target)
     dashboard = RunDashboard(
         target=effective_target,
         configured_workers=workers,
@@ -556,10 +580,6 @@ def run_fuzzer_multi_worker(
         max_iterations=max_iterations,
         max_hours=max_hours,
     )
-    mutation_chain_continue_probability = float(
-        config.get("mutation_chain_continue_probability", 0.2)
-    )
-    mutation_chain_max_depth = max(1, int(config.get("mutation_chain_max_depth", 8)))
     feedback_scheduler_batch_cap = max(
         1,
         int(config.get("feedback_scheduler_batch_cap") or 4),
@@ -588,23 +608,17 @@ def run_fuzzer_multi_worker(
         batch: list[tuple[str, float]] = []
         for _ in range(n):
             started_at = time.perf_counter()
-            candidate = _mutate_with_exponential_chaining(
-                seed_text=seed_text,
-                mutate_fn=mutate_fn,
+            candidate = mutate_fn(
+                seed_text,
                 mutator_kind=effective_mutator,
                 rng=rng,
-                continue_probability=mutation_chain_continue_probability,
-                max_depth=mutation_chain_max_depth,
             )
             for _attempt in range(max_attempts):
                 if _is_rejected_candidate(candidate):
-                    candidate = _mutate_with_exponential_chaining(
-                        seed_text=seed_text,
-                        mutate_fn=mutate_fn,
+                    candidate = mutate_fn(
+                        seed_text,
                         mutator_kind=effective_mutator,
                         rng=rng,
-                        continue_probability=mutation_chain_continue_probability,
-                        max_depth=mutation_chain_max_depth,
                     )
                     continue
                 if candidate not in seen and not input_already_run(
@@ -613,33 +627,15 @@ def run_fuzzer_multi_worker(
                     seen.add(candidate)
                     batch.append((candidate, time.perf_counter() - started_at))
                     break
-                candidate = _mutate_with_exponential_chaining(
-                    seed_text=seed_text,
-                    mutate_fn=mutate_fn,
+                candidate = mutate_fn(
+                    seed_text,
                     mutator_kind=effective_mutator,
                     rng=rng,
-                    continue_probability=mutation_chain_continue_probability,
-                    max_depth=mutation_chain_max_depth,
                 )
             else:
                 seen.add(candidate)
                 batch.append((candidate, time.perf_counter() - started_at))
         return batch
-
-    def _bug_key(result: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
-        status = str(result.get("status") or "").strip().lower()
-        if status not in {"bug", "crash", "timeout", "error"}:
-            return None
-        signature = result.get("bug_signature") or {}
-        if not isinstance(signature, dict):
-            signature = {}
-        return (
-            status,
-            str(signature.get("type") or ""),
-            str(signature.get("exception") or ""),
-            str(signature.get("file") or ""),
-            str(signature.get("line") or ""),
-        )
 
     def _coverage_key_from_signals(signals: dict[str, Any] | None) -> str | None:
         if not isinstance(signals, dict):
@@ -1311,6 +1307,9 @@ def run_fuzzer_multi_worker(
                         live.update(dashboard.render())
                     continue
 
+                signals_raw = result.get("signals")
+                signals = dict(signals_raw) if isinstance(signals_raw, dict) else {}
+
                 with cond:
                     worker_id = result.get("worker_id")
                     worker_retiring = bool(result.get("worker_retiring"))
@@ -1328,7 +1327,13 @@ def run_fuzzer_multi_worker(
                             "Orphan result (missing pending) job_id=%s; recording run anyway",
                             job_id,
                         )
-                    else:
+                    new_bug = _claim_new_bug_flag(
+                        seen_bug_keys=seen_bug_keys,
+                        result=result,
+                    )
+                    signals["new_bug"] = new_bug
+                    result["signals"] = signals
+                    if scheduled is not None:
                         item_id = scheduled.item_id
                         score = result["isinteresting_score"]
                         if bool(scheduled.metadata.get("startup_warm_pending_insert")):
@@ -1366,13 +1371,13 @@ def run_fuzzer_multi_worker(
                 coverage_backend = str(result.pop("coverage_backend", "") or "").strip()
                 result.pop("worker_id", None)
                 result.pop("worker_retiring", None)
-                coverage_key = _coverage_key_from_signals(result.get("signals"))
-                signals = result.get("signals") or {}
+                coverage_key = _coverage_key_from_signals(signals)
                 new_coverage = bool(signals.get("new_coverage"))
                 insert_run(
                     conn,
                     iteration=iteration,
                     seed_id=result["seed_id"],
+                    seed_bucket=str(signals.get("bucket") or ""),
                     seed_text=result["seed_text"],
                     mutated_input=result["mutated_input"],
                     generation_time_seconds=result.get("generation_time_seconds", 0.0),
@@ -1381,7 +1386,23 @@ def run_fuzzer_multi_worker(
                     bug_signature=result["bug_signature"],
                     coverage_key=coverage_key,
                     new_coverage=new_coverage,
+                    new_bug=new_bug,
+                    new_diff_behavior=bool(signals.get("new_differential_behavior")),
+                    new_error_site=bool(signals.get("new_error_site")),
+                    new_edge_count=signals.get("new_edge_count"),
+                    rare_edge_score=signals.get("rare_edge_score"),
                     isinteresting_score=result["isinteresting_score"],
+                    parse_category=str(signals.get("parse_category") or ""),
+                    output_signature=str(signals.get("output_signature") or ""),
+                    error_code=str(signals.get("error_code") or ""),
+                    diff_behavior_key=str(signals.get("diff_behavior_key") or ""),
+                    diff_pattern_key=str(signals.get("diff_pattern_key") or ""),
+                    mismatch_type_key=str(signals.get("mismatch_type_key") or ""),
+                    structure_key=str(signals.get("structure_key") or ""),
+                    length_bucket=str(signals.get("length_bucket") or ""),
+                    representative_key=str(signals.get("representative_key") or ""),
+                    late_parse_depth=signals.get("late_parse_depth"),
+                    execution_stability_bonus=signals.get("execution_stability_bonus"),
                     target=effective_target,
                 )
                 newest_coverage_branch = ""
@@ -1389,6 +1410,11 @@ def run_fuzzer_multi_worker(
                     newest_coverage_branch = _find_newest_unseen_branch(conn, covered_edges)
                 if covered_edges:
                     insert_seen_edges_into_conn(conn, covered_edges)
+                    increment_edge_observations(
+                        conn,
+                        target=effective_target,
+                        edges=covered_edges,
+                    )
                 covered_branches = _count_seen_covered_branches(conn)
                 unique_covered_arcs = _count_seen_branches(conn)
                 if new_coverage and coverage_key:
@@ -1400,11 +1426,6 @@ def run_fuzzer_multi_worker(
                         seed_family=family,
                         seed_bucket=str(signals.get("bucket") or "discovered"),
                     )
-                bug_key = _bug_key(result)
-                new_bug = bool(signals.get("new_bug"))
-                if bug_key is not None and bug_key not in seen_bug_keys:
-                    seen_bug_keys.add(bug_key)
-                    new_bug = True
                 with cond:
                     parent_signals = (result.get("signals") or {}).copy()
                     parent_signals["new_coverage"] = new_coverage

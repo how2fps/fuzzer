@@ -25,6 +25,41 @@ from core.workers import run_fuzzer_multi_worker
 from core.target_artifacts import clear_bug_counts_csv
 from mutator import configure_runtime_grammar
 from mutator.versions import grammar_ast
+from mutator.versions.lib import resolve_ast_grammar_spec
+
+
+_GRAMMARS_DIR = Path(__file__).resolve().parent.parent / "mutator" / "grammars"
+_TARGET_DEFAULT_GRAMMARS: dict[str, tuple[str, str]] = {
+    "cidrize": ("ip.json", "ip.ast.json"),
+    "cidrize-runner": ("ip.json", "ip.ast.json"),
+    "ipyparse": ("ip.json", "ip.ast.json"),
+    "IPv4-IPv6-parser": ("ip.json", "ip.ast.json"),
+    "ipv4-parser": ("ipv4.json", "ipv4.ast.json"),
+    "ipv6-parser": ("ipv6.json", "ipv6.ast.json"),
+    "json-decoder": ("json.json", "json.ast.json"),
+    "json_open": ("json.json", "json.ast.json"),
+}
+
+
+def _default_target_grammar_paths(
+    *,
+    target: str,
+    grammar_path: str | Path | None,
+    ast_grammar_path: str | Path | None,
+) -> tuple[str | Path | None, str | Path | None]:
+    """
+    Resolve built-in target-specific grammar defaults only when no explicit
+    grammar override was provided.
+    """
+    if grammar_path is not None or ast_grammar_path is not None:
+        return grammar_path, ast_grammar_path
+
+    default_files = _TARGET_DEFAULT_GRAMMARS.get(target)
+    if default_files is None:
+        return grammar_path, ast_grammar_path
+
+    grammar_name, ast_name = default_files
+    return (_GRAMMARS_DIR / grammar_name, _GRAMMARS_DIR / ast_name)
 
 
 def _preferred_startup_generation_plans(
@@ -32,9 +67,13 @@ def _preferred_startup_generation_plans(
     effective_mutator: str,
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
     if effective_mutator == "ip":
+        ast_grammar_spec = resolve_ast_grammar_spec(kind=effective_mutator)
+        start_rule = str(ast_grammar_spec.get("start") or "")
+        if start_rule != "ip":
+            return ()
         return (
             (
-                "ip",
+                start_rule,
                 (
                     "production:ip:0",
                     "production:ipv4_input:1",
@@ -50,20 +89,53 @@ def _generate_startup_grammar_seeds(
     *,
     effective_mutator: str,
     rng: random.Random,
-    count: int,
+    count: int | None,
 ) -> list[str]:
     """Generate startup seeds that try to cover as much AST grammar space as possible."""
-    if count <= 0:
+    if count is not None and count <= 0:
         return []
 
     log = get_fuzzer_logger()
     debug_label = f"startup grammar bootstrap [{effective_mutator}]"
-    progress_interval = max(1, count // 8)
+    available_items = grammar_ast.available_coverage_items(mutator_kind=effective_mutator)
+    available_set = set(available_items)
+    target_coverage = len(available_set)
+    min_requested = max(0, int(count or 0))
+    if count is None and target_coverage <= 0:
+        return []
+
+    max_seeds_cap = (
+        max(64, target_coverage * 2)
+        if count is None
+        else max(1, int(count))
+    )
+    progress_interval = max(1, max_seeds_cap // 8)
     generated: list[str] = []
+
+    covered_items: set[str] = set()
+
+    def _record_coverage(text: str) -> None:
+        if not text:
+            return
+        covered_items.update(
+            grammar_ast.coverage_items_for_text(
+                text=text,
+                mutator_kind=effective_mutator,
+            )
+            & available_set
+        )
+
+    def _is_covered() -> bool:
+        if not available_set:
+            return True
+        return len(covered_items) >= len(available_set)
+
     for start_rule, preferred_coverage_items in _preferred_startup_generation_plans(
         effective_mutator=effective_mutator
     ):
-        if len(generated) >= count:
+        if len(generated) >= max_seeds_cap:
+            break
+        if count is None and _is_covered():
             break
         preferred_candidates = grammar_ast.generate_from_rule(
             start_rule=start_rule,
@@ -85,16 +157,20 @@ def _generate_startup_grammar_seeds(
         if candidate in generated:
             continue
         generated.append(candidate)
+        _record_coverage(candidate)
         log.info(
             "%s: generated %s/%s grammar seeds after preferred coverage targeting.",
             debug_label,
             len(generated),
-            count,
+            max_seeds_cap if count is None else count,
         )
 
-    remaining = count - len(generated)
-    if remaining <= 0:
-        return generated
+    if count is not None:
+        remaining = count - len(generated)
+        if remaining <= 0:
+            return generated
+    else:
+        remaining = max(0, max_seeds_cap - len(generated))
 
     refill = generate_grammar_refill_seeds(
         history_texts=tuple(generated),
@@ -108,7 +184,10 @@ def _generate_startup_grammar_seeds(
         if candidate in generated:
             continue
         generated.append(candidate)
-        if len(generated) >= count:
+        _record_coverage(candidate)
+        if len(generated) >= max_seeds_cap:
+            break
+        if count is None and _is_covered():
             break
     if refill.seeds:
         log.info(
@@ -117,12 +196,15 @@ def _generate_startup_grammar_seeds(
             len(refill.seeds),
             len(refill.uncovered_coverage_items),
         )
-    if len(generated) >= count:
+    if count is not None and len(generated) >= count:
+        return generated
+    if count is None and _is_covered():
         return generated
 
-    available_items = grammar_ast.available_coverage_items(mutator_kind=effective_mutator)
     start_index = 0
-    while len(generated) < count:
+    while len(generated) < max_seeds_cap:
+        if count is None and _is_covered():
+            break
         preferred_item = (
             [available_items[start_index % len(available_items)]]
             if available_items
@@ -147,15 +229,17 @@ def _generate_startup_grammar_seeds(
             start_index += 1
             continue
         generated.append(candidate)
+        _record_coverage(candidate)
         if (
-            len(generated) == count
+            (count is not None and len(generated) == count)
+            or (count is None and _is_covered())
             or len(generated) % progress_interval == 0
         ):
             log.info(
                 "%s: generated %s/%s grammar seeds after seedless fallback.",
                 debug_label,
                 len(generated),
-                count,
+                max_seeds_cap if count is None else count,
             )
         start_index += 1
     return generated
@@ -187,10 +271,15 @@ def run_fuzzer(
         target=effective_target,
         grammar_path=config["grammar_path"],
     )
-    configure_runtime_grammar(
-        kind=effective_mutator,
+    grammar_path, ast_grammar_path = _default_target_grammar_paths(
+        target=effective_target,
         grammar_path=config["grammar_path"],
         ast_grammar_path=config["ast_grammar_path"],
+    )
+    configure_runtime_grammar(
+        kind=effective_mutator,
+        grammar_path=grammar_path,
+        ast_grammar_path=ast_grammar_path,
     )
 
     rng = random.Random(
@@ -291,15 +380,14 @@ def run_fuzzer(
 
     if not startup_seed_items and scheduler.empty() and use_regex_noseed:
         family = corpus.resolve_family_or_target(effective_target)
-        requested = max(1, int(config["seed_preload_total"]))
         with console.status(
-            f"Generating {requested} grammar seeds for {effective_target}...",
+            f"Generating grammar seeds for {effective_target} until grammar tree is covered...",
             spinner="dots",
         ):
             generated = _generate_startup_grammar_seeds(
                 effective_mutator=effective_mutator,
                 rng=rng,
-                count=requested,
+                count=config["seed_preload_total"],
             )
         startup_regex_seeds = list(generated)
         next_ordinal = DISCOVERED_SEED_ORDINAL_BASE

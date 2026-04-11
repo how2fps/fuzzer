@@ -345,9 +345,16 @@ def run_json_decoder_with_branches(
         os.path.join(effective_log_dir, "bug_counts.csv"),
     )
 
+    try:
+        json.dumps(decoded)
+        decoded_repr: Any = decoded
+    except TypeError:
+        decoded_repr = repr(decoded)
+
     return {
         "status": "ok" if bug_signature is None else "bug",
         "bug_signature": bug_signature,
+        "decoded": decoded_repr,
         "covered_branches": branch_counts["covered_branches"],
         "missing_branches": branch_counts["missing_branches"],
         "branch_details_by_file": branch_details_by_file,

@@ -217,6 +217,11 @@ def grammar_capabilities(
     )
     return GrammarCapabilities(
         literal_chars=literal_chars,
+        non_alnum_chars=frozenset(
+            char
+            for char in literal_chars
+            if not char.isalnum() and not char.isspace()
+        ),
         separator_chars=frozenset(
             char for char in literal_chars if char in _SUPPORTED_SEPARATOR_CHARS
         ),
