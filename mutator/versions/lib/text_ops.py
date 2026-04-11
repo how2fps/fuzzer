@@ -226,6 +226,18 @@ def _find_numericish_ranges(*, text: str) -> list[tuple[int, int]]:
         if _looks_numericish_token(match.group(0))
     ]
 
+
+def _find_alnum_token_ranges(
+    *,
+    text: str,
+    min_length: int = 1,
+) -> list[tuple[int, int]]:
+    return [
+        (match.start(), match.end())
+        for match in re.finditer(r"[A-Za-z0-9]+", text)
+        if (match.end() - match.start()) >= min_length
+    ]
+
 def _separator_char_candidates(
     *,
     text: str,
@@ -423,6 +435,205 @@ def _separator_confusion(
         return sanitize_mutated_text(candidate)
     return None
 
+
+def _prefer_strategies(
+    *,
+    strategies: tuple[str, ...],
+    preferred: tuple[str, ...],
+) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for strategy in preferred + strategies:
+        if strategy in strategies and strategy not in seen:
+            ordered.append(strategy)
+            seen.add(strategy)
+    return tuple(ordered)
+
+
+def _surrounding_delimiter_pair(
+    *,
+    text: str,
+    start: int,
+    end: int,
+    capabilities: GrammarCapabilities,
+) -> tuple[str, str] | None:
+    for opener, closer in capabilities.paired_delimiters:
+        if start > 0 and end < len(text) and text[start - 1] == opener and text[end] == closer:
+            return opener, closer
+    return None
+
+
+def _separator_run_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    separator_positions = _separator_indexes(text=text, capabilities=capabilities)
+    if not separator_positions:
+        return None
+    index = rng.choice(separator_positions)
+    current = text[index]
+    strategies = (
+        "duplicate_once",
+        "fanout",
+        "neighbor_mix",
+        "spam_run",
+        "alternating_run",
+    )
+    if current == "/":
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("duplicate_once", "fanout", "spam_run"),
+        )
+    elif current == "-":
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("duplicate_once", "fanout", "alternating_run"),
+        )
+    strategy = rng.choice(strategies)
+
+    if strategy == "duplicate_once":
+        replacement = current * (1 + rng.randint(1, 2))
+    elif strategy == "fanout":
+        replacement = current * rng.randint(3, 4)
+    elif strategy == "spam_run":
+        replacement = current * rng.randint(5, 8)
+    else:
+        replacements = [
+            separator
+            for separator in capabilities.separator_chars
+            if separator != current
+        ]
+        if not replacements:
+            if strategy == "alternating_run":
+                replacement = current * rng.randint(5, 8)
+            else:
+                return None
+        else:
+            other = rng.choice(replacements)
+            if strategy == "alternating_run":
+                unit = current + other if rng.choice(("suffix", "prefix")) == "suffix" else other + current
+                replacement = unit * rng.randint(2, 4)
+            else:
+                join_order = rng.choice(("suffix", "prefix"))
+                replacement = current + other if join_order == "suffix" else other + current
+
+    return _replace_text_range(
+        text=text,
+        start=index,
+        end=index + 1,
+        replacement=replacement,
+    )
+
+
+def _separator_chars_in_text(
+    *,
+    text: str,
+    capabilities: GrammarCapabilities,
+) -> frozenset[str]:
+    return frozenset(char for char in text if char in capabilities.separator_chars)
+
+
+def _find_delimited_content_ranges(
+    *,
+    text: str,
+    capabilities: GrammarCapabilities,
+) -> list[tuple[int, int, str, str]]:
+    ranges: list[tuple[int, int, str, str]] = []
+    for opener, closer in capabilities.paired_delimiters:
+        depth = 0
+        content_start: int | None = None
+        for index, char in enumerate(text):
+            if char == opener:
+                depth += 1
+                if depth == 1:
+                    content_start = index + 1
+                continue
+            if char == closer and depth > 0:
+                if depth == 1 and content_start is not None and content_start < index:
+                    ranges.append((content_start, index, opener, closer))
+                    content_start = None
+                depth -= 1
+    return ranges
+
+
+def _repetition_amplification_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    separator_candidates = _separator_char_candidates(
+        text=text,
+        capabilities=capabilities,
+        min_occurrences=1,
+    )
+    strategies = ["repeat_segment", "append_segment", "flood_segment"]
+    delimited_ranges = _find_delimited_content_ranges(
+        text=text,
+        capabilities=capabilities,
+    )
+    if delimited_ranges:
+        strategies.extend(("amplify_delimited_group", "flood_delimited_group"))
+    strategy = rng.choice(tuple(strategies))
+
+    if strategy in {"amplify_delimited_group", "flood_delimited_group"} and delimited_ranges:
+        inner_start, inner_end, _opener, _closer = rng.choice(delimited_ranges)
+        inner = text[inner_start:inner_end]
+        if not inner:
+            return None
+        spam_repeat_count = (
+            rng.randint(5, 12)
+            if strategy == "flood_delimited_group"
+            else rng.randint(2, 6)
+        )
+        if "-" in inner:
+            pieces = [piece for piece in inner.split("-") if piece]
+            if pieces:
+                repeated_piece = rng.choice(pieces)
+                replacement = inner + ("-" + repeated_piece) * (spam_repeat_count - 1)
+                return _replace_text_range(
+                    text=text,
+                    start=inner_start,
+                    end=inner_end,
+                    replacement=replacement,
+                )
+        inner_separator_candidates = [
+            separator for separator in separator_candidates if separator in inner
+        ]
+        if inner_separator_candidates:
+            separator = rng.choice(inner_separator_candidates)
+            pieces = [piece for piece in inner.split(separator) if piece]
+            if pieces:
+                repeated_piece = rng.choice(pieces)
+                replacement = inner + (separator + repeated_piece) * (spam_repeat_count - 1)
+                return _replace_text_range(
+                    text=text,
+                    start=inner_start,
+                    end=inner_end,
+                    replacement=replacement,
+                )
+
+    if not separator_candidates:
+        return None
+    separator = rng.choice(separator_candidates)
+    parts = text.split(separator)
+    non_empty_parts = [(index, part) for index, part in enumerate(parts) if part]
+    if not non_empty_parts:
+        return None
+    part_index, part = rng.choice(non_empty_parts)
+    repeat_count = rng.randint(5, 12) if strategy == "flood_segment" else rng.randint(2, 6)
+    candidate_parts = list(parts)
+    if strategy == "repeat_segment":
+        candidate_parts[part_index] = separator.join([part] * repeat_count)
+    else:
+        candidate_parts[part_index : part_index + 1] = [part] * repeat_count
+    candidate = separator.join(candidate_parts)
+    if candidate != text:
+        return sanitize_mutated_text(candidate)
+    return None
+
 def _structured_range_surgery(
     *,
     text: str,
@@ -443,9 +654,35 @@ def _structured_range_surgery(
         capabilities=capabilities,
         min_occurrences=1,
     )
-    strategy = rng.choice(
-        ("duplicate", "bounded_suffix", "segment_pair", "drop_left_endpoint_digit")
+    strategies = (
+        "duplicate",
+        "bounded_suffix",
+        "segment_pair",
+        "drop_left_endpoint_digit",
+        "range_fanout",
     )
+    surrounding_pair = _surrounding_delimiter_pair(
+        text=text,
+        start=start,
+        end=end,
+        capabilities=capabilities,
+    )
+    if surrounding_pair is not None:
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("range_fanout", "bounded_suffix", "duplicate"),
+        )
+    elif "-" in text:
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("bounded_suffix", "range_fanout", "drop_left_endpoint_digit"),
+        )
+    if token.lstrip("-").isdigit() and int(token) in {254, 255}:
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("bounded_suffix", "range_fanout"),
+        )
+    strategy = rng.choice(strategies)
     if strategy == "duplicate":
         return _replace_text_range(
             text=text,
@@ -453,11 +690,25 @@ def _structured_range_surgery(
             end=end,
             replacement=f"{token}-{token}",
         )
+    if strategy == "range_fanout":
+        if not token.lstrip("-").isdigit():
+            return None
+        repeat_count = rng.randint(3, 8)
+        replacement = token + ("-" + token) * (repeat_count - 1)
+        return _replace_text_range(
+            text=text,
+            start=start,
+            end=end,
+            replacement=replacement,
+        )
     if strategy == "bounded_suffix":
         if not token.lstrip("-").isdigit():
             return None
         base_value = int(token)
-        offset = rng.choice((1, 2, 5, 9))
+        if base_value in {254, 255}:
+            offset = 1
+        else:
+            offset = rng.choice((1, 2, 5, 9))
         return _replace_text_range(
             text=text,
             start=start,
@@ -493,6 +744,108 @@ def _structured_range_surgery(
         start=start,
         end=end,
         replacement=f"{source}-{peer}",
+    )
+
+
+def _numeric_token_bounds_adjacent_to_hyphen(
+    *,
+    text: str,
+    hyphen_index: int,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    left_end = hyphen_index
+    left_start = left_end
+    while left_start > 0 and text[left_start - 1].isdigit():
+        left_start -= 1
+    if left_start == left_end:
+        return None
+    if (
+        left_start > 0
+        and text[left_start - 1] == "-"
+        and (left_start - 1 == 0 or not text[left_start - 2].isdigit())
+    ):
+        left_start -= 1
+
+    right_start = hyphen_index + 1
+    if right_start >= len(text):
+        return None
+    if (
+        text[right_start] in "+-"
+        and right_start + 1 < len(text)
+        and text[right_start + 1].isdigit()
+    ):
+        right_end = right_start + 2
+    elif text[right_start].isdigit():
+        right_end = right_start + 1
+    else:
+        return None
+    while right_end < len(text) and text[right_end].isdigit():
+        right_end += 1
+
+    return (left_start, left_end), (right_start, right_end)
+
+
+def _descending_range_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    if "-" not in capabilities.literal_chars:
+        return None
+
+    strategy = rng.choice(("reverse_existing", "synthesize_descending"))
+    hyphen_indexes = [index for index, char in enumerate(text) if char == "-"]
+
+    if strategy == "reverse_existing":
+        pair_candidates = [
+            (hyphen_index, bounds)
+            for hyphen_index in hyphen_indexes
+            if (bounds := _numeric_token_bounds_adjacent_to_hyphen(
+                text=text,
+                hyphen_index=hyphen_index,
+            ))
+            is not None
+        ]
+        if pair_candidates:
+            _hyphen_index, ((left_start, left_end), (right_start, right_end)) = rng.choice(
+                pair_candidates
+            )
+            left_token = text[left_start:left_end]
+            right_token = text[right_start:right_end]
+            try:
+                left_value = int(left_token)
+                right_value = int(right_token)
+            except ValueError:
+                return None
+            if left_value == right_value:
+                higher = left_value + max(1, rng.randint(1, 9))
+                lower = left_value
+            else:
+                higher = max(left_value, right_value)
+                lower = min(left_value, right_value)
+            return _replace_text_range(
+                text=text,
+                start=left_start,
+                end=right_end,
+                replacement=f"{higher}-{lower}",
+            )
+
+    numeric_ranges = _find_numeric_ranges(text=text)
+    if not numeric_ranges:
+        return None
+    start, end = rng.choice(numeric_ranges)
+    token = text[start:end]
+    try:
+        base_value = int(token)
+    except ValueError:
+        return None
+    offset = rng.choice((1, 2, 5, 9))
+    higher = base_value + offset
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement=f"{higher}-{base_value}",
     )
 
 def _wildcard_suffix_surgery(
@@ -545,50 +898,155 @@ def _delimited_numeric_group_surgery(
     numeric_ranges = _find_numeric_ranges(text=text)
     if not numeric_ranges:
         return None
+    delimited_numeric_ranges = [
+        range_
+        for range_ in numeric_ranges
+        if _surrounding_delimiter_pair(
+            text=text,
+            start=range_[0],
+            end=range_[1],
+            capabilities=capabilities,
+        )
+        is not None
+    ]
+    if delimited_numeric_ranges:
+        numeric_ranges = delimited_numeric_ranges + [
+            range_ for range_ in numeric_ranges if range_ not in delimited_numeric_ranges
+        ]
     start, end = rng.choice(numeric_ranges)
     token = text[start:end]
     if not token:
         return None
-    opener, closer = rng.choice(capabilities.paired_delimiters)
+    surrounding_pair = _surrounding_delimiter_pair(
+        text=text,
+        start=start,
+        end=end,
+        capabilities=capabilities,
+    )
+    if surrounding_pair is not None:
+        opener, closer = surrounding_pair
+    else:
+        opener, closer = rng.choice(capabilities.paired_delimiters)
+    strategies = ("simple_group", "range_group", "spam_group", "zero_pad_group")
+    if surrounding_pair is not None:
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("zero_pad_group", "simple_group", "range_group", "spam_group"),
+        )
+    elif "-" in text:
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("range_group", "spam_group", "zero_pad_group"),
+        )
+    strategy = rng.choice(strategies)
     inner = token
-    if "-" in capabilities.literal_chars and token.lstrip("-").isdigit():
+    if strategy == "zero_pad_group":
+        body = token.lstrip("-")
+        if surrounding_pair is not None and body.isdigit() and len(body) < 3:
+            padded = body.zfill(3)
+        else:
+            padded = ("0" * rng.randint(2, 6)) + body
+        inner = f"-{padded}" if token.startswith("-") else padded
+    elif "-" in capabilities.literal_chars and token.lstrip("-").isdigit():
         offset = rng.choice((1, 2, 5, 9))
-        inner = f"{token}-{int(token) + offset}"
+        if strategy == "spam_group":
+            repeated = str(int(token) + offset)
+            repeat_count = rng.randint(3, 8)
+            inner = token + ("-" + repeated) * (repeat_count - 1)
+        elif strategy == "range_group":
+            inner = f"{token}-{int(token) + offset}"
+    replacement = inner if surrounding_pair is not None else f"{opener}{inner}{closer}"
     return _replace_text_range(
         text=text,
         start=start,
         end=end,
-        replacement=f"{opener}{inner}{closer}",
+        replacement=replacement,
     )
 
 def _numeric_format_surgery(
     *,
     text: str,
+    capabilities: GrammarCapabilities | None = None,
     rng: random.Random,
 ) -> str | None:
     numeric_ranges = _find_numericish_ranges(text=text)
     if not numeric_ranges:
         return None
+    slash_ranges = [
+        range_ for range_ in numeric_ranges if range_[0] > 0 and text[range_[0] - 1] == "/"
+    ]
+    delimited_ranges: list[tuple[int, int]] = []
+    if capabilities is not None:
+        delimited_ranges = [
+            range_
+            for range_ in numeric_ranges
+            if _surrounding_delimiter_pair(
+                text=text,
+                start=range_[0],
+                end=range_[1],
+                capabilities=capabilities,
+            )
+            is not None
+        ]
+    if slash_ranges:
+        numeric_ranges = slash_ranges + [range_ for range_ in numeric_ranges if range_ not in slash_ranges]
+    elif delimited_ranges:
+        numeric_ranges = delimited_ranges + [
+            range_ for range_ in numeric_ranges if range_ not in delimited_ranges
+        ]
     start, end = rng.choice(numeric_ranges)
     token = text[start:end]
     if not token:
         return None
-
-    strategy = rng.choice(
-        (
-            "leading_zero_pad",
-            "toggle_sign",
-            "insert_decimal",
-            "remove_decimal",
-            "add_exponent",
-            "remove_exponent",
-            "overflow_length",
+    slash_mask = start > 0 and text[start - 1] == "/"
+    surrounding_pair = (
+        _surrounding_delimiter_pair(
+            text=text,
+            start=start,
+            end=end,
+            capabilities=capabilities,
         )
+        if capabilities is not None
+        else None
     )
+    strategies = (
+        "leading_zero_pad",
+        "heavy_zero_pad",
+        "toggle_sign",
+        "insert_decimal",
+        "remove_decimal",
+        "add_exponent",
+        "remove_exponent",
+        "overflow_length",
+        "tail_digit_burst",
+    )
+    if slash_mask:
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("tail_digit_burst", "overflow_length", "leading_zero_pad"),
+        )
+    elif surrounding_pair is not None:
+        strategies = _prefer_strategies(
+            strategies=strategies,
+            preferred=("leading_zero_pad", "overflow_length", "heavy_zero_pad"),
+        )
+    strategy = rng.choice(strategies)
     replacement = token
 
     if strategy == "leading_zero_pad":
-        replacement = ("0" * rng.randint(1, 3)) + token
+        body = token.lstrip("+-")
+        sign = token[0] if token.startswith(("+", "-")) else ""
+        if surrounding_pair is not None and body.isdigit() and len(body) < 3:
+            if set(body) == {"0"}:
+                replacement = sign + body.zfill(3)
+            else:
+                replacement = sign + body + (body[-1] * (3 - len(body)))
+        else:
+            replacement = ("0" * rng.randint(1, 3)) + token
+    elif strategy == "heavy_zero_pad":
+        replacement = ("0" * rng.randint(4, 12)) + token.lstrip("+-")
+        if token.startswith(("+", "-")) and rng.choice(("keep_sign", "drop_sign")) == "keep_sign":
+            replacement = token[0] + replacement
     elif strategy == "toggle_sign":
         if token.startswith(("+", "-")):
             replacement = token[1:] or token
@@ -612,11 +1070,327 @@ def _numeric_format_surgery(
             replacement = token[: exponent_positions[0]]
     elif strategy == "overflow_length":
         growth_char = token[-1] if token else "0"
-        replacement = token + (growth_char * rng.randint(1, 3))
+        if slash_mask:
+            replacement = token + (growth_char * rng.randint(3, 12))
+        else:
+            replacement = token + (growth_char * rng.randint(1, 3))
+    elif strategy == "tail_digit_burst":
+        growth_char = token[-1] if token else "0"
+        if slash_mask:
+            replacement = token + (growth_char * rng.randint(12, 48))
+        else:
+            replacement = token + (growth_char * rng.randint(4, 12))
 
     if replacement == token:
         return None
     candidate = text[:start] + replacement + text[end:]
+    if candidate != text:
+        return sanitize_mutated_text(candidate)
+    return None
+
+
+def _extreme_numeric_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+) -> str | None:
+    numeric_ranges = _find_numeric_ranges(text=text)
+    if not numeric_ranges:
+        return None
+    start, end = rng.choice(numeric_ranges)
+    token = text[start:end]
+    body = token[1:] if token.startswith("-") else token
+    if not body:
+        return None
+
+    strategy = rng.choice(
+        (
+            "force_negative",
+            "burst_length",
+            "zero_pad_heavily",
+            "duplicate_token",
+            "spam_boundary_pair",
+            "signed_zero_burst",
+        )
+    )
+    replacement = token
+
+    if strategy == "force_negative":
+        replacement = "-" + token if not token.startswith("-") else "--" + body
+    elif strategy == "burst_length":
+        growth_char = body[-1] if body else "0"
+        replacement = token + (growth_char * rng.randint(8, 24))
+    elif strategy == "zero_pad_heavily":
+        replacement = ("0" * rng.randint(8, 24)) + body
+        if token.startswith("-") and rng.choice(("keep_sign", "drop_sign")) == "keep_sign":
+            replacement = "-" + replacement
+    elif strategy == "duplicate_token":
+        repeated = body * rng.randint(4, 12)
+        replacement = "-" + repeated if token.startswith("-") else repeated
+    elif strategy == "spam_boundary_pair":
+        repeated = (body + "255256") * rng.randint(2, 5)
+        replacement = "-" + repeated if token.startswith("-") else repeated
+    else:
+        replacement = "-" + ("0" * rng.randint(6, 18)) + body
+
+    if replacement == token:
+        return None
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement=replacement,
+    )
+
+
+def _neighbor_boundary_numeric_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+) -> str | None:
+    numeric_ranges = _find_numeric_ranges(text=text)
+    if not numeric_ranges:
+        return None
+    start, end = rng.choice(numeric_ranges)
+    token = text[start:end]
+    try:
+        value = int(token)
+    except ValueError:
+        return None
+
+    boundary_candidates = (
+        -1,
+        0,
+        1,
+        2,
+        7,
+        8,
+        9,
+        15,
+        16,
+        24,
+        30,
+        31,
+        32,
+        33,
+        47,
+        48,
+        49,
+        63,
+        64,
+        65,
+        95,
+        96,
+        97,
+        127,
+        128,
+        129,
+        254,
+        255,
+        256,
+    )
+    strategy = rng.choice(("off_by_one", "nearest_common", "sign_flip"))
+    ranked_boundaries = [
+        boundary
+        for boundary in sorted(
+            boundary_candidates,
+            key=lambda boundary: (abs(boundary - value), boundary),
+        )
+        if boundary != value
+    ]
+
+    if strategy == "off_by_one":
+        choices = [value - 1, value + 1]
+        choices.extend(ranked_boundaries[:2])
+    elif strategy == "nearest_common":
+        choices = ranked_boundaries[:8]
+    else:
+        choices = [-(abs(value) + 1), -abs(value), 0, 1]
+        if value < 0:
+            choices.extend([abs(value), max(0, abs(value) - 1)])
+
+    deduped_choices: list[int] = []
+    for choice in choices:
+        if choice == value or choice in deduped_choices:
+            continue
+        deduped_choices.append(choice)
+    if not deduped_choices:
+        return None
+
+    replacement = str(rng.choice(deduped_choices))
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement=replacement,
+    )
+
+
+def _alphabetic_label_substitution(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    label_choices = (
+        "abc",
+        "def",
+        "ghi",
+        "jkl",
+        "host",
+        "edge",
+        "node",
+        "mail",
+        "srv",
+        "local",
+    )
+    token_ranges = _find_alnum_token_ranges(text=text, min_length=1)
+    if not token_ranges:
+        return None
+
+    separator_candidates = _separator_char_candidates(
+        text=text,
+        capabilities=capabilities,
+        min_occurrences=1,
+    )
+    strategies = ["replace_token"]
+    if separator_candidates:
+        strategies.append("replace_run")
+    strategy = rng.choice(tuple(strategies))
+
+    if strategy == "replace_run" and separator_candidates:
+        separator = rng.choice(separator_candidates)
+        parts = text.split(separator)
+        non_empty_indexes = [index for index, part in enumerate(parts) if part]
+        if len(non_empty_indexes) >= 2:
+            replace_count = min(len(non_empty_indexes), max(2, rng.randint(2, 4)))
+            candidate_parts = list(parts)
+            for index in non_empty_indexes[:replace_count]:
+                candidate_parts[index] = rng.choice(label_choices)
+            candidate = separator.join(candidate_parts)
+            if candidate != text:
+                return sanitize_mutated_text(candidate)
+
+    start, end = rng.choice(token_ranges)
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement=rng.choice(label_choices),
+    )
+
+
+def _mixed_separator_family_graft(
+    *,
+    original_text: str,
+    grammar_spec: GrammarSpec,
+    max_depth: int,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    if len(capabilities.separator_chars) < 2:
+        return None
+    base_text = original_text or generate_from_grammar(
+        grammar_spec=grammar_spec,
+        max_depth=max_depth,
+        rng=rng,
+    )
+    base_tokens = _tokenize_for_alternation_splice(text=base_text)
+    base_separator_chars = _separator_chars_in_text(
+        text=base_text,
+        capabilities=capabilities,
+    )
+    if len(base_tokens) < 2 or not base_separator_chars:
+        return None
+
+    for _ in range(12):
+        fragment = generate_from_grammar(
+            grammar_spec=grammar_spec,
+            max_depth=max_depth,
+            rng=rng,
+        )
+        fragment_tokens = _tokenize_for_alternation_splice(text=fragment)
+        fragment_separator_chars = _separator_chars_in_text(
+            text=fragment,
+            capabilities=capabilities,
+        )
+        if len(fragment_tokens) < 2 or not fragment_separator_chars:
+            continue
+        if len(base_separator_chars | fragment_separator_chars) < 2:
+            continue
+        prefix_count = rng.randrange(1, len(base_tokens))
+        suffix_start = rng.randrange(1, len(fragment_tokens))
+        candidate = "".join(base_tokens[:prefix_count] + fragment_tokens[suffix_start:])
+        if not candidate or candidate in {original_text, base_text, fragment}:
+            continue
+        candidate_separator_chars = _separator_chars_in_text(
+            text=candidate,
+            capabilities=capabilities,
+        )
+        if len(candidate_separator_chars) < 2:
+            continue
+        if not (candidate_separator_chars & base_separator_chars):
+            continue
+        if not (candidate_separator_chars & fragment_separator_chars):
+            continue
+        return sanitize_mutated_text(candidate)
+    return None
+
+
+def _token_whitespace_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    whitespace_payloads = (" ", "\t", "\n", "\r", " \t", "\t \n", "\n\n", " \t ")
+    token_ranges = _find_alnum_token_ranges(text=text, min_length=2)
+    separator_positions = _separator_indexes(text=text, capabilities=capabilities)
+    strategy = rng.choice(
+        ("split_token", "pad_separator", "surround_token", "burst_separator", "burst_token")
+    )
+
+    if strategy == "split_token" and token_ranges:
+        start, end = rng.choice(token_ranges)
+        if end - start < 2:
+            return None
+        insert_at = rng.randrange(start + 1, end)
+        payload = rng.choice(whitespace_payloads)
+        return sanitize_mutated_text(text[:insert_at] + payload + text[insert_at:])
+
+    if strategy == "pad_separator" and separator_positions:
+        index = rng.choice(separator_positions)
+        payload = rng.choice(whitespace_payloads)
+        direction = rng.choice(("before", "after"))
+        if direction == "before":
+            candidate = text[:index] + payload + text[index:]
+        else:
+            candidate = text[: index + 1] + payload + text[index + 1 :]
+        if candidate != text:
+            return sanitize_mutated_text(candidate)
+        return None
+
+    if strategy == "burst_separator" and separator_positions:
+        index = rng.choice(separator_positions)
+        left_payload = rng.choice(whitespace_payloads)
+        right_payload = rng.choice(whitespace_payloads)
+        candidate = text[:index] + left_payload + text[index] + right_payload + text[index + 1 :]
+        if candidate != text:
+            return sanitize_mutated_text(candidate)
+        return None
+
+    if not token_ranges:
+        return None
+    start, end = rng.choice(token_ranges)
+    payload = rng.choice(whitespace_payloads)
+    direction = rng.choice(("prefix", "suffix")) if strategy == "surround_token" else "suffix"
+    if strategy == "burst_token":
+        burst = payload * rng.randint(2, 5)
+        candidate = text[:start] + burst + text[start:end] + burst + text[end:]
+    elif direction == "prefix":
+        candidate = text[:start] + payload + text[start:]
+    else:
+        candidate = text[:end] + payload + text[end:]
     if candidate != text:
         return sanitize_mutated_text(candidate)
     return None
@@ -1232,6 +2006,76 @@ def _generic_invalidate_text(
                 1.5,
             )
         )
+        strategy_entries.append(
+            (
+                "neighbor_boundary_numeric_surgery",
+                lambda: _neighbor_boundary_numeric_surgery(
+                    text=original_text,
+                    rng=rng,
+                ),
+                2.0,
+            )
+        )
+        strategy_entries.append(
+            (
+                "extreme_numeric_surgery",
+                lambda: _extreme_numeric_surgery(text=original_text, rng=rng),
+                2.0,
+            )
+        )
+    if capabilities is not None and capabilities.separator_chars:
+        strategy_entries.extend(
+            (
+                (
+                    "repetition_amplification_surgery",
+                    lambda: _repetition_amplification_surgery(
+                        text=original_text,
+                        rng=rng,
+                        capabilities=capabilities,
+                    ),
+                    2.1,
+                ),
+                (
+                    "alphabetic_label_substitution",
+                    lambda: _alphabetic_label_substitution(
+                        text=original_text,
+                        rng=rng,
+                        capabilities=capabilities,
+                    ),
+                    1.9,
+                ),
+                (
+                    "separator_run_surgery",
+                    lambda: _separator_run_surgery(
+                        text=original_text,
+                        rng=rng,
+                        capabilities=capabilities,
+                    ),
+                    2.2,
+                ),
+                (
+                    "token_whitespace_surgery",
+                    lambda: _token_whitespace_surgery(
+                        text=original_text,
+                        rng=rng,
+                        capabilities=capabilities,
+                    ),
+                    2.1,
+                ),
+            )
+        )
+    if capabilities is not None and capabilities.has_numeric_literals and "-" in capabilities.literal_chars:
+        strategy_entries.append(
+            (
+                "descending_range_surgery",
+                lambda: _descending_range_surgery(
+                    text=original_text,
+                    rng=rng,
+                    capabilities=capabilities,
+                ),
+                1.8,
+            )
+        )
     strategy_entries.extend(
         (
             (
@@ -1268,9 +2112,17 @@ __all__ = [
     "_mutate_numeric_literal_in_text",
     "_mutate_numeric_special_literal_in_text",
     "_numeric_format_surgery",
+    "_extreme_numeric_surgery",
+    "_neighbor_boundary_numeric_surgery",
     "_mutate_separator_char_in_text",
     "_segment_count_change",
     "_separator_confusion",
+    "_separator_run_surgery",
+    "_repetition_amplification_surgery",
+    "_alphabetic_label_substitution",
+    "_mixed_separator_family_graft",
+    "_token_whitespace_surgery",
+    "_descending_range_surgery",
     "_replace_quoted_surrogate_pair_escape",
     "_replace_quoted_invalid_surrogate_escape",
     "_insert_foreign_punctuation",

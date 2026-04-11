@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any, Sequence
 
 from seed_corpus import Seed
@@ -10,6 +11,61 @@ from .types import ScheduledSeed
 
 class BaseSeedScheduler(ABC):
     """Common interface for scheduler backends that manage `ScheduledSeed` items."""
+
+    def consider_seed(
+        self,
+        seed: Seed,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> ScheduledSeed | None:
+        """
+        Conditionally insert a seed and return the scheduled item when accepted.
+
+        This is the scheduler-owned gate for worker-discovered seeds. Callers that
+        want unconditional insertion, such as startup preload or refill paths,
+        should continue to use `add(...)`.
+        """
+        metadata_dict = dict(metadata or {})
+        if not self.should_schedule_seed(seed, metadata=metadata_dict):
+            return None
+        return self.add(seed, metadata=metadata_dict)
+
+    def should_schedule_seed(
+        self,
+        seed: Seed,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """
+        Return True when a candidate should enter the scheduler.
+
+        Default policy:
+        - reject duplicate seed texts already tracked by the scheduler
+        - accept unconditional inserts when `scheduler_force_add` is set
+        - for worker-discovered descendants (`parent_seed_id` present), only accept
+          candidates that carry novelty via coverage, bug, or other first-seen
+          behavioral signals already computed by workers
+        - accept all other explicit callers
+        """
+        metadata_dict = dict(metadata or {})
+        if self._has_seed_text(seed.text):
+            return False
+        if bool(metadata_dict.get("scheduler_force_add")):
+            return True
+        if not metadata_dict.get("parent_seed_id"):
+            return True
+        signals_raw = metadata_dict.get("signals")
+        signals = signals_raw if isinstance(signals_raw, Mapping) else {}
+        return any(
+            bool(signals.get(key))
+            for key in (
+                "new_coverage",
+                "new_bug",
+                "new_bug_site",
+                "new_exception_site",
+                "new_differential_behavior",
+            )
+        )
 
     @abstractmethod
     def add(self, seed: Seed, *, metadata: dict[str, Any] | None = None) -> ScheduledSeed:
@@ -88,3 +144,13 @@ class BaseSeedScheduler(ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support feedback updates"
         )
+
+    def _has_seed_text(self, text: str) -> bool:
+        items = getattr(self, "_items", None)
+        if isinstance(items, dict):
+            for item in items.values():
+                item_seed = getattr(item, "seed", None)
+                if item_seed is not None and getattr(item_seed, "text", None) == text:
+                    return True
+            return False
+        return any(item.seed.text == text for item in self.ready_items())

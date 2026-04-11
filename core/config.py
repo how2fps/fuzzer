@@ -58,6 +58,7 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "seed_preload_bucket_ratios",
             "seed_refill_mode",
             "llm_seed_candidates",
+            "run_startup_generated_unmutated_first",
         ),
     ),
     (
@@ -65,13 +66,23 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "mutator_kind",
             "mutator_version",
+            "mutation_chain_continue_probability",
+            "mutation_chain_max_depth",
             "grammar_path",
             "ast_grammar_path",
             "grammar_rules_file",
         ),
     ),
     ("isinteresting", ("isinteresting_version",)),
-    ("parser", ("parser_version", "parser_config", "enable_open_coverage")),
+    (
+        "parser",
+        (
+            "parser_version",
+            "parser_config",
+            "enable_open_coverage",
+            "enable_qemu_coverage",
+        ),
+    ),
     ("power_scheduler", ("power_scheduler_version",)),
 )
 CONFIG_KEYS = {key for _, keys in CONFIG_MODULES for key in keys}
@@ -104,9 +115,12 @@ class FuzzConfig(TypedDict):
     seed_preload_bucket_ratios: dict[str, float]
     seed_refill_mode: str
     llm_seed_candidates: int
+    run_startup_generated_unmutated_first: bool
 
     mutator_kind: str
     mutator_version: str
+    mutation_chain_continue_probability: float
+    mutation_chain_max_depth: int
     grammar_path: str | None
     ast_grammar_path: str | None
     grammar_rules_file: str | None
@@ -115,6 +129,7 @@ class FuzzConfig(TypedDict):
     parser_version: str
     parser_config: dict[str, object]
     enable_open_coverage: bool
+    enable_qemu_coverage: bool
 
     power_scheduler_version: str
 
@@ -142,8 +157,11 @@ def get_default_config() -> FuzzConfig:
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "seed_refill_mode": "historical",
         "llm_seed_candidates": 5,
+        "run_startup_generated_unmutated_first": False,
         "mutator_kind": "auto",
         "mutator_version": "base",
+        "mutation_chain_continue_probability": 0.2,
+        "mutation_chain_max_depth": 8,
         "grammar_path": None,
         "ast_grammar_path": None,
         "grammar_rules_file": None,
@@ -151,6 +169,7 @@ def get_default_config() -> FuzzConfig:
         "parser_version": "base",
         "parser_config": {},
         "enable_open_coverage": ENABLE_OPEN_COVERAGE,
+        "enable_qemu_coverage": False,
         "power_scheduler_version": "base",
     }
 
@@ -188,6 +207,8 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "scheduler_kind": ("--scheduler",),
     "heap_startup_min_batches_per_seed": ("--heap-startup-min-batches-per-seed",),
     "mutator_kind": ("--mutator",),
+    "mutation_chain_continue_probability": ("--mutation-chain-continue-probability",),
+    "mutation_chain_max_depth": ("--mutation-chain-max-depth",),
     "grammar_path": ("--grammar-file",),
     "ast_grammar_path": ("--ast-grammar-file",),
     "grammar_rules_file": ("-g", "--grammar-rules-file"),
@@ -211,6 +232,7 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "seed_corpus_version": ("--seed-corpus-version",),
     "llm_seed_candidates": ("--llm-seed-candidates",),
     "enable_open_coverage": ("--enable-open-coverage",),
+    "enable_qemu_coverage": ("--enable-qemu-coverage",),
 }
 
 
@@ -348,6 +370,16 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(
             f"Invalid mutator_kind: {config['mutator_kind']}. Must be auto."
         )
+    if not isinstance(config["mutation_chain_continue_probability"], (int, float)):
+        raise ValueError("mutation_chain_continue_probability must be a number.")
+    if not 0.0 <= float(config["mutation_chain_continue_probability"]) < 1.0:
+        raise ValueError(
+            "mutation_chain_continue_probability must be in [0.0, 1.0)."
+        )
+    if not isinstance(config["mutation_chain_max_depth"], int):
+        raise ValueError("mutation_chain_max_depth must be an integer.")
+    if config["mutation_chain_max_depth"] < 1:
+        raise ValueError("mutation_chain_max_depth must be >= 1.")
     grammar_path = config["grammar_path"]
     if grammar_path is not None:
         if not isinstance(grammar_path, str) or not grammar_path.strip():
@@ -419,8 +451,12 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError(f"grammar_rules_file does not exist: {grammar_rules_file}")
     if config["llm_seed_candidates"] < 0:
         raise ValueError("llm_seed_candidates must be >= 0.")
+    if not isinstance(config["run_startup_generated_unmutated_first"], bool):
+        raise ValueError("run_startup_generated_unmutated_first must be a boolean.")
     if not isinstance(config["enable_open_coverage"], bool):
         raise ValueError("enable_open_coverage must be a boolean.")
+    if not isinstance(config["enable_qemu_coverage"], bool):
+        raise ValueError("enable_qemu_coverage must be a boolean.")
 
 
 def load_config_from_file(path: Path) -> FuzzConfig:
@@ -673,6 +709,25 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         help="Mutator module version for ablation.",
     )
     parser.add_argument(
+        "--mutation-chain-continue-probability",
+        dest="mutation_chain_continue_probability",
+        type=float,
+        default=0.2,
+        help=(
+            "After the first mutation, probability of mutating the result again. "
+            "This creates an exponentially decreasing chance of deeper mutation chains."
+        ),
+    )
+    parser.add_argument(
+        "--mutation-chain-max-depth",
+        dest="mutation_chain_max_depth",
+        type=int,
+        default=8,
+        help=(
+            "Maximum number of mutation rounds applied when building a single candidate."
+        ),
+    )
+    parser.add_argument(
         "--parser-version",
         dest="parser_version",
         default="base",
@@ -725,6 +780,15 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         default=ENABLE_OPEN_COVERAGE,
         help="Enable optional coverage collection for open_result targets.",
     )
+    parser.add_argument(
+        "--enable-qemu-coverage",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable optional AFL-QEMU basic-block bitmap collection for supported "
+            "closed/binary targets."
+        ),
+    )
 
     argv = sys.argv[1:]
     args = parser.parse_args()
@@ -741,6 +805,10 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         parser.error("--seed-preload-total must be >= 0.")
     if args.heap_startup_min_batches_per_seed < 0:
         parser.error("--heap-startup-min-batches-per-seed must be >= 0.")
+    if not 0.0 <= args.mutation_chain_continue_probability < 1.0:
+        parser.error("--mutation-chain-continue-probability must be in [0.0, 1.0).")
+    if args.mutation_chain_max_depth < 1:
+        parser.error("--mutation-chain-max-depth must be >= 1.")
     if args.memory_telemetry_seconds < 0:
         parser.error("--memory-telemetry-seconds must be >= 0.")
     if args.worker_max_jobs < 0:
@@ -766,6 +834,8 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         "scheduler_kind": args.scheduler_kind,
         "heap_startup_min_batches_per_seed": args.heap_startup_min_batches_per_seed,
         "mutator_kind": args.mutator_kind,
+        "mutation_chain_continue_probability": args.mutation_chain_continue_probability,
+        "mutation_chain_max_depth": args.mutation_chain_max_depth,
         "grammar_path": (
             str(args.grammar_path.resolve())
             if args.grammar_path is not None
@@ -800,7 +870,9 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
             else None
         ),
         "llm_seed_candidates": args.llm_seed_candidates,
+        "run_startup_generated_unmutated_first": False,
         "enable_open_coverage": args.enable_open_coverage,
+        "enable_qemu_coverage": args.enable_qemu_coverage,
         "parser_config": {},
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "seed_corpus_initial_draw": None,

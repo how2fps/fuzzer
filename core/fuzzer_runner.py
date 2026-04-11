@@ -18,12 +18,147 @@ from core.mutation_utils import initial_scheduler_seeds
 from mutator import get_feedback_handler, get_mutator
 from power_scheduler import get_power_scheduler
 from core.results_export import export_results
-from seed_corpus import Seed, get_corpus_loader, get_version_spec
-from seed_scheduler import UCBTreeScheduler, make_scheduler
+from core.seed_refill import generate_grammar_refill_seeds
+from seed_corpus import Seed, get_version_spec
+from seed_scheduler import ScheduledSeed, UCBTreeScheduler, make_scheduler
 from core.workers import run_fuzzer_multi_worker
 from core.target_artifacts import clear_bug_counts_csv
 from mutator import configure_runtime_grammar
 from mutator.versions import grammar_ast
+
+
+def _preferred_startup_generation_plans(
+    *,
+    effective_mutator: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if effective_mutator == "ip":
+        return (
+            (
+                "ip",
+                (
+                    "production:ip:0",
+                    "production:ipv4_input:1",
+                    "production:octet:0",
+                    "production:prefix4:0",
+                ),
+            ),
+        )
+    return ()
+
+
+def _generate_startup_grammar_seeds(
+    *,
+    effective_mutator: str,
+    rng: random.Random,
+    count: int,
+) -> list[str]:
+    """Generate startup seeds that try to cover as much AST grammar space as possible."""
+    if count <= 0:
+        return []
+
+    log = get_fuzzer_logger()
+    debug_label = f"startup grammar bootstrap [{effective_mutator}]"
+    progress_interval = max(1, count // 8)
+    generated: list[str] = []
+    for start_rule, preferred_coverage_items in _preferred_startup_generation_plans(
+        effective_mutator=effective_mutator
+    ):
+        if len(generated) >= count:
+            break
+        preferred_candidates = grammar_ast.generate_from_rule(
+            start_rule=start_rule,
+            rng=rng,
+            count=1,
+            min_mutation_rounds=0,
+            max_mutation_rounds=0,
+            preferred_coverage_items=list(preferred_coverage_items),
+            mutator_kind=effective_mutator,
+        )
+        if not preferred_candidates:
+            log.warning(
+                "%s: preferred coverage generation for rule %s hit its retry limit.",
+                debug_label,
+                start_rule,
+            )
+            continue
+        candidate = preferred_candidates[0]
+        if candidate in generated:
+            continue
+        generated.append(candidate)
+        log.info(
+            "%s: generated %s/%s grammar seeds after preferred coverage targeting.",
+            debug_label,
+            len(generated),
+            count,
+        )
+
+    remaining = count - len(generated)
+    if remaining <= 0:
+        return generated
+
+    refill = generate_grammar_refill_seeds(
+        history_texts=tuple(generated),
+        ready_texts=(),
+        mutator_kind=effective_mutator,
+        rng=rng,
+        count=remaining,
+        debug_label=debug_label,
+    )
+    for candidate in refill.seeds:
+        if candidate in generated:
+            continue
+        generated.append(candidate)
+        if len(generated) >= count:
+            break
+    if refill.seeds:
+        log.info(
+            "%s: coverage-guided refill produced %s new seeds (%s uncovered grammar items before refill).",
+            debug_label,
+            len(refill.seeds),
+            len(refill.uncovered_coverage_items),
+        )
+    if len(generated) >= count:
+        return generated
+
+    available_items = grammar_ast.available_coverage_items(mutator_kind=effective_mutator)
+    start_index = 0
+    while len(generated) < count:
+        preferred_item = (
+            [available_items[start_index % len(available_items)]]
+            if available_items
+            else None
+        )
+        fallback = grammar_ast.generate_without_seed(
+            mutator_kind=effective_mutator,
+            rng=rng,
+            count=1,
+            preferred_coverage_items=preferred_item,
+        )
+        if not fallback:
+            log.warning(
+                "%s: seedless fallback hit its retry limit after generating %s/%s grammar seeds.",
+                debug_label,
+                len(generated),
+                count,
+            )
+            break
+        candidate = fallback[0]
+        if candidate in generated:
+            start_index += 1
+            continue
+        generated.append(candidate)
+        if (
+            len(generated) == count
+            or len(generated) % progress_interval == 0
+        ):
+            log.info(
+                "%s: generated %s/%s grammar seeds after seedless fallback.",
+                debug_label,
+                len(generated),
+                count,
+            )
+        start_index += 1
+    return generated
 
 
 def run_fuzzer(
@@ -68,6 +203,26 @@ def run_fuzzer(
             startup_min_batches = 0
         scheduler_kwargs["startup_min_batches_per_seed"] = startup_min_batches
     scheduler = make_scheduler(config["scheduler_kind"], **scheduler_kwargs)
+    startup_seed_items: list[ScheduledSeed] = []
+    startup_seed_item_seq = 0
+
+    def _queue_startup_seed(
+        seed: Seed,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        nonlocal startup_seed_item_seq
+        startup_seed_item_seq += 1
+        startup_metadata = dict(metadata or {})
+        startup_metadata["startup_warm_pending_insert"] = True
+        startup_seed_items.append(
+            ScheduledSeed(
+                item_id=f"startup-{startup_seed_item_seq:06d}",
+                seed=seed,
+                metadata=startup_metadata,
+            )
+        )
+
     initial_seeds = (
         []
         if use_llm_bootstrap or use_regex_noseed
@@ -97,7 +252,7 @@ def run_fuzzer(
             metadata["startup_preloaded"] = True
         if config["ucb_trace"] and isinstance(scheduler, UCBTreeScheduler):
             metadata["_ucb_trace"] = True
-        scheduler.add(seed, metadata=metadata)
+        _queue_startup_seed(seed, metadata=metadata)
 
     def _make_regex_seed(*, text: str, family: str, ordinal: int) -> Seed:
         seed_id = f"regex-{family}-{ordinal}"
@@ -134,15 +289,15 @@ def run_fuzzer(
     startup_llm_seeds: list[str] = []
     startup_regex_seeds: list[str] = []
 
-    if scheduler.empty() and use_regex_noseed:
+    if not startup_seed_items and scheduler.empty() and use_regex_noseed:
         family = corpus.resolve_family_or_target(effective_target)
         requested = max(1, int(config["seed_preload_total"]))
         with console.status(
             f"Generating {requested} grammar seeds for {effective_target}...",
             spinner="dots",
         ):
-            generated = grammar_ast.generate_without_seed(
-                mutator_kind=effective_mutator,
+            generated = _generate_startup_grammar_seeds(
+                effective_mutator=effective_mutator,
                 rng=rng,
                 count=requested,
             )
@@ -154,10 +309,13 @@ def run_fuzzer(
                 family=family,
                 ordinal=next_ordinal,
             )
-            scheduler.add(
+            _queue_startup_seed(
                 candidate,
                 metadata={
                     "bucket": candidate.bucket,
+                    "startup_generated_run_unmutated_first": bool(
+                        config.get("run_startup_generated_unmutated_first")
+                    ),
                     "signals": {
                         "coverage_key": {
                             "family": candidate.family,
@@ -174,7 +332,7 @@ def run_fuzzer(
                 len(generated),
             )
 
-    if scheduler.empty() and use_llm_bootstrap:
+    if not startup_seed_items and scheduler.empty() and use_llm_bootstrap:
         family = corpus.resolve_family_or_target(effective_target)
         llm_bootstrap_config = dict(config)
         requested = int(llm_bootstrap_config["llm_seed_candidates"])
@@ -202,10 +360,13 @@ def run_fuzzer(
                     family=family,
                     ordinal=next_ordinal,
                 )
-                scheduler.add(
+                _queue_startup_seed(
                     candidate,
                     metadata={
                         "bucket": candidate.bucket,
+                        "startup_generated_run_unmutated_first": bool(
+                            config.get("run_startup_generated_unmutated_first")
+                        ),
                         "signals": {
                             "coverage_key": {
                                 "family": candidate.family,
@@ -221,7 +382,7 @@ def run_fuzzer(
                 len(llm_generated.seeds),
             )
 
-    if not scheduler or scheduler.empty():
+    if (not scheduler or scheduler.empty()) and not startup_seed_items:
         log.warning(
             "No schedulable seeds available after preload%s.",
             (
@@ -279,6 +440,7 @@ def run_fuzzer(
             shutdown_requested=shutdown_requested,
             mutate_fn=mutate_fn,
             rng=rng,
+            startup_seed_items=startup_seed_items,
             startup_generated_seeds=startup_llm_seeds or startup_regex_seeds,
             startup_generated_source=(
                 "startup LLM bootstrap"

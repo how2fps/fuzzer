@@ -8,7 +8,8 @@ import random
 import threading
 from collections.abc import Callable
 
-from .adaptive_operators_baseline import AdaptiveStrategy
+from .adaptive_operators import AdaptiveStrategy
+from . import grammar_ast
 from .lib import (
     apply_grammar_operator,
     arithmetic_mutation,
@@ -16,6 +17,7 @@ from .lib import (
     bit_flip,
     clone_block_mutation,
     delete_block_mutation,
+    grammar_capabilities,
     interesting_value_mutation,
     mutate_text_with_grammar,
     resolve_grammar_spec,
@@ -36,6 +38,7 @@ def _wrap_byte_mutator(func: ByteMutator) -> Operator:
 
 def _build_unified_ops(*, mutator_kind: str) -> dict[str, Operator]:
     grammar_spec = resolve_grammar_spec(kind=mutator_kind)
+    capabilities = grammar_capabilities(grammar_spec=grammar_spec)
     ops = {
         f"grammar_{operator_name}": (
             lambda text, rng, operator_name=operator_name: apply_grammar_operator(
@@ -48,6 +51,14 @@ def _build_unified_ops(*, mutator_kind: str) -> dict[str, Operator]:
         )
         for operator_name in available_grammar_operator_names(grammar_spec=grammar_spec)
     }
+    if capabilities.has_exact_parse_path:
+        ops["grammar_ast_tree_mutate"] = (
+            lambda text, rng: grammar_ast.mutate(
+                text,
+                mutator_kind=mutator_kind,
+                rng=rng,
+            )
+        )
     ops.update(
         {
             "byte_bit_flip": _wrap_byte_mutator(bit_flip),

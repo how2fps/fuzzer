@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
 from dataclasses import dataclass, field
@@ -136,6 +137,8 @@ class RunDashboard:
     covered_branches_total: int = 0
     total_branches: int = 0
     unique_covered_arcs: int = 0
+    coverage_backend: str = ""
+    qemu_bitmap_slots_total: int = 0
     scheduler_size: int = 0
     queue_size: int = 0
     pending_jobs: int = 0
@@ -156,6 +159,58 @@ class RunDashboard:
 
     def __post_init__(self) -> None:
         self.active_workers = self.configured_workers
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "target": self.target,
+            "results_folder": self.results_folder,
+            "status": self.status,
+            "total_results": self.total_results,
+            "interesting_results": self.interesting_results,
+            "crashes_found": self.crashes_found,
+            "timeouts_found": self.timeouts_found,
+            "errors_found": self.errors_found,
+            "unique_bugs_found": self.unique_bugs_found,
+            "covered_branches_total": self.covered_branches_total,
+            "total_branches": self.total_branches,
+            "unique_covered_arcs": self.unique_covered_arcs,
+            "coverage_backend": self.coverage_backend,
+            "qemu_bitmap_slots_total": self.qemu_bitmap_slots_total,
+            "scheduler_size": self.scheduler_size,
+            "queue_size": self.queue_size,
+            "pending_jobs": self.pending_jobs,
+            "active_workers": self.active_workers,
+            "busy_workers": self.busy_workers,
+            "last_event": self.last_event,
+            "last_mutated_input": self.last_mutated_input,
+            "newest_coverage_branch": self.newest_coverage_branch,
+            "memory_rss_total": self.memory_rss_total,
+            "memory_rss_details": self.memory_rss_details,
+            "crash_output": self.crash_output,
+            "llm_state": self.llm_state,
+            "llm_source": self.llm_source,
+            "llm_generated_count": self.llm_generated_count,
+            "llm_seed_previews": list(self.llm_seed_previews),
+            "max_iterations": self.max_iterations,
+            "max_hours": self.max_hours,
+            "elapsed_seconds": self._elapsed_seconds(),
+            "exec_per_second": self._exec_rate(),
+        }
+
+    def save_artifacts(self, dest_dir: Path | str) -> tuple[Path, Path]:
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        snapshot_path = dest / "final_dashboard_stats.json"
+        text_path = dest / "final_dashboard.txt"
+
+        with snapshot_path.open("w", encoding="utf-8") as handle:
+            json.dump(self.snapshot(), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+
+        export_console = Console(record=True, width=180)
+        export_console.print(self.render())
+        text_path.write_text(export_console.export_text(), encoding="utf-8")
+        return snapshot_path, text_path
 
     def _elapsed_seconds(self) -> float:
         return max(0.0, time.monotonic() - self.started_at)
@@ -251,6 +306,7 @@ class RunDashboard:
         new_bug: bool,
         covered_branches: int,
         total_branches: int = 0,
+        coverage_backend: str = "",
         unique_covered_arcs: int,
         pending_jobs: int,
         scheduler_size: int,
@@ -269,6 +325,10 @@ class RunDashboard:
         self.covered_branches_total = max(0, int(covered_branches))
         self.total_branches = max(self.total_branches, max(0, int(total_branches)))
         self.unique_covered_arcs = max(0, int(unique_covered_arcs))
+        if coverage_backend:
+            self.coverage_backend = coverage_backend
+        if self.coverage_backend == "afl-qemu-showmap":
+            self.qemu_bitmap_slots_total = max(0, int(unique_covered_arcs))
 
         if score >= self.interesting_score_threshold:
             self.interesting_results += 1
@@ -338,6 +398,8 @@ class RunDashboard:
             covered_branches_text = (
                 f"{self.covered_branches_total} / {self.total_branches} ({ratio:.1f}%)"
             )
+        elif self.coverage_backend == "afl-qemu-showmap":
+            covered_branches_text = "n/a (QEMU)"
         values = [
             ("Status", self._status_text()),
             ("Exec/s", Text(f"{self._exec_rate():.1f}", style="bold white")),
@@ -371,6 +433,20 @@ class RunDashboard:
                 ),
             ),
         ]
+        if self.coverage_backend == "afl-qemu-showmap":
+            values.append(
+                (
+                    "QEMU Bitmap Slots",
+                    Text(
+                        str(self.qemu_bitmap_slots_total),
+                        style=(
+                            "bold magenta"
+                            if self.qemu_bitmap_slots_total
+                            else "dim"
+                        ),
+                    ),
+                )
+            )
         for _ in values:
             table.add_column(justify="center")
         table.add_row(
@@ -441,6 +517,20 @@ class RunDashboard:
             "",
             "",
         )
+        if self.coverage_backend:
+            table.add_row(
+                Text("Coverage Backend", style="dim"),
+                self.coverage_backend,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            )
         return table
 
     def _memory_panel(self) -> Panel | None:

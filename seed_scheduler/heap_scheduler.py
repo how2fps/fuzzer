@@ -174,8 +174,10 @@ class HeapScheduler(BaseSeedScheduler):
         return ready_ids
 
     def _should_warm_start(self, metadata: dict[str, Any]) -> bool:
-        return self._startup_min_batches_per_seed > 0 and bool(
-            metadata.get("startup_preloaded")
+        if self._startup_min_batches_per_seed <= 0:
+            return False
+        return bool(
+            metadata.get("startup_preloaded") or metadata.get("parent_seed_id")
         )
 
     def _push_heap(self, item: ScheduledSeed) -> None:

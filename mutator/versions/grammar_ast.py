@@ -19,6 +19,7 @@ import copy
 import json
 import random
 import re
+from collections.abc import Sequence as SequenceCollection
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -28,6 +29,8 @@ from .lib import resolve_ast_grammar_spec, runtime_grammar_version
 _PRINTABLE_ASCII = [chr(code) for code in range(32, 127)]
 _GRAMMAR_RULES_FILE: str | None = None
 _DEFAULT_MAX_GENERATION_DEPTH = 5
+_MAX_PARTIAL_PARSE_POSITIONS = 192
+_MAX_REPEAT_BOUNDARY_COUNT = 64
 
 
 def _normalize_rule_name(name: str) -> str:
@@ -132,6 +135,16 @@ class ParseTreeNode(SeedTreeNode):
         if self.kind in {"alternation", "ref"}:
             return self.children[0].to_text() if self.children else self.text
         return self.text
+
+
+@dataclass(frozen=True)
+class PartialParseMatch:
+    """Best-effort partial match used to salvage structure from invalid seeds."""
+
+    rule_name: str
+    tree: ParseTreeNode
+    start: int
+    end: int
 
 class Literal(Node):
     """A fixed terminal string in the grammar."""
@@ -636,6 +649,75 @@ class Grammar:
         rng.choice(pool).mutate(self.rules, rng)
 
 
+def _ordered_unique_ints(values: SequenceCollection[int]) -> tuple[int, ...]:
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return tuple(ordered)
+
+
+def _ordered_unique_strings(values: SequenceCollection[str]) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return tuple(ordered)
+
+
+def _numberrange_boundary_candidates(
+    text: str,
+    grammar_node: Node | None,
+) -> tuple[str, ...]:
+    if not isinstance(grammar_node, NumberRange) or not grammar_node.is_int:
+        return ()
+    try:
+        value = int(text)
+    except ValueError:
+        return ()
+
+    low = int(min(grammar_node.min_val, grammar_node.max_val))
+    high = int(max(grammar_node.min_val, grammar_node.max_val))
+    digit_width = max(
+        1,
+        len(str(abs(value))),
+        len(str(abs(low))),
+        len(str(abs(high))),
+    )
+    amplified_width = min(max(digit_width + 1, 2), 18)
+    amplified_value = int("9" * amplified_width)
+
+    pivot = max(abs(value), abs(low), abs(high), 1)
+    zero_padded = str(pivot).rjust(min(max(digit_width + 1, 2), 8), "0")
+    stretched = str(pivot) + ("0" * min(4, max(1, digit_width // 2 or 1)))
+
+    candidates = _ordered_unique_strings(
+        (
+            str(low),
+            str(high),
+            str(low - 1),
+            str(high + 1),
+            "0",
+            "1",
+            "-1",
+            str(amplified_value),
+            str(-amplified_value),
+            zero_padded,
+            stretched,
+            str(abs(value)) if value < 0 else str(-abs(value)) if value > 0 else "",
+            f"-{zero_padded}" if (low < 0 or value < 0) else "",
+            f"-{stretched}" if (low < 0 or value < 0) else "",
+        )
+    )
+    return tuple(candidate for candidate in candidates if candidate and candidate != text)
+
+
 def _mutate_numberrange_text(
     text: str,
     grammar_node: Node | None,
@@ -646,11 +728,13 @@ def _mutate_numberrange_text(
         value = int(text)
     except ValueError:
         return text
-    if isinstance(grammar_node, NumberRange):
-        if rng.random() < 0.7:
-            low = int(min(grammar_node.min_val, grammar_node.max_val))
-            high = int(max(grammar_node.min_val, grammar_node.max_val))
-            return str(rng.randint(low, high))
+    boundary_candidates = _numberrange_boundary_candidates(text, grammar_node)
+    if boundary_candidates:
+        return rng.choice(list(boundary_candidates))
+    if isinstance(grammar_node, NumberRange) and grammar_node.is_int:
+        low = int(min(grammar_node.min_val, grammar_node.max_val))
+        high = int(max(grammar_node.min_val, grammar_node.max_val))
+        return str(rng.randint(low, high))
     return str(value + rng.randint(-8, 8))
 
 
@@ -723,7 +807,7 @@ def _mutate_repeat_parse_node(
         if node.children:
             rng.choice(node.children).mutate_self(rng, grammar)
         return
-    action = rng.choice(["add", "drop", "duplicate", "mutate_child"])
+    action = rng.choice(["add", "drop", "duplicate", "mutate_child", "amplify_boundary"])
     if action == "add":
         node.children.insert(
             rng.randrange(len(node.children) + 1),
@@ -734,6 +818,24 @@ def _mutate_repeat_parse_node(
     elif action == "duplicate" and node.children:
         child = copy.deepcopy(rng.choice(node.children))
         node.children.insert(rng.randrange(len(node.children) + 1), child)
+    elif action == "amplify_boundary":
+        target_counts = _repeat_boundary_target_counts(
+            node=node.grammar_node,
+            current_count=len(node.children),
+        )
+        if target_counts:
+            _resize_repeat_children(
+                node=node,
+                target_count=rng.choice(list(target_counts)),
+                rng=rng,
+                grammar=grammar,
+            )
+        elif node.children:
+            rng.choice(node.children).mutate_self(rng, grammar)
+        else:
+            node.children.append(
+                _generate_parse_subtree_from_node(node.grammar_node.node, grammar, rng)
+            )
     elif node.children:
         rng.choice(node.children).mutate_self(rng, grammar)
     else:
@@ -758,6 +860,51 @@ def _mutate_ref_parse_node(
     elif node.children:
         node.children[0].mutate_self(rng, grammar)
     node.text = node.to_text()
+
+
+def _repeat_boundary_target_counts(
+    *,
+    node: Repeat,
+    current_count: int,
+) -> tuple[int, ...]:
+    low = min(node.min_r, node.max_r)
+    high = max(node.min_r, node.max_r)
+    hard_cap = min(
+        _MAX_REPEAT_BOUNDARY_COUNT,
+        max(high + 1, current_count + 1, current_count * 4 if current_count else 0, 8),
+    )
+    candidates = _ordered_unique_ints(
+        (
+            max(0, low - 1),
+            low,
+            min(high, hard_cap),
+            min(high + 1, hard_cap),
+            max(0, current_count - 1),
+            min(current_count + 1, hard_cap),
+            min(max(current_count * 2, current_count + 2), hard_cap),
+            min(max(current_count * 4, current_count + 4), hard_cap),
+            *(bucket for bucket in (0, 1, 2, 3, 4, 8, 16, 32, 64) if bucket <= hard_cap),
+        )
+    )
+    return tuple(count for count in candidates if count != current_count)
+
+
+def _resize_repeat_children(
+    *,
+    node: ParseTreeNode,
+    target_count: int,
+    rng: random.Random,
+    grammar: Grammar,
+) -> None:
+    if not isinstance(node.grammar_node, Repeat):
+        return
+    while node.children and len(node.children) > target_count:
+        node.children.pop(rng.randrange(len(node.children)))
+    while len(node.children) < target_count:
+        node.children.insert(
+            rng.randrange(len(node.children) + 1),
+            _generate_parse_subtree_from_node(node.grammar_node.node, grammar, rng),
+        )
 
 
 def _match_exact_node(*, node: Node, text: str, grammar: Grammar) -> ParseTreeNode | None:
@@ -926,6 +1073,358 @@ def _match_repeat_node(
     return results
 
 
+_TEXT_SHAPE_COVERAGE_ITEMS: tuple[str, ...] = (
+    "textshape:len:0",
+    "textshape:len:1",
+    "textshape:len:2-3",
+    "textshape:len:4-7",
+    "textshape:len:8-15",
+    "textshape:len:16+",
+    "textshape:content:empty",
+    "textshape:content:nonempty",
+    "textshape:content:digit",
+    "textshape:content:alpha",
+    "textshape:content:lower",
+    "textshape:content:upper",
+    "textshape:content:space",
+    "textshape:content:punct",
+)
+
+
+def _coverage_site_label(base: str, segment: str) -> str:
+    if not base:
+        return segment
+    return f"{base}_{segment}"
+
+
+def _coverage_site_field(site_label: str) -> str:
+    return site_label or "body"
+
+
+def _repeat_count_bucket(count: int) -> str:
+    if count >= 3:
+        return "3+"
+    return str(max(0, count))
+
+
+def _repeat_bucket_values(node: Repeat) -> tuple[str, ...]:
+    low = min(node.min_r, node.max_r)
+    high = max(node.min_r, node.max_r)
+    buckets: list[str] = []
+    if low <= 0 <= high:
+        buckets.append("0")
+    if low <= 1 <= high:
+        buckets.append("1")
+    if low <= 2 <= high:
+        buckets.append("2")
+    if high >= 3:
+        buckets.append("3+")
+    return tuple(buckets)
+
+
+def _depth_bucket(depth: int) -> str:
+    if depth >= 2:
+        return "2+"
+    return str(max(0, depth))
+
+
+def _text_length_bucket(length: int) -> str:
+    if length <= 0:
+        return "0"
+    if length == 1:
+        return "1"
+    if length <= 3:
+        return "2-3"
+    if length <= 7:
+        return "4-7"
+    if length <= 15:
+        return "8-15"
+    return "16+"
+
+
+def _text_shape_items(text: str) -> set[str]:
+    items = {
+        f"textshape:len:{_text_length_bucket(len(text))}",
+        "textshape:content:nonempty" if text else "textshape:content:empty",
+    }
+    if any(char.isdigit() for char in text):
+        items.add("textshape:content:digit")
+    if any(char.isalpha() for char in text):
+        items.add("textshape:content:alpha")
+    if any(char.islower() for char in text):
+        items.add("textshape:content:lower")
+    if any(char.isupper() for char in text):
+        items.add("textshape:content:upper")
+    if any(char.isspace() for char in text):
+        items.add("textshape:content:space")
+    if any(not char.isalnum() and not char.isspace() for char in text):
+        items.add("textshape:content:punct")
+    return items
+
+
+def _charclass_categories(chars: SequenceCollection[str]) -> tuple[str, ...]:
+    categories: list[str] = []
+    joined = "".join(chars)
+    if any(char.isdigit() for char in joined):
+        categories.append("digit")
+    if any(char.isalpha() for char in joined):
+        categories.append("alpha")
+    if any(char.islower() for char in joined):
+        categories.append("lower")
+    if any(char.isupper() for char in joined):
+        categories.append("upper")
+    if any(char.isspace() for char in joined):
+        categories.append("space")
+    if any(not char.isalnum() and not char.isspace() for char in joined):
+        categories.append("punct")
+    return tuple(categories)
+
+
+def _available_number_buckets(node: NumberRange) -> tuple[str, ...]:
+    if not node.is_int:
+        return ()
+    low = int(min(node.min_val, node.max_val))
+    high = int(max(node.min_val, node.max_val))
+    buckets: list[str] = ["min", "max"]
+    if low <= 0 <= high:
+        buckets.append("zero")
+    if low < 0:
+        buckets.append("negative")
+    if high > 0:
+        buckets.append("positive")
+    return tuple(dict.fromkeys(buckets))
+
+
+def _number_boundary_items(
+    *,
+    owner_rule: str,
+    owner_variant: str,
+    site_label: str,
+    text: str,
+    node: NumberRange | None,
+) -> set[str]:
+    if node is None or not node.is_int:
+        return set()
+    try:
+        value = int(text)
+    except ValueError:
+        return set()
+    low = int(min(node.min_val, node.max_val))
+    high = int(max(node.min_val, node.max_val))
+    item_prefix = (
+        f"number:{owner_rule}:{owner_variant}:{_coverage_site_field(site_label)}"
+    )
+    items: set[str] = set()
+    if value == low:
+        items.add(f"{item_prefix}:min")
+    if value == high:
+        items.add(f"{item_prefix}:max")
+    if value == 0:
+        items.add(f"{item_prefix}:zero")
+    if value < 0:
+        items.add(f"{item_prefix}:negative")
+    if value > 0:
+        items.add(f"{item_prefix}:positive")
+    return items
+
+
+def _append_ordered_coverage_item(
+    ordered_items: list[str],
+    seen_items: set[str],
+    item: str,
+) -> None:
+    if item in seen_items:
+        return
+    seen_items.add(item)
+    ordered_items.append(item)
+
+
+def _rule_variant_nodes(rule_node: Node) -> list[tuple[str, Node]]:
+    if isinstance(rule_node, Alternation):
+        return [(str(index), option) for index, option in enumerate(rule_node.options)]
+    return [("body", rule_node)]
+
+
+def _collect_available_items_from_rule_node(
+    *,
+    owner_rule: str,
+    owner_variant: str,
+    node: Node,
+    grammar: Grammar,
+    ordered_items: list[str],
+    seen_items: set[str],
+    site_label: str = "",
+) -> None:
+    site_field = _coverage_site_field(site_label)
+    if isinstance(node, Ref):
+        child_rule_name = _normalize_rule_name(node.name)
+        child_rule = grammar.rules.get(child_rule_name)
+        if isinstance(child_rule, Alternation):
+            for option_index in range(len(child_rule.options)):
+                _append_ordered_coverage_item(
+                    ordered_items,
+                    seen_items,
+                    (
+                        f"site:{owner_rule}:{owner_variant}:{site_field}:"
+                        f"{child_rule_name}:{option_index}"
+                    ),
+                )
+        return
+    if isinstance(node, Sequence):
+        for index, child in enumerate(node.nodes):
+            _collect_available_items_from_rule_node(
+                owner_rule=owner_rule,
+                owner_variant=owner_variant,
+                node=child,
+                grammar=grammar,
+                ordered_items=ordered_items,
+                seen_items=seen_items,
+                site_label=_coverage_site_label(site_label, f"slot{index}"),
+            )
+        return
+    if isinstance(node, Repeat):
+        for bucket in _repeat_bucket_values(node):
+            _append_ordered_coverage_item(
+                ordered_items,
+                seen_items,
+                f"repeat:{owner_rule}:{owner_variant}:{site_field}:{bucket}",
+            )
+        _collect_available_items_from_rule_node(
+            owner_rule=owner_rule,
+            owner_variant=owner_variant,
+            node=node.node,
+            grammar=grammar,
+            ordered_items=ordered_items,
+            seen_items=seen_items,
+            site_label=_coverage_site_label(site_label, "item"),
+        )
+        return
+    if isinstance(node, Alternation):
+        for option in node.options:
+            _collect_available_items_from_rule_node(
+                owner_rule=owner_rule,
+                owner_variant=owner_variant,
+                node=option,
+                grammar=grammar,
+                ordered_items=ordered_items,
+                seen_items=seen_items,
+                site_label=site_label,
+            )
+        return
+    if isinstance(node, CharClass):
+        for category in _charclass_categories(node.chars):
+            _append_ordered_coverage_item(
+                ordered_items,
+                seen_items,
+                f"charclass:{owner_rule}:{owner_variant}:{site_field}:{category}",
+            )
+        return
+    if isinstance(node, NumberRange):
+        for bucket in _available_number_buckets(node):
+            _append_ordered_coverage_item(
+                ordered_items,
+                seen_items,
+                f"number:{owner_rule}:{owner_variant}:{site_field}:{bucket}",
+            )
+        return
+
+
+def _parse_tree_variant_label(tree: ParseTreeNode, rule_node: Node) -> str:
+    if isinstance(rule_node, Alternation) and tree.choice_index is not None:
+        return str(tree.choice_index)
+    return "body"
+
+
+def _collect_dynamic_items_from_rule_tree(
+    *,
+    tree: ParseTreeNode,
+    rule_name: str,
+    grammar: Grammar,
+    items: set[str],
+    active_rule_counts: dict[str, int],
+) -> None:
+    normalized_rule_name = _normalize_rule_name(rule_name)
+    rule_node = grammar.rules.get(normalized_rule_name)
+    if rule_node is None:
+        return
+
+    owner_variant = _parse_tree_variant_label(tree, rule_node)
+    if isinstance(rule_node, Alternation) and tree.choice_index is not None:
+        items.add(f"production:{normalized_rule_name}:{tree.choice_index}")
+
+    next_counts = dict(active_rule_counts)
+    current_depth = next_counts.get(normalized_rule_name, 0)
+    if normalized_rule_name in grammar.recursive_rule_names:
+        items.add(f"depth:{normalized_rule_name}:{_depth_bucket(current_depth)}")
+        next_counts[normalized_rule_name] = current_depth + 1
+
+    def _visit(node: ParseTreeNode, site_label: str) -> None:
+        site_field = _coverage_site_field(site_label)
+        if node.kind == "ref":
+            child_rule_name = (
+                _normalize_rule_name(node.ref_name) if node.ref_name is not None else ""
+            )
+            child = node.children[0] if node.children else None
+            child_rule = grammar.rules.get(child_rule_name)
+            if (
+                child is not None
+                and child_rule_name
+                and isinstance(child_rule, Alternation)
+                and child.choice_index is not None
+            ):
+                items.add(
+                    (
+                        f"site:{normalized_rule_name}:{owner_variant}:{site_field}:"
+                        f"{child_rule_name}:{child.choice_index}"
+                    )
+                )
+            if child is not None and child_rule_name:
+                _collect_dynamic_items_from_rule_tree(
+                    tree=child,
+                    rule_name=child_rule_name,
+                    grammar=grammar,
+                    items=items,
+                    active_rule_counts=next_counts,
+                )
+            return
+        if node.kind == "sequence":
+            for index, child in enumerate(node.children):
+                _visit(child, _coverage_site_label(site_label, f"slot{index}"))
+            return
+        if node.kind == "repeat":
+            items.add(
+                f"repeat:{normalized_rule_name}:{owner_variant}:{site_field}:{_repeat_count_bucket(len(node.children))}"
+            )
+            for child in node.children:
+                _visit(child, _coverage_site_label(site_label, "item"))
+            return
+        if node.kind == "alternation":
+            if node.children:
+                _visit(node.children[0], site_label)
+            return
+        if node.kind == "charclass":
+            for category in _charclass_categories((node.text,)):
+                items.add(
+                    f"charclass:{normalized_rule_name}:{owner_variant}:{site_field}:{category}"
+                )
+            return
+        if node.kind == "numberrange":
+            items.update(
+                _number_boundary_items(
+                    owner_rule=normalized_rule_name,
+                    owner_variant=owner_variant,
+                    site_label=site_label,
+                    text=node.text,
+                    node=node.grammar_node if isinstance(node.grammar_node, NumberRange) else None,
+                )
+            )
+            return
+        for child in node.children:
+            _visit(child, site_label)
+
+    _visit(tree, "")
+
+
 def _normalize_coverage_item_name(name: str) -> str:
     if name.startswith("rule:"):
         return f"rule:{_normalize_rule_name(name[5:])}"
@@ -933,6 +1432,32 @@ def _normalize_coverage_item_name(name: str) -> str:
         parts = name.split(":", 2)
         if len(parts) == 3 and parts[1]:
             return f"production:{_normalize_rule_name(parts[1])}:{parts[2]}"
+    if name.startswith("site:"):
+        parts = name.split(":")
+        if len(parts) == 6 and parts[1] and parts[4]:
+            return (
+                f"site:{_normalize_rule_name(parts[1])}:{parts[2]}:{parts[3]}:"
+                f"{_normalize_rule_name(parts[4])}:{parts[5]}"
+            )
+    if name.startswith("depth:"):
+        parts = name.split(":", 2)
+        if len(parts) == 3 and parts[1]:
+            return f"depth:{_normalize_rule_name(parts[1])}:{parts[2]}"
+    if name.startswith("repeat:"):
+        parts = name.split(":", 4)
+        if len(parts) == 5 and parts[1]:
+            return f"repeat:{_normalize_rule_name(parts[1])}:{parts[2]}:{parts[3]}:{parts[4]}"
+    if name.startswith("charclass:"):
+        parts = name.split(":", 4)
+        if len(parts) == 5 and parts[1]:
+            return (
+                f"charclass:{_normalize_rule_name(parts[1])}:"
+                f"{parts[2]}:{parts[3]}:{parts[4]}"
+            )
+    if name.startswith("number:"):
+        parts = name.split(":", 4)
+        if len(parts) == 5 and parts[1]:
+            return f"number:{_normalize_rule_name(parts[1])}:{parts[2]}:{parts[3]}:{parts[4]}"
     return name
 
 
@@ -943,6 +1468,26 @@ def _coverage_item_rule_name(item: str) -> str | None:
     if normalized.startswith("production:"):
         parts = normalized.split(":", 2)
         if len(parts) == 3 and parts[1]:
+            return parts[1]
+    if normalized.startswith("site:"):
+        parts = normalized.split(":")
+        if len(parts) == 6 and parts[4]:
+            return parts[4]
+    if normalized.startswith("depth:"):
+        parts = normalized.split(":", 2)
+        if len(parts) == 3 and parts[1]:
+            return parts[1]
+    if normalized.startswith("repeat:"):
+        parts = normalized.split(":", 4)
+        if len(parts) == 5 and parts[1]:
+            return parts[1]
+    if normalized.startswith("charclass:"):
+        parts = normalized.split(":", 4)
+        if len(parts) == 5 and parts[1]:
+            return parts[1]
+    if normalized.startswith("number:"):
+        parts = normalized.split(":", 4)
+        if len(parts) == 5 and parts[1]:
             return parts[1]
     return None
 
@@ -1039,9 +1584,24 @@ def _alternation_preference_score(
         if rule_name is not None
     }
     if not preferred_rule_names:
-        return score
+        preferred_rule_names = set()
 
     reachable = _reachable_rule_names_from_node(option, grammar=grammar)
+    if current_rule_name is not None:
+        normalized_current_rule = _normalize_rule_name(current_rule_name)
+        for item in preferred_coverage_items:
+            if not item.startswith("site:"):
+                continue
+            parts = item.split(":")
+            if len(parts) != 6:
+                continue
+            parent_rule, parent_variant, _slot, child_rule, child_variant = parts[1:]
+            if normalized_current_rule == parent_rule and str(option_index) == parent_variant:
+                score += 600
+                if child_rule in reachable:
+                    score += 200
+            if normalized_current_rule == child_rule and str(option_index) == child_variant:
+                score += 900
     if current_rule_name is not None and current_rule_name in preferred_rule_names:
         score += 100
     score += len(reachable & preferred_rule_names) * 10
@@ -1210,27 +1770,14 @@ def _collect_coverage_items_from_parse_tree(
     root_rule_name: str,
     grammar: Grammar,
 ) -> set[str]:
-    items = {f"rule:{_normalize_rule_name(root_rule_name)}"}
-    normalized_root_rule = _normalize_rule_name(root_rule_name)
-    root_node = grammar.rules.get(normalized_root_rule)
-    if isinstance(root_node, Alternation) and tree.choice_index is not None:
-        items.add(f"production:{normalized_root_rule}:{tree.choice_index}")
-
-    def _visit(node: ParseTreeNode) -> None:
-        if node.ref_name:
-            normalized_ref_name = _normalize_rule_name(node.ref_name)
-            items.add(f"rule:{normalized_ref_name}")
-            child = node.children[0] if node.children else None
-            if (
-                child is not None
-                and child.choice_index is not None
-                and isinstance(grammar.rules.get(normalized_ref_name), Alternation)
-            ):
-                items.add(f"production:{normalized_ref_name}:{child.choice_index}")
-        for child in node.children:
-            _visit(child)
-
-    _visit(tree)
+    items = set(_text_shape_items(tree.to_text()))
+    _collect_dynamic_items_from_rule_tree(
+        tree=tree,
+        rule_name=root_rule_name,
+        grammar=grammar,
+        items=items,
+        active_rule_counts={},
+    )
     return items
 
 
@@ -1278,17 +1825,149 @@ def _exact_parse_profile(
     return (best_match[1], best_match[2])
 
 
+def _partial_parse_start_positions(
+    text: str,
+    *,
+    limit: int = _MAX_PARTIAL_PARSE_POSITIONS,
+) -> list[int]:
+    if not text:
+        return []
+    if len(text) <= 64:
+        return list(range(len(text)))
+
+    ordered: list[int] = []
+    seen: set[int] = set()
+
+    def _record(position: int) -> None:
+        if position < 0 or position >= len(text) or position in seen:
+            return
+        seen.add(position)
+        ordered.append(position)
+
+    _record(0)
+    for position in range(1, min(len(text), 24)):
+        _record(position)
+    for position in range(max(1, len(text) - 24), len(text)):
+        _record(position)
+
+    for position in range(1, len(text)):
+        prev_char = text[position - 1]
+        current_char = text[position]
+        if (
+            prev_char.isspace() != current_char.isspace()
+            or prev_char.isalnum() != current_char.isalnum()
+            or not prev_char.isalnum()
+            or not current_char.isalnum()
+        ):
+            _record(position)
+
+    if len(ordered) <= limit:
+        return ordered
+
+    sampled: list[int] = []
+    sampled_seen: set[int] = set()
+
+    def _record_sample(position: int) -> None:
+        if position in sampled_seen or position < 0 or position >= len(text):
+            return
+        sampled_seen.add(position)
+        sampled.append(position)
+
+    stride = max(1, len(ordered) // limit)
+    for position in ordered[::stride]:
+        _record_sample(position)
+        if len(sampled) >= max(1, limit - 1):
+            break
+    _record_sample(len(text) - 1)
+    return sampled
+
+
+def _partial_parse_profile(
+    *,
+    text: str,
+    grammar: Grammar,
+    requested_start_rule: str,
+) -> PartialParseMatch | None:
+    if not text:
+        return None
+
+    normalized_start_rule = _normalize_rule_name(requested_start_rule)
+    candidate_rules = _candidate_start_rules(grammar, normalized_start_rule)
+    candidate_positions = _partial_parse_start_positions(text)
+    best_match: tuple[tuple[int, int, int, int, int, int], PartialParseMatch] | None = None
+
+    for order, candidate_rule in enumerate(candidate_rules):
+        rule_node = grammar.rules[candidate_rule]
+        memo: dict[tuple[int, int], list[tuple[ParseTreeNode, int]]] = {}
+        complexity = _rule_complexity(rule_node)
+        for start in candidate_positions:
+            for matched, end in _match_node(
+                node=rule_node,
+                text=text,
+                pos=start,
+                grammar=grammar,
+                memo=memo,
+            ):
+                if end <= start:
+                    continue
+                span = end - start
+                edge_touches = int(start == 0) + int(end == len(text))
+                score = (
+                    span,
+                    edge_touches,
+                    -_parse_tree_root_wrapper_depth(matched),
+                    complexity,
+                    -order,
+                    -start,
+                )
+                partial_match = PartialParseMatch(
+                    rule_name=candidate_rule,
+                    tree=matched,
+                    start=start,
+                    end=end,
+                )
+                if best_match is None or score > best_match[0]:
+                    best_match = (score, partial_match)
+
+    if best_match is None:
+        return None
+    return best_match[1]
+
+
 def available_coverage_items(*, mutator_kind: str = "grammar") -> list[str]:
     """Return ordered grammar coverage items reachable from the default start rule."""
     grammar = _resolved_base_grammar(mutator_kind=mutator_kind)
     start_rule = _default_start_rule(grammar)
     ordered_items: list[str] = []
+    seen_items: set[str] = set()
     for rule_name in _collect_reachable_rule_names(grammar=grammar, start_rule=start_rule):
-        ordered_items.append(f"rule:{rule_name}")
         rule_node = grammar.rules.get(rule_name)
-        if isinstance(rule_node, Alternation):
-            for option_index in range(len(rule_node.options)):
-                ordered_items.append(f"production:{rule_name}:{option_index}")
+        if rule_node is None:
+            continue
+        if rule_name in grammar.recursive_rule_names:
+            for bucket in ("0", "1", "2+"):
+                _append_ordered_coverage_item(
+                    ordered_items,
+                    seen_items,
+                    f"depth:{rule_name}:{bucket}",
+                )
+        for variant_label, variant_node in _rule_variant_nodes(rule_node):
+            if variant_label != "body":
+                _append_ordered_coverage_item(
+                    ordered_items,
+                    seen_items,
+                    f"production:{rule_name}:{variant_label}",
+                )
+            _collect_available_items_from_rule_node(
+                owner_rule=rule_name,
+                owner_variant=variant_label,
+                node=variant_node,
+                grammar=grammar,
+                ordered_items=ordered_items,
+                seen_items=seen_items,
+            )
+    for item in _TEXT_SHAPE_COVERAGE_ITEMS:
+        _append_ordered_coverage_item(ordered_items, seen_items, item)
     return ordered_items
 
 
@@ -1297,7 +1976,7 @@ def coverage_items_for_text(
     text: str,
     mutator_kind: str = "grammar",
 ) -> set[str]:
-    """Return covered grammar rules and top-level productions for one input text."""
+    """Return covered grammar productions and richer structural buckets for one input."""
     if not text:
         return set()
     grammar = _resolved_base_grammar(mutator_kind=mutator_kind)
@@ -1319,7 +1998,20 @@ def coverage_items_for_text(
         requested_start_rule=start_rule,
     )
     if parse_profile is None:
-        return set()
+        partial_match = _partial_parse_profile(
+            text=text,
+            grammar=grammar,
+            requested_start_rule=start_rule,
+        )
+        if partial_match is None:
+            return set()
+        partial_items = _collect_coverage_items_from_parse_tree(
+            tree=partial_match.tree,
+            root_rule_name=partial_match.rule_name,
+            grammar=grammar,
+        )
+        partial_items.update(_text_shape_items(text))
+        return partial_items
     matched_rule_name, tree = parse_profile
     return _collect_coverage_items_from_parse_tree(
         tree=tree,
@@ -1440,6 +2132,45 @@ def _mutate_parse_tree(
         return node
 
     return _replace(tree)
+
+
+def _mutate_partial_parse_match(
+    *,
+    original_text: str,
+    partial_match: PartialParseMatch,
+    rng: random.Random,
+    grammar: Grammar,
+    min_mutation_rounds: int,
+    max_mutation_rounds: int,
+) -> str | None:
+    last_candidate: str | None = None
+    for _attempt in range(8):
+        tree = copy.deepcopy(partial_match.tree)
+        for _ in range(rng.randint(min_mutation_rounds, max_mutation_rounds)):
+            tree = _mutate_parse_tree(tree, rng, grammar)
+        candidate = (
+            original_text[: partial_match.start]
+            + tree.to_text()
+            + original_text[partial_match.end :]
+        )
+        last_candidate = candidate
+        if candidate != original_text:
+            return candidate
+
+    if partial_match.rule_name in grammar.rules:
+        replacement = _generate_parse_subtree_from_node(
+            grammar.rules[partial_match.rule_name],
+            grammar,
+            rng,
+        ).to_text()
+        candidate = (
+            original_text[: partial_match.start]
+            + replacement
+            + original_text[partial_match.end :]
+        )
+        if candidate != original_text:
+            return candidate
+    return last_candidate if last_candidate != original_text else None
 
 
 def _collect_direct_ref_names(node: Node) -> set[str]:
@@ -1623,6 +2354,22 @@ def mutate_from_rule(
                 if mutated_text != text:
                     return mutated_text
             return tree.to_text()
+        partial_match = _partial_parse_profile(
+            text=text,
+            grammar=base,
+            requested_start_rule=normalized_start_rule,
+        )
+        if partial_match is not None:
+            salvaged = _mutate_partial_parse_match(
+                original_text=text,
+                partial_match=partial_match,
+                rng=rng,
+                grammar=base,
+                min_mutation_rounds=min_mutation_rounds,
+                max_mutation_rounds=max_mutation_rounds,
+            )
+            if salvaged is not None:
+                return salvaged
     preferred = _expand_preferred_rules(base, preferred_rule_names or [])
     grammar = copy.deepcopy(base)
     for _ in range(rng.randint(min_mutation_rounds, max_mutation_rounds)):
@@ -1673,10 +2420,30 @@ def mutate(
             mutation_rounds = rng.randint(1, 5)
             for _ in range(mutation_rounds):
                 tree = _mutate_parse_tree(tree, rng, base)
-            mutated_text = tree.to_text()
+                mutated_text = tree.to_text()
             if mutated_text != text:
                 return mutated_text
         return tree.to_text()
+    partial_match = (
+        _partial_parse_profile(
+            text=text,
+            grammar=base,
+            requested_start_rule=start_rule,
+        )
+        if text
+        else None
+    )
+    if partial_match is not None:
+        salvaged = _mutate_partial_parse_match(
+            original_text=text,
+            partial_match=partial_match,
+            rng=rng,
+            grammar=base,
+            min_mutation_rounds=1,
+            max_mutation_rounds=5,
+        )
+        if salvaged is not None:
+            return salvaged
     grammar = copy.deepcopy(base)
     mutation_rounds = rng.randint(1, 5)
     for _ in range(mutation_rounds):

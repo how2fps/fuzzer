@@ -9,7 +9,7 @@ Use:
 ```python
 from seed_scheduler import make_scheduler
 
-scheduler = make_scheduler("ucb_tree", ucb_c=1.0, max_seeds_per_leaf=8)
+scheduler = make_scheduler("ucb_tree", ucb_c=1.0, max_seeds_per_leaf=16)
 ```
 
 ## What it stores

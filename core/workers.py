@@ -50,6 +50,135 @@ from seed_scheduler import (
 _BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
 
 
+def _mutate_with_exponential_chaining(
+    *,
+    seed_text: str,
+    mutate_fn: Callable[..., str],
+    mutator_kind: str,
+    rng: random.Random,
+    continue_probability: float,
+    max_depth: int,
+) -> str:
+    """
+    Mutate at least once, then keep mutating the latest child with geometric decay.
+
+    With a fixed `continue_probability`, the probability of reaching depth `d`
+    falls off exponentially as `continue_probability ** (d - 1)`.
+    """
+    candidate = seed_text
+    for depth in range(max(1, max_depth)):
+        candidate = mutate_fn(
+            candidate,
+            mutator_kind=mutator_kind,
+            rng=rng,
+        )
+        if depth + 1 >= max_depth:
+            break
+        if continue_probability <= 0.0 or rng.random() >= continue_probability:
+            break
+    return candidate
+
+
+def _build_execution_batch(
+    *,
+    item: ScheduledSeed,
+    n: int,
+    target: str,
+    conn_thread: sqlite3.Connection,
+    generate_mutation_batch: Callable[..., list[tuple[str, float]]],
+) -> list[tuple[str, float]]:
+    """Build one execution batch, prepending an unseen seed text before mutations."""
+    if n <= 0:
+        return []
+
+    batch: list[tuple[str, float]] = []
+    batch_texts: set[str] = set()
+    already_consumed = bool(item.metadata.get("seed_unmutated_batch_consumed")) or bool(
+        item.metadata.get("startup_generated_unmutated_consumed")
+    )
+
+    if not already_consumed:
+        if not input_already_run(conn_thread, item.seed.text, target):
+            batch.append((item.seed.text, 0.0))
+            batch_texts.add(item.seed.text)
+        item.metadata["seed_unmutated_batch_consumed"] = True
+        if (
+            "startup_generated_run_unmutated_first" in item.metadata
+            or "startup_generated_unmutated_consumed" in item.metadata
+        ):
+            item.metadata["startup_generated_unmutated_consumed"] = True
+
+    remaining = max(0, n - len(batch))
+    if remaining > 0:
+        batch.extend(
+            generate_mutation_batch(
+                n=remaining,
+                seed_text=item.seed.text,
+                conn_thread=conn_thread,
+                reserved_inputs=tuple(batch_texts),
+            )
+        )
+
+    return batch
+
+
+def _lease_next_schedulable_item(
+    *,
+    startup_warm_queue: deque[ScheduledSeed],
+    scheduler: BaseSeedScheduler,
+) -> tuple[ScheduledSeed, bool]:
+    """Lease the next item, preferring startup warm seeds before scheduler items."""
+    if startup_warm_queue:
+        return startup_warm_queue.popleft(), True
+    return scheduler.next(), False
+
+
+def _reinsert_startup_warm_seed(
+    *,
+    scheduler: BaseSeedScheduler,
+    item: ScheduledSeed,
+    isinteresting_score: float,
+    signals: Mapping[str, Any] | None,
+) -> ScheduledSeed:
+    """
+    Insert a startup warm seed into the scheduler after its first execution.
+
+    The first run happens outside the scheduler so startup seeds cannot be
+    evicted before they are exercised at least once.
+    """
+    metadata = dict(item.metadata)
+    metadata.pop("startup_warm_pending_insert", None)
+    metadata["initial_isinteresting_score"] = float(isinteresting_score)
+    metadata["signals"] = dict(signals or metadata.get("signals") or {})
+    inserted = scheduler.add(item.seed, metadata=metadata)
+    if inserted.updates <= 0:
+        inserted.updates = 1
+        inserted.total_isinteresting_score = float(isinteresting_score)
+        inserted.last_isinteresting_score = float(isinteresting_score)
+    return inserted
+
+
+def _clear_completed_feedback_batch(
+    *,
+    batch_expected: dict[str, int],
+    item: ScheduledSeed,
+) -> None:
+    """
+    Drop worker-side batch tracking once a feedback scheduler has re-queued the item.
+
+    Feedback schedulers such as `ucb_tree` track their own remaining result count on
+    the scheduled item metadata. The live UI uses `batch_expected` only to count
+    leases that are still outstanding, so completed entries must be removed once the
+    item becomes ready again.
+    """
+    try:
+        remaining = int(item.metadata.get("_ucb_pending_batch_results", 0))
+    except (TypeError, ValueError):
+        remaining = 0
+    if remaining <= 0:
+        batch_expected.pop(item.item_id, None)
+
+
 def _coverage_replay_ready_signature(
     ready_items: Sequence[ScheduledSeed],
     *,
@@ -172,9 +301,21 @@ def _extract_total_branches(result: Mapping[str, Any]) -> int:
         details = candidate.get("branch_details_by_file")
         if not isinstance(details, Sequence):
             continue
+        explicit_total = candidate.get("total_branches")
+        if explicit_total not in (None, ""):
+            try:
+                total = int(explicit_total)
+            except (TypeError, ValueError):
+                total = 0
+            if total > 0:
+                return total
+        covered_raw = candidate.get("covered_branches")
+        missing_raw = candidate.get("missing_branches")
+        if covered_raw is None or missing_raw is None:
+            continue
         try:
-            covered = int(candidate.get("covered_branches", 0) or 0)
-            missing = int(candidate.get("missing_branches", 0) or 0)
+            covered = int(covered_raw or 0)
+            missing = int(missing_raw or 0)
         except (TypeError, ValueError):
             continue
         total = covered + missing
@@ -269,6 +410,7 @@ def run_worker_process(
                     print_json=False,
                     seed_family=seed_family,
                     enable_open_coverage=config.get("enable_open_coverage", False),
+                    enable_qemu_coverage=config.get("enable_qemu_coverage", False),
                     parser_config=config.get("parser_config"),  # type: ignore[arg-type]
                     closed_cwd_override=results_folder
                     / ".worker_cwd"
@@ -328,6 +470,7 @@ def run_worker_process(
                     "run_time_seconds": run_time_seconds,
                     "status": closed.get("status"),
                     "bug_signature": closed.get("bug_signature"),
+                    "coverage_backend": closed.get("coverage_backend"),
                     "isinteresting_score": score,
                     "signals": signals,
                     "covered_edges": tuple(get_covered_edges_from_result(result)),
@@ -367,6 +510,7 @@ def run_fuzzer_multi_worker(
     mutate_fn: Callable[..., str],
     mutator_feedback_fn: Callable[..., bool] | None,
     rng: random.Random,
+    startup_seed_items: Sequence[ScheduledSeed] | None = None,
     startup_generated_seeds: list[str] | None = None,
     startup_generated_source: str = "",
 ) -> None:
@@ -387,6 +531,7 @@ def run_fuzzer_multi_worker(
     current_scheduled: list[ScheduledSeed | None] = [None]
     current_mutations_left: list[int] = [0]
     current_batch: deque[tuple[str, float]] = deque()
+    startup_warm_queue: deque[ScheduledSeed] = deque(startup_seed_items or ())
     job_id_counter: list[int] = [0]
     iteration_counter: list[int] = [0]
     seed_energies_holder: list[dict[int, int]] = [seed_energies]
@@ -411,37 +556,55 @@ def run_fuzzer_multi_worker(
         max_iterations=max_iterations,
         max_hours=max_hours,
     )
+    mutation_chain_continue_probability = float(
+        config.get("mutation_chain_continue_probability", 0.2)
+    )
+    mutation_chain_max_depth = max(1, int(config.get("mutation_chain_max_depth", 8)))
+    feedback_scheduler_batch_cap = max(
+        1,
+        int(config.get("feedback_scheduler_batch_cap") or 4),
+    )
     if use_live_ui and startup_generated_seeds:
         dashboard.finish_llm_generation(
             source=startup_generated_source or "startup bootstrap",
             seeds=startup_generated_seeds,
         )
 
+    def _ready_scheduler_size() -> int:
+        return len(startup_warm_queue) + len(scheduler)
+
     def _generate_timed_mutation_batch(
         *,
         n: int,
         seed_text: str,
         conn_thread: sqlite3.Connection,
+        reserved_inputs: Sequence[str] | None = None,
         max_attempts: int = 200,
     ) -> list[tuple[str, float]]:
         def _is_rejected_candidate(candidate: str) -> bool:
             return "\x00" in candidate
 
-        seen: set[str] = set()
+        seen: set[str] = set(reserved_inputs or ())
         batch: list[tuple[str, float]] = []
         for _ in range(n):
             started_at = time.perf_counter()
-            candidate = mutate_fn(
-                seed_text,
+            candidate = _mutate_with_exponential_chaining(
+                seed_text=seed_text,
+                mutate_fn=mutate_fn,
                 mutator_kind=effective_mutator,
                 rng=rng,
+                continue_probability=mutation_chain_continue_probability,
+                max_depth=mutation_chain_max_depth,
             )
             for _attempt in range(max_attempts):
                 if _is_rejected_candidate(candidate):
-                    candidate = mutate_fn(
-                        seed_text,
+                    candidate = _mutate_with_exponential_chaining(
+                        seed_text=seed_text,
+                        mutate_fn=mutate_fn,
                         mutator_kind=effective_mutator,
                         rng=rng,
+                        continue_probability=mutation_chain_continue_probability,
+                        max_depth=mutation_chain_max_depth,
                     )
                     continue
                 if candidate not in seen and not input_already_run(
@@ -450,10 +613,13 @@ def run_fuzzer_multi_worker(
                     seen.add(candidate)
                     batch.append((candidate, time.perf_counter() - started_at))
                     break
-                candidate = mutate_fn(
-                    seed_text,
+                candidate = _mutate_with_exponential_chaining(
+                    seed_text=seed_text,
+                    mutate_fn=mutate_fn,
                     mutator_kind=effective_mutator,
                     rng=rng,
+                    continue_probability=mutation_chain_continue_probability,
+                    max_depth=mutation_chain_max_depth,
                 )
             else:
                 seen.add(candidate)
@@ -741,10 +907,12 @@ def run_fuzzer_multi_worker(
                             reply_queues[wid].put(None)
                             nones_sent += 1
                             break
-                        if not scheduler.empty():
-                            low_value_signature = _coverage_replay_ready_signature(
-                                scheduler.ready_items()
-                            )
+                        if startup_warm_queue or not scheduler.empty():
+                            low_value_signature = None
+                            if not startup_warm_queue and not scheduler.empty():
+                                low_value_signature = _coverage_replay_ready_signature(
+                                    scheduler.ready_items()
+                                )
                             if (
                                 low_value_signature is not None
                                 and low_value_signature != last_low_value_signature[0]
@@ -761,52 +929,74 @@ def run_fuzzer_multi_worker(
                             if current_mutations_left[0] <= 0:
                                 conn_thread = open_results_db(db_path)
                                 try:
-                                    live_scheduler_seeds = [
-                                        item.seed for item in scheduler.ready_items()
-                                    ]
-                                    stats = seed_stats_for_power_schedule(
-                                        corpus=corpus,
-                                        target=effective_target,
-                                        conn=conn_thread,
-                                        scheduler_seeds=live_scheduler_seeds,
-                                    )
-                                    if stats:
-                                        schedule = (
-                                            power_scheduler_module.compute_power_schedule(
-                                                seeds=stats
+                                    leased_from_startup_warm = False
+                                    if startup_warm_queue:
+                                        current_scheduled[0], leased_from_startup_warm = (
+                                            _lease_next_schedulable_item(
+                                                startup_warm_queue=startup_warm_queue,
+                                                scheduler=scheduler,
                                             )
                                         )
-                                        seed_energies_holder[0] = dict(
-                                            schedule["seed_energies"]
+                                        n = 1
+                                    else:
+                                        live_scheduler_seeds = [
+                                            item.seed for item in scheduler.ready_items()
+                                        ]
+                                        stats = seed_stats_for_power_schedule(
+                                            corpus=corpus,
+                                            target=effective_target,
+                                            conn=conn_thread,
+                                            scheduler_seeds=live_scheduler_seeds,
                                         )
-                                    current_scheduled[0] = scheduler.next()
-                                    energy = seed_energies_holder[0].get(
-                                        current_scheduled[0].seed.ordinal, 1
-                                    )
+                                        if stats:
+                                            schedule = (
+                                                power_scheduler_module.compute_power_schedule(
+                                                    seeds=stats
+                                                )
+                                            )
+                                            seed_energies_holder[0] = dict(
+                                                schedule["seed_energies"]
+                                            )
+                                        current_scheduled[0], leased_from_startup_warm = (
+                                            _lease_next_schedulable_item(
+                                                startup_warm_queue=startup_warm_queue,
+                                                scheduler=scheduler,
+                                            )
+                                        )
+                                        energy = seed_energies_holder[0].get(
+                                            current_scheduled[0].seed.ordinal, 1
+                                        )
 
-                                    n = (
-                                        min(max(1, energy), remaining_budget[0])
-                                        if remaining_budget is not None
-                                        else max(1, energy)
-                                    )
+                                        n = (
+                                            min(max(1, energy), remaining_budget[0])
+                                            if remaining_budget is not None
+                                            else max(1, energy)
+                                        )
+                                        if scheduler_uses_feedback:
+                                            n = min(n, feedback_scheduler_batch_cap)
                                     current_batch.clear()
                                     current_batch.extend(
-                                        _generate_timed_mutation_batch(
+                                        _build_execution_batch(
+                                            item=current_scheduled[0],
                                             n=n,
-                                            seed_text=current_scheduled[0].seed.text,
+                                            target=effective_target,
                                             conn_thread=conn_thread,
+                                            generate_mutation_batch=_generate_timed_mutation_batch,
                                         )
                                     )
                                     current_mutations_left[0] = len(current_batch)
-                                    scheduler.begin_batch(
-                                        current_scheduled[0],
-                                        batch_size=current_mutations_left[0],
-                                    )
+                                    if not leased_from_startup_warm:
+                                        scheduler.begin_batch(
+                                            current_scheduled[0],
+                                            batch_size=current_mutations_left[0],
+                                        )
                                     batch_expected[current_scheduled[0].item_id] = len(
                                         current_batch
                                     )
                                     mode = (
-                                        "single-mutation bandit"
+                                        "startup-warm"
+                                        if leased_from_startup_warm
+                                        else "single-mutation bandit"
                                         if scheduler_uses_feedback
                                         else "batch"
                                     )
@@ -814,21 +1004,22 @@ def run_fuzzer_multi_worker(
                                         log.info(
                                             "Scheduled seed %s with energy %s (%s unique mutations, mode=%s)",
                                             current_scheduled[0].seed.seed_id,
-                                            energy,
+                                            n,
                                             len(current_batch),
                                             mode,
                                         )
-                                    if use_live_ui:
-                                        _sync_dashboard_worker_count()
-                                        dashboard.record_schedule(
-                                            pending_jobs=len(pending),
-                                            scheduler_size=len(scheduler),
-                                            queue_size=len(batch_expected) + len(pending),
-                                            event=(
-                                                f"seed {current_scheduled[0].seed.seed_id} "
-                                                f"scheduled with {len(current_batch)} mutations"
-                                            ),
-                                        )
+                                    _sync_dashboard_worker_count()
+                                    dashboard.record_schedule(
+                                        pending_jobs=len(pending),
+                                        scheduler_size=_ready_scheduler_size(),
+                                        queue_size=len(startup_warm_queue)
+                                        + len(batch_expected)
+                                        + len(pending),
+                                        event=(
+                                            f"seed {current_scheduled[0].seed.seed_id} "
+                                            f"scheduled with {len(current_batch)} mutations"
+                                        ),
+                                    )
                                 finally:
                                     conn_thread.close()
                             scheduled = current_scheduled[0]
@@ -856,7 +1047,8 @@ def run_fuzzer_multi_worker(
                             reply_queues[wid].put(work)
                             break
                         while (
-                            scheduler.empty()
+                            not startup_warm_queue
+                            and scheduler.empty()
                             and results_received_count[0] < iteration_counter[0]
                         ):
                             if shutdown_requested[0]:
@@ -883,7 +1075,7 @@ def run_fuzzer_multi_worker(
                             cond.wait(timeout=0.5)
                         if stop_coordinator_loop:
                             break
-                        if not scheduler.empty():
+                        if startup_warm_queue or not scheduler.empty():
                             continue
                         if seed_refill_mode == "grammar":
                             if _try_refill_scheduler_from_grammar_coverage():
@@ -988,13 +1180,12 @@ def run_fuzzer_multi_worker(
                     )
                 total_rss = _format_rss(total_kib)
                 detail = " | ".join(parts)
-                if use_live_ui:
-                    _sync_dashboard_worker_count()
-                    dashboard.update_memory_telemetry(
-                        total_rss=total_rss,
-                        details=detail,
-                    )
-                else:
+                _sync_dashboard_worker_count()
+                dashboard.update_memory_telemetry(
+                    total_rss=total_rss,
+                    details=detail,
+                )
+                if not use_live_ui:
                     log.info(
                         "RSS telemetry: total=%s | %s",
                         total_rss,
@@ -1070,11 +1261,11 @@ def run_fuzzer_multi_worker(
                                 results_received,
                                 total_jobs[0] or iteration_counter[0],
                             )
+                            dashboard.update_status(
+                                "STOPPING",
+                                event="forcing shutdown after idle timeout",
+                            )
                             if use_live_ui:
-                                dashboard.update_status(
-                                    "STOPPING",
-                                    event="forcing shutdown after idle timeout",
-                                )
                                 live.update(dashboard.render())
                             break
                     if (
@@ -1086,18 +1277,18 @@ def run_fuzzer_multi_worker(
                         log.warning(
                             "Timed out waiting for remaining worker results; forcing shutdown."
                         )
+                        dashboard.update_status(
+                            "STOPPING", event="timed out waiting for workers"
+                        )
                         if use_live_ui:
-                            dashboard.update_status(
-                                "STOPPING", event="timed out waiting for workers"
-                            )
                             live.update(dashboard.render())
                         break
                     if shutdown_requested[0]:
+                        _maybe_refresh_workers()
+                        dashboard.update_status(
+                            "STOPPING", event="shutdown requested"
+                        )
                         if use_live_ui:
-                            _maybe_refresh_workers()
-                            dashboard.update_status(
-                                "STOPPING", event="shutdown requested"
-                            )
                             live.update(dashboard.render())
                         break
                     if use_live_ui:
@@ -1140,11 +1331,24 @@ def run_fuzzer_multi_worker(
                     else:
                         item_id = scheduled.item_id
                         score = result["isinteresting_score"]
-                        if scheduler_uses_feedback:
-                            scheduler.update(
+                        if bool(scheduled.metadata.get("startup_warm_pending_insert")):
+                            batch_expected.pop(item_id, None)
+                            scheduled = _reinsert_startup_warm_seed(
+                                scheduler=scheduler,
+                                item=scheduled,
+                                isinteresting_score=score,
+                                signals=result.get("signals"),
+                            )
+                            cond.notify_all()
+                        elif scheduler_uses_feedback:
+                            scheduled = scheduler.update(
                                 scheduled,
                                 isinteresting_score=score,
                                 signals=result["signals"],
+                            )
+                            _clear_completed_feedback_batch(
+                                batch_expected=batch_expected,
+                                item=scheduled,
                             )
                         else:
                             batch_scores_by_item.setdefault(item_id, []).append(score)
@@ -1159,6 +1363,7 @@ def run_fuzzer_multi_worker(
                 parser_result = result.pop("parser_result", None)
                 covered_edges = result.pop("covered_edges", ())
                 total_branches = max(0, int(result.pop("total_branches", 0) or 0))
+                coverage_backend = str(result.pop("coverage_backend", "") or "").strip()
                 result.pop("worker_id", None)
                 result.pop("worker_retiring", None)
                 coverage_key = _coverage_key_from_signals(result.get("signals"))
@@ -1201,32 +1406,30 @@ def run_fuzzer_multi_worker(
                     seen_bug_keys.add(bug_key)
                     new_bug = True
                 with cond:
-                    if (
-                        (new_coverage or new_bug)
-                        and add_seed_input_if_new(
+                    parent_signals = (result.get("signals") or {}).copy()
+                    parent_signals["new_coverage"] = new_coverage
+                    parent_signals["new_bug"] = new_bug
+                    candidate = make_discovered_seed(
+                        result["mutated_input"],
+                        family,
+                        parent_signals.get("bucket", "discovered"),
+                        next_discovered_ordinal_holder[0],
+                    )
+                    candidate_metadata: dict[str, Any] = {
+                        "bucket": candidate.bucket,
+                        "parent_seed_id": result["seed_id"],
+                        "initial_isinteresting_score": result["isinteresting_score"],
+                        "signals": parent_signals,
+                    }
+                    if scheduler_uses_feedback and config["ucb_trace"]:
+                        candidate_metadata["_ucb_trace"] = True
+                    accepted = scheduler.consider_seed(candidate, metadata=candidate_metadata)
+                    if accepted is not None:
+                        add_seed_input_if_new(
                             conn,
                             target=effective_target,
                             input_text=result["mutated_input"],
                         )
-                    ):
-                        parent_signals = (result.get("signals") or {}).copy()
-                        parent_bucket = parent_signals.get("bucket", "discovered")
-                        candidate = make_discovered_seed(
-                            result["mutated_input"],
-                            family,
-                            parent_bucket,
-                            next_discovered_ordinal_holder[0],
-                        )
-                        candidate_metadata: dict[str, Any] = {
-                            "bucket": candidate.bucket,
-                            "parent_seed_id": result["seed_id"],
-                            "initial_isinteresting_score": result["isinteresting_score"],
-                        }
-                        if parent_signals:
-                            candidate_metadata["signals"] = parent_signals
-                        if scheduler_uses_feedback and config["ucb_trace"]:
-                            candidate_metadata["_ucb_trace"] = True
-                        scheduler.add(candidate, metadata=candidate_metadata)
                         next_discovered_ordinal_holder[0] += 1
                         last_low_value_signature[0] = None
                         cond.notify()
@@ -1236,8 +1439,8 @@ def run_fuzzer_multi_worker(
                     last_low_value_signature[0] = None
                     results_received_count[0] = results_received
                     pending_jobs = len(pending)
-                    scheduler_size = len(scheduler)
-                    queue_size = len(batch_expected) + len(pending)
+                    scheduler_size = _ready_scheduler_size()
+                    queue_size = len(startup_warm_queue) + len(batch_expected) + len(pending)
                     cond.notify()
                 if use_live_ui:
                     _sync_dashboard_worker_count()
@@ -1270,25 +1473,25 @@ def run_fuzzer_multi_worker(
                     event_bits.append("differential")
                 if new_coverage:
                     event_bits.append("new coverage")
-                if use_live_ui:
-                    _maybe_refresh_workers()
-                    dashboard.record_result(
-                        iteration=int(iteration),
-                        status=status,
-                        score=result["isinteresting_score"],
-                        new_coverage=new_coverage,
-                        new_bug=new_bug,
-                        covered_branches=covered_branches,
-                        total_branches=total_branches,
-                        unique_covered_arcs=unique_covered_arcs,
-                        pending_jobs=pending_jobs,
-                        scheduler_size=scheduler_size,
-                        queue_size=queue_size,
-                        event=" | ".join(event_bits),
-                        mutated_input=result["mutated_input"],
-                        newest_coverage_branch=newest_coverage_branch,
-                        bug_signature=result.get("bug_signature"),
-                    )
+                _maybe_refresh_workers()
+                dashboard.record_result(
+                    iteration=int(iteration),
+                    status=status,
+                    score=result["isinteresting_score"],
+                    new_coverage=new_coverage,
+                    new_bug=new_bug,
+                    covered_branches=covered_branches,
+                    total_branches=total_branches,
+                    coverage_backend=coverage_backend,
+                    unique_covered_arcs=unique_covered_arcs,
+                    pending_jobs=pending_jobs,
+                    scheduler_size=scheduler_size,
+                    queue_size=queue_size,
+                    event=" | ".join(event_bits),
+                    mutated_input=result["mutated_input"],
+                    newest_coverage_branch=newest_coverage_branch,
+                    bug_signature=result.get("bug_signature"),
+                )
 
                 if debug_mode:
                     if parser_result is not None:
@@ -1337,17 +1540,17 @@ def run_fuzzer_multi_worker(
                 elif pbar is not None:
                     pbar.update(1)
                 if total_jobs[0] > 0 and results_received >= total_jobs[0]:
+                    _maybe_refresh_workers()
+                    dashboard.update_status("DONE", event="run complete")
                     if use_live_ui:
-                        _maybe_refresh_workers()
-                        dashboard.update_status("DONE", event="run complete")
                         live.update(dashboard.render())
                     break
                 if shutdown_requested[0]:
                     # On explicit shutdown (Ctrl+C), stop waiting for any
                     # remaining in-flight work; we'll tear down workers below.
+                    _maybe_refresh_workers()
+                    dashboard.update_status("STOPPING", event="shutdown requested")
                     if use_live_ui:
-                        _maybe_refresh_workers()
-                        dashboard.update_status("STOPPING", event="shutdown requested")
                         live.update(dashboard.render())
                     break
             if pbar is not None:
@@ -1370,3 +1573,5 @@ def run_fuzzer_multi_worker(
             )
             p.kill()
             p.join(timeout=1.0)
+        _sync_dashboard_worker_count()
+        dashboard.save_artifacts(results_folder)

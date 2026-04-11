@@ -15,9 +15,6 @@ from typing import Any
 BUG_STATUSES = {"bug", "crash", "timeout"}
 DEFAULT_INTERESTING_SCORE_THRESHOLD = 0.5
 MAX_CONFIGS_PER_CHART = 10
-CHECKPOINT_2_RESULTS_DIR = Path("/home/fuzzer/fuzzer/results/checkpoint_2")
-
-
 @dataclass(frozen=True)
 class RunData:
     run_folder: Path
@@ -170,6 +167,55 @@ def _load_runs_from_batch_folder(*, batch_folder: Path) -> list[RunData]:
     return [r for p in run_folders if (r := _load_run_data(run_folder=p)) is not None]
 
 
+def _discover_checkpoint_batches(*, batch_folder: Path) -> list[Path]:
+    parent = batch_folder.parent
+    if not parent.is_dir():
+        return []
+    return sorted(
+        path
+        for path in parent.iterdir()
+        if path.is_dir() and path.name.startswith("checkpoint_")
+    )
+
+
+def _best_run_metric_by_target(
+    *,
+    runs: list[RunData],
+    interesting_score_threshold: float,
+) -> tuple[dict[str, RunData], dict[str, dict[str, Any]]]:
+    run_metrics = [
+        compute_run_metrics(
+            run=run,
+            interesting_score_threshold=interesting_score_threshold,
+        )
+        for run in runs
+    ]
+    run_data_by_key = {
+        (run.target, run.config_name, run.run_id): run
+        for run in runs
+    }
+    best_run_data_by_target: dict[str, RunData] = {}
+    best_metrics_by_target: dict[str, dict[str, Any]] = {}
+    for metric in run_metrics:
+        target = str(metric["target"])
+        previous = best_metrics_by_target.get(target)
+        if previous is None or (
+            int(metric["total_unique_bugs"]),
+            int(metric["total_interesting_tests"]),
+        ) > (
+            int(previous["total_unique_bugs"]),
+            int(previous["total_interesting_tests"]),
+        ):
+            run_data = run_data_by_key.get(
+                (target, str(metric["config"]), str(metric["run_id"]))
+            )
+            if run_data is None:
+                continue
+            best_metrics_by_target[target] = metric
+            best_run_data_by_target[target] = run_data
+    return best_run_data_by_target, best_metrics_by_target
+
+
 def _flatten_config_values(*, value: Any, prefix: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {}
     if isinstance(value, dict):
@@ -188,6 +234,7 @@ def _setting_label(setting_key: str) -> str:
         "seed_scheduler.ucb_trace": "UCB Trace",
         "seed_scheduler.ucb_debug_tree": "UCB Debug Tree",
         "parser.enable_open_coverage": "Open Coverage",
+        "parser.enable_qemu_coverage": "QEMU Coverage",
     }
     if setting_key in labels:
         return labels[setting_key]
@@ -1624,6 +1671,7 @@ def render_rq3_baseline_ablation(
     config_aggregates: list[dict[str, Any]],
     charts_dir: Path,
     report_root: Path,
+    current_batch_folder: Path,
     baseline_results_dir: Path,
     interesting_score_threshold: float = DEFAULT_INTERESTING_SCORE_THRESHOLD,
 ) -> str:
@@ -1633,16 +1681,21 @@ def render_rq3_baseline_ablation(
         for runs in configs.values()
         for run in runs
     }
-    checkpoint_2_runs = _load_runs_from_batch_folder(batch_folder=CHECKPOINT_2_RESULTS_DIR)
-    checkpoint_2_run_data_by_target = {run.target: run for run in checkpoint_2_runs}
-    checkpoint_2_run_metrics = [
-        compute_run_metrics(
-            run=run,
+    current_label = current_batch_folder.name
+    checkpoint_batches = [
+        checkpoint_dir
+        for checkpoint_dir in _discover_checkpoint_batches(batch_folder=current_batch_folder)
+        if checkpoint_dir.resolve() != current_batch_folder.resolve()
+    ]
+    checkpoint_best_by_folder: dict[str, tuple[dict[str, RunData], dict[str, dict[str, Any]]]] = {}
+    for checkpoint_dir in checkpoint_batches:
+        checkpoint_runs = _load_runs_from_batch_folder(batch_folder=checkpoint_dir)
+        if not checkpoint_runs:
+            continue
+        checkpoint_best_by_folder[checkpoint_dir.name] = _best_run_metric_by_target(
+            runs=checkpoint_runs,
             interesting_score_threshold=interesting_score_threshold,
         )
-        for run in checkpoint_2_runs
-    ]
-    checkpoint_2_metrics_by_target = {str(row["target"]): row for row in checkpoint_2_run_metrics}
     parts = ["<section id='rq3'><h2>RQ3 — Baseline / Ablation</h2>"]
     module_keys = {
         "Mutation": "mutator_version",
@@ -1752,28 +1805,12 @@ def render_rq3_baseline_ablation(
         baseline = _load_baseline_rows(baseline_dir=baseline_results_dir, target=target)
         selected_baseline = _select_best_baseline_run(rows=baseline)
         selected_baseline_rows = [{k: str(v) for k, v in row.items()} for row in selected_baseline]
-        baseline_interesting = _compute_cumulative_metrics_over_iteration(
-            rows=selected_baseline_rows,
-            metric="interesting_tests",
-            interesting_score_threshold=interesting_score_threshold,
-        )
         baseline_bugs = _compute_cumulative_metrics_over_iteration(rows=selected_baseline_rows, metric="unique_bugs")
-        our_interesting_lines = []
         our_bug_lines = []
         if our_best_run_data is not None:
-            our_interesting_lines.append(
-                (
-                    "checkpoint_3",
-                    _compute_cumulative_metrics_over_iteration(
-                        rows=our_best_run_data.rows,
-                        metric="interesting_tests",
-                        interesting_score_threshold=interesting_score_threshold,
-                    ),
-                )
-            )
             our_bug_lines.append(
                 (
-                    "checkpoint_3",
+                    current_label,
                     _compute_cumulative_metrics_over_iteration(
                         rows=_unique_bug_metric_rows(run=our_best_run_data),
                         metric="unique_bugs",
@@ -1781,25 +1818,41 @@ def render_rq3_baseline_ablation(
                 )
             )
 
-        checkpoint_2_bug_lines: list[tuple[str, list[tuple[int, int]]]] = []
-        checkpoint_2_metric = checkpoint_2_metrics_by_target.get(target)
-        checkpoint_2_run_data = checkpoint_2_run_data_by_target.get(target)
-        if checkpoint_2_metric is not None and checkpoint_2_run_data is not None:
-            checkpoint_2_bug_lines.append(
+        checkpoint_bug_lines: list[tuple[str, list[tuple[int, int]]]] = []
+        checkpoint_summary_rows: list[list[str]] = []
+        for checkpoint_name in sorted(checkpoint_best_by_folder.keys()):
+            checkpoint_run_data_by_target, checkpoint_metrics_by_target = checkpoint_best_by_folder[checkpoint_name]
+            checkpoint_metric = checkpoint_metrics_by_target.get(target)
+            checkpoint_run_data = checkpoint_run_data_by_target.get(target)
+            if checkpoint_metric is None or checkpoint_run_data is None:
+                continue
+            checkpoint_bug_lines.append(
                 (
-                    "checkpoint_2",
+                    checkpoint_name,
                     _compute_cumulative_metrics_over_iteration(
-                        rows=_unique_bug_metric_rows(run=checkpoint_2_run_data),
+                        rows=_unique_bug_metric_rows(run=checkpoint_run_data),
                         metric="unique_bugs",
                     ),
                 )
+            )
+            checkpoint_summary_rows.append(
+                [
+                    html.escape(target),
+                    html.escape(checkpoint_name),
+                    html.escape(str(checkpoint_metric["config"])),
+                    "1",
+                    html.escape(_to_str(checkpoint_metric["total_unique_bugs"])),
+                    html.escape(_to_str(checkpoint_metric["total_interesting_tests"])),
+                    html.escape(_to_str(checkpoint_metric["time_to_first_bug_seconds"])),
+                    html.escape(str(checkpoint_metric["run_id"])),
+                ]
             )
 
         fig_bugs = _plot_lines(
             title=f"RQ3 baseline unique bugs vs iteration — {target}",
             x_label="iteration",
             y_label="cumulative unique bugs",
-            lines=our_bug_lines + checkpoint_2_bug_lines + [("AFL++ baseline", [(float(x), y) for x, y in baseline_bugs])],
+            lines=our_bug_lines + checkpoint_bug_lines + [("AFL++ baseline", [(float(x), y) for x, y in baseline_bugs])],
             extend_to_chart_end=True,
         )
         out_bugs = charts_dir / f"rq3_baseline_unique_bugs_vs_time_{_slug(target)}.png"
@@ -1809,7 +1862,7 @@ def render_rq3_baseline_ablation(
         baseline_rows.append(
             [
                 html.escape(target),
-                "our_fuzzer",
+                html.escape(current_label),
                 html.escape(best_cfg),
                 "1",
                 html.escape(_to_str(best_run_metric["total_unique_bugs"])),
@@ -1818,19 +1871,7 @@ def render_rq3_baseline_ablation(
                 html.escape(best_run_id),
             ]
         )
-        if checkpoint_2_metric is not None:
-            baseline_rows.append(
-                [
-                    html.escape(target),
-                    "checkpoint_2",
-                    html.escape(str(checkpoint_2_metric["config"])),
-                    "1",
-                    html.escape(_to_str(checkpoint_2_metric["total_unique_bugs"])),
-                    html.escape(_to_str(checkpoint_2_metric["total_interesting_tests"])),
-                    html.escape(_to_str(checkpoint_2_metric["time_to_first_bug_seconds"])),
-                    html.escape(str(checkpoint_2_metric["run_id"])),
-                ]
-            )
+        baseline_rows.extend(checkpoint_summary_rows)
         baseline_rows.append(
             [
                 html.escape(target),
@@ -1856,7 +1897,8 @@ def render_rq3_baseline_ablation(
         )
         parts.append(
             f"<p class='meta'>Target <code>{html.escape(target)}</code>: RQ3 uses only the best internal run "
-            f"<code>{html.escape(best_cfg)}/{html.escape(best_run_id)}</code>, labeled as <code>checkpoint_3</code> in the chart legend. "
+            f"<code>{html.escape(best_cfg)}/{html.escape(best_run_id)}</code>, labeled as <code>{html.escape(current_label)}</code> in the chart legend. "
+            f"Comparison includes all sibling <code>checkpoint_*</code> result folders under <code>{html.escape(str(current_batch_folder.parent))}</code>. "
             "Baseline curves use iteration as x-axis as requested.</p>"
         )
 
@@ -2027,6 +2069,7 @@ def generate_batch_report(
         config_aggregates=config_aggregates,
         charts_dir=charts_dir,
         report_root=batch_folder,
+        current_batch_folder=batch_folder,
         baseline_results_dir=baseline_results_dir,
         interesting_score_threshold=interesting_score_threshold,
     )

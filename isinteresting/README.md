@@ -46,8 +46,8 @@ where `I_cov = 1` if coverage counts are present, else `0`.
 The final score is then:
 
 ```text
-if coverage comes from the oracle/open run:
-    Score = WeightedScore
+if an oracle/open result is present:
+    Score = 1.0 if s_new > 0 else 0.0
 else:
     Score = s_new + (1 - s_new) * WeightedScore
 ```
@@ -71,20 +71,15 @@ If coverage comes from the closed run:
 c_f = 1
 ```
 
-If coverage comes from the oracle/open run:
+If an oracle/open result is present, the final score ignores all other signals:
 
 ```text
-c_f = 0.2 + 0.8 * max(
-    s_status * r_bug,
-    s_diff,
-    s_site,
-    s_excsite,
-    s_rare
-)
+Score =
+    1.0  if the run discovers at least one new covered edge
+    0.0  otherwise
 ```
 
-This means oracle-only coverage is trusted less unless it is supported by other
-interesting signals.
+This makes oracle-backed targets strictly coverage-novelty driven.
 
 ### Status Score
 
