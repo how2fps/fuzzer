@@ -25,14 +25,21 @@ class FeedbackFn(Protocol):
 from . import base
 from . import byte_havoc
 from . import grammar_ast
+from . import adaptive_all_baseline
+from . import adaptive_all_experiment
 
 REGISTRY: dict[str, Callable[..., str]] = {
     "base": base.mutate,
     "byte_havoc": byte_havoc.mutate,
     "grammar_ast": grammar_ast.mutate,
+    "adaptive_all_baseline": adaptive_all_baseline.mutate,
+    "adaptive_all_experiment": adaptive_all_experiment.mutate,
 }
 
-FEEDBACK_REGISTRY: dict[str, FeedbackFn] = {}
+FEEDBACK_REGISTRY: dict[str, FeedbackFn] = {
+    "adaptive_all_baseline": adaptive_all_baseline.handle_feedback,
+    "adaptive_all_experiment": adaptive_all_experiment.handle_feedback,
+}
 
 
 def get_mutator(version: str) -> MutateFn:

@@ -8,7 +8,7 @@ import random
 import threading
 from collections.abc import Callable
 
-from .adaptive_operators import AdaptiveStrategy
+from .adaptive_operators_baseline import AdaptiveStrategy
 from . import grammar_ast
 from .lib import (
     apply_grammar_operator,
