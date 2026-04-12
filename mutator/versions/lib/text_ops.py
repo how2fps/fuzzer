@@ -27,6 +27,9 @@ from .shared import (
     sanitize_mutated_text,
 )
 
+_ULTRA_LONG_NUMERIC_MIN_DIGITS = 4301
+_ULTRA_LONG_NUMERIC_MAX_DIGITS = 6000
+
 def _validate_probability(*, name: str, value: float) -> float:
     if not 0.0 <= value <= 1.0:
         raise ValueError(f"{name} must be between 0.0 and 1.0")
@@ -372,6 +375,12 @@ def _fallback_alpha_label(*, length: int) -> str:
     alphabet = "abcdefghijklmnopqrstuvwxyz"
     repeats = max(1, (length + len(alphabet) - 1) // len(alphabet))
     return (alphabet * repeats)[:length]
+
+
+def _repeat_text_to_length(*, seed: str, length: int, filler: str = "0") -> str:
+    base = seed or filler
+    repeats = max(1, (length + len(base) - 1) // len(base))
+    return (base * repeats)[:length]
 
 def _mutate_numeric_literal_in_text(*, text: str, rng: random.Random) -> str | None:
     numeric_ranges = _find_numeric_ranges(text=text)
@@ -1228,6 +1237,76 @@ def _extreme_numeric_surgery(
     else:
         replacement = "-" + ("0" * rng.randint(6, 18)) + body
 
+    if replacement == token:
+        return None
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement=replacement,
+    )
+
+
+def _ultra_long_numeric_surgery(
+    *,
+    text: str,
+    rng: random.Random,
+) -> str | None:
+    numeric_ranges = _find_numeric_ranges(text=text)
+    if not numeric_ranges:
+        return None
+    start, end = rng.choice(numeric_ranges)
+    token = text[start:end]
+    sign = "-" if token.startswith("-") else ""
+    body = token.lstrip("+-")
+    if not body or not body.isdigit():
+        return None
+
+    observed_values, widths = _observed_numeric_values(text=text)
+    target_digits = rng.randint(
+        _ULTRA_LONG_NUMERIC_MIN_DIGITS,
+        _ULTRA_LONG_NUMERIC_MAX_DIGITS,
+    )
+    strategy = rng.choice(
+        (
+            "zero_flood",
+            "repeat_body",
+            "boundary_pair_flood",
+        )
+    )
+
+    if strategy == "zero_flood":
+        replacement_body = "0" * target_digits
+    elif strategy == "repeat_body":
+        replacement_body = _repeat_text_to_length(
+            seed=body,
+            length=target_digits,
+            filler=body[-1],
+        )
+    else:
+        width = max(1, max(widths, default=len(body)))
+        candidate_suffixes = [str((10 ** width) - 1), str(10 ** width)]
+        if observed_values:
+            candidate_suffixes.extend(
+                str(abs(candidate))
+                for candidate in (
+                    min(observed_values) - 1,
+                    max(observed_values) + 1,
+                )
+            )
+        seed_parts = [body]
+        for suffix in candidate_suffixes:
+            normalized = suffix.lstrip("+-")
+            if not normalized or normalized == body or normalized in seed_parts:
+                continue
+            seed_parts.append(normalized)
+        replacement_body = _repeat_text_to_length(
+            seed="".join(seed_parts),
+            length=target_digits,
+            filler="9",
+        )
+
+    replacement = sign + replacement_body
     if replacement == token:
         return None
     return _replace_text_range(
@@ -2259,6 +2338,13 @@ def _generic_invalidate_text(
                 2.0,
             )
         )
+        strategy_entries.append(
+            (
+                "ultra_long_numeric_surgery",
+                lambda: _ultra_long_numeric_surgery(text=original_text, rng=rng),
+                0.2,
+            )
+        )
     if capabilities is not None and capabilities.separator_chars:
         strategy_entries.extend(
             (
@@ -2349,6 +2435,7 @@ __all__ = [
     "_mutate_numeric_special_literal_in_text",
     "_numeric_format_surgery",
     "_extreme_numeric_surgery",
+    "_ultra_long_numeric_surgery",
     "_neighbor_boundary_numeric_surgery",
     "_segment_count_change",
     "_separator_confusion",

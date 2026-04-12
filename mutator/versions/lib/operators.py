@@ -47,6 +47,7 @@ from .text_ops import (
     _structured_range_surgery,
     _token_whitespace_surgery,
     _trailing_or_leading_extra_data,
+    _ultra_long_numeric_surgery,
     _validate_probability,
     _non_alnum_run_surgery,
     _zero_pad_numeric_token,
@@ -499,6 +500,16 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
         invalid_weight=2.2,
         supports=_supports_numeric_operator,
         apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _extreme_numeric_surgery(
+            text=original_text,
+            rng=rng,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="ultra_long_numeric_surgery",
+        valid_weight=0.0,
+        invalid_weight=0.2,
+        supports=_supports_numeric_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _ultra_long_numeric_surgery(
             text=original_text,
             rng=rng,
         ),

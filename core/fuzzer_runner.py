@@ -66,11 +66,9 @@ def _preferred_startup_generation_plans(
     *,
     effective_mutator: str,
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    if effective_mutator == "ip":
-        ast_grammar_spec = resolve_ast_grammar_spec(kind=effective_mutator)
-        start_rule = str(ast_grammar_spec.get("start") or "")
-        if start_rule != "ip":
-            return ()
+    ast_grammar_spec = resolve_ast_grammar_spec(kind=effective_mutator)
+    start_rule = str(ast_grammar_spec.get("start") or "")
+    if effective_mutator == "ip" and start_rule == "ip":
         return (
             (
                 start_rule,
@@ -79,6 +77,28 @@ def _preferred_startup_generation_plans(
                     "production:ipv4_input:1",
                     "production:octet:0",
                     "production:prefix4:0",
+                ),
+            ),
+        )
+    if effective_mutator == "ipv4" and start_rule == "ipv4_input":
+        return (
+            (
+                start_rule,
+                (
+                    "production:ipv4_input:1",
+                    "production:octet:0",
+                    "production:prefix4:0",
+                ),
+            ),
+        )
+    if effective_mutator == "ipv6" and start_rule == "ipv6_input":
+        return (
+            (
+                start_rule,
+                (
+                    "production:ipv6_input:1",
+                    "production:h:0",
+                    "production:prefix6:0",
                 ),
             ),
         )

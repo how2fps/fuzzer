@@ -13,12 +13,18 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+import pandas as pd
+
 from mutator import configure_runtime_grammar
 from mutator.mutator import (
     apply_grammar_operator,
     available_grammar_operator_names,
     resolve_grammar_spec,
 )
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 ATTRIBUTE_ERROR_DID_YOU_MEAN_RE = re.compile(r"\. Did you mean: .*?\?$")
@@ -113,6 +119,10 @@ def _infer_mutator_kind(*, mutator_kind: str, target: str, grammar_path: str | N
     if grammar_path is not None:
         return "grammar"
     target_lower = (target or "").lower()
+    if target_lower == "ipv4-parser":
+        return "ipv4"
+    if target_lower == "ipv6-parser":
+        return "ipv6"
     if "json" in target_lower:
         return "json"
     if "ipv4" in target_lower or "ipv6" in target_lower or "cidr" in target_lower:
@@ -194,6 +204,231 @@ def _load_runs(run_dbs: list[Path]) -> list[RunRecord]:
             conn.close()
     runs.sort(key=lambda row: (str(row.run_db), row.iteration, row.seed_id, row.mutated_input))
     return runs
+
+
+def _run_table_columns(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+    }
+
+
+def _select_expr(*, columns: set[str], column: str, default_sql: str) -> str:
+    if column in columns:
+        return column
+    return f"{default_sql} AS {column}"
+
+
+def _load_plateau_dataframe(run_dbs: list[Path]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for run_db in run_dbs:
+        conn = sqlite3.connect(run_db)
+        try:
+            columns = _run_table_columns(conn)
+            select_clauses = [
+                "iteration",
+                _select_expr(columns=columns, column="created_at", default_sql="''"),
+                _select_expr(columns=columns, column="seed_bucket", default_sql="''"),
+                _select_expr(columns=columns, column="new_coverage", default_sql="0"),
+                _select_expr(columns=columns, column="new_bug", default_sql="0"),
+                _select_expr(columns=columns, column="new_diff_behavior", default_sql="0"),
+                _select_expr(columns=columns, column="new_edge_count", default_sql="0"),
+                _select_expr(columns=columns, column="diff_behavior_key", default_sql="''"),
+                _select_expr(columns=columns, column="isinteresting_score", default_sql="0.0"),
+                _select_expr(columns=columns, column="status", default_sql="''"),
+                _select_expr(columns=columns, column="bug_type", default_sql="''"),
+                _select_expr(columns=columns, column="exception", default_sql="''"),
+                _select_expr(columns=columns, column="file", default_sql="''"),
+                _select_expr(columns=columns, column="line", default_sql="''"),
+            ]
+            query = (
+                "SELECT "
+                + ", ".join(select_clauses)
+                + " FROM runs ORDER BY created_at, iteration, id"
+            )
+            frame = pd.read_sql_query(query, conn)
+        finally:
+            conn.close()
+        frame["run_db"] = str(run_db)
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+    if "created_at" in df.columns:
+        df["created_at"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+    else:
+        df["created_at"] = pd.NaT
+    df.sort_values(["created_at", "iteration", "run_db"], inplace=True, kind="stable")
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+
+def build_plateau_metrics_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "elapsed_seconds",
+                "coverage_total",
+                "unique_diff_behaviors",
+                "unique_bugs",
+            ]
+        )
+
+    working = df.copy()
+    if working["created_at"].notna().any():
+        start_time = working["created_at"].dropna().min()
+        working["elapsed_seconds"] = (
+            working["created_at"] - start_time
+        ).dt.total_seconds().fillna(0.0)
+    else:
+        working["elapsed_seconds"] = range(len(working))
+
+    coverage_increments = pd.to_numeric(
+        working.get("new_edge_count", 0),
+        errors="coerce",
+    ).fillna(0.0)
+    if float(coverage_increments.max()) <= 0.0:
+        coverage_increments = pd.to_numeric(
+            working.get("new_coverage", 0),
+            errors="coerce",
+        ).fillna(0.0)
+    working["coverage_total"] = coverage_increments.cumsum()
+
+    seen_diffs: set[str] = set()
+    diff_counts: list[int] = []
+    for raw_key in working.get("diff_behavior_key", pd.Series(dtype=str)).fillna(""):
+        key = str(raw_key)
+        if key:
+            seen_diffs.add(key)
+        diff_counts.append(len(seen_diffs))
+    working["unique_diff_behaviors"] = diff_counts
+
+    seen_bugs: set[tuple[str, str, str, str, str]] = set()
+    bug_counts: list[int] = []
+    for row in working.itertuples(index=False):
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        if status in {"bug", "crash", "timeout", "error"}:
+            seen_bugs.add(
+                (
+                    status,
+                    str(getattr(row, "bug_type", "") or ""),
+                    str(getattr(row, "exception", "") or ""),
+                    str(getattr(row, "file", "") or ""),
+                    str(getattr(row, "line", "") or ""),
+                )
+            )
+        bug_counts.append(len(seen_bugs))
+    working["unique_bugs"] = bug_counts
+    return working[
+        [
+            "elapsed_seconds",
+            "coverage_total",
+            "unique_diff_behaviors",
+            "unique_bugs",
+            "seed_bucket",
+        ]
+    ].reset_index(drop=True)
+
+
+def build_seed_queue_composition_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["elapsed_seconds"])
+
+    working = build_plateau_metrics_table(df)
+    bucket_series = (
+        working.get("seed_bucket", pd.Series(dtype=str))
+        .fillna("")
+        .map(lambda value: str(value).strip() or "unknown")
+    )
+    working["seed_bucket"] = bucket_series
+
+    bucket_counts: dict[str, int] = {}
+    rows: list[dict[str, Any]] = []
+    for row in working.itertuples(index=False):
+        bucket = str(row.seed_bucket or "unknown")
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        record = {"elapsed_seconds": float(row.elapsed_seconds)}
+        record.update(bucket_counts)
+        rows.append(record)
+    composition = pd.DataFrame(rows).ffill().fillna(0)
+    return composition
+
+
+def plot_plateau_charts(
+    *,
+    plateau_metrics: pd.DataFrame,
+    queue_composition: pd.DataFrame,
+    output_dir: Path,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: list[Path] = []
+
+    if not plateau_metrics.empty:
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
+        axes[0].plot(
+            plateau_metrics["elapsed_seconds"],
+            plateau_metrics["coverage_total"],
+            color="#1d3557",
+            linewidth=2.2,
+        )
+        axes[0].set_ylabel("coverage")
+        axes[0].set_title("Coverage over time")
+
+        axes[1].plot(
+            plateau_metrics["elapsed_seconds"],
+            plateau_metrics["unique_diff_behaviors"],
+            color="#e76f51",
+            linewidth=2.2,
+        )
+        axes[1].set_ylabel("unique diff")
+        axes[1].set_title("Unique differential behaviors over time")
+
+        axes[2].plot(
+            plateau_metrics["elapsed_seconds"],
+            plateau_metrics["unique_bugs"],
+            color="#2a9d8f",
+            linewidth=2.2,
+        )
+        axes[2].set_ylabel("bugs")
+        axes[2].set_xlabel("elapsed seconds")
+        axes[2].set_title("Unique bugs over time")
+
+        for axis in axes:
+            axis.grid(alpha=0.25, linestyle=":")
+            axis.set_xlim(left=0)
+
+        overview_path = output_dir / "plateau_overview.png"
+        fig.tight_layout()
+        fig.savefig(overview_path, dpi=160)
+        plt.close(fig)
+        artifacts.append(overview_path)
+
+    if not queue_composition.empty:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        bucket_columns = [
+            column
+            for column in queue_composition.columns
+            if column != "elapsed_seconds"
+        ]
+        if bucket_columns:
+            x = queue_composition["elapsed_seconds"]
+            y_values = [queue_composition[column] for column in bucket_columns]
+            ax.stackplot(x, y_values, labels=bucket_columns, alpha=0.85)
+            ax.legend(loc="upper left", ncol=min(4, len(bucket_columns)))
+        ax.set_title("Seed queue composition over time")
+        ax.set_xlabel("elapsed seconds")
+        ax.set_ylabel("cumulative scheduled seeds")
+        ax.grid(alpha=0.25, linestyle=":")
+        ax.set_xlim(left=0)
+        queue_path = output_dir / "seed_queue_composition.png"
+        fig.tight_layout()
+        fig.savefig(queue_path, dpi=160)
+        plt.close(fig)
+        artifacts.append(queue_path)
+
+    return artifacts
 
 
 def _load_config_for_run_db(run_db: Path) -> dict[str, Any]:
@@ -761,6 +996,20 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON path for the combined summary and missing-bug rows",
     )
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for plateau charts. Defaults to <results_path>/analysis_plots "
+            "or alongside runs.db when a single DB is provided."
+        ),
+    )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip plateau chart generation.",
+    )
     return parser
 
 
@@ -841,6 +1090,30 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
+    plateau_df = _load_plateau_dataframe(run_dbs)
+    plateau_metrics = build_plateau_metrics_table(plateau_df)
+    queue_composition = build_seed_queue_composition_table(plateau_df)
+    if args.plot_dir is not None:
+        plot_dir = args.plot_dir.resolve()
+    else:
+        plot_base = (
+            args.results_path.resolve().parent
+            if args.results_path.is_file()
+            else args.results_path.resolve()
+        )
+        plot_dir = plot_base / "analysis_plots"
+    plot_artifacts: list[Path] = []
+    if not args.no_plots:
+        plot_artifacts = plot_plateau_charts(
+            plateau_metrics=plateau_metrics,
+            queue_composition=queue_composition,
+            output_dir=plot_dir,
+        )
+        if not plateau_metrics.empty:
+            plateau_metrics.to_csv(plot_dir / "plateau_metrics.csv", index=False)
+        if not queue_composition.empty:
+            queue_composition.to_csv(plot_dir / "seed_queue_composition.csv", index=False)
+
     print(
         json.dumps(
             {
@@ -855,6 +1128,8 @@ def main(argv: list[str] | None = None) -> int:
                 "startup_or_start_text_count": len(start_texts),
                 "comparison_summary": summary,
                 "missing_bug_count": len(missing_bugs),
+                "plot_dir": None if args.no_plots else str(plot_dir),
+                "plot_artifacts": [str(path) for path in plot_artifacts],
             },
             indent=2,
             sort_keys=True,
@@ -897,6 +1172,8 @@ def main(argv: list[str] | None = None) -> int:
                         "startup_or_start_text_count": len(start_texts),
                         "comparison_summary": summary,
                         "missing_bug_count": len(missing_bugs),
+                        "plot_dir": None if args.no_plots else str(plot_dir),
+                        "plot_artifacts": [str(path) for path in plot_artifacts],
                     },
                     "missing_bug_estimates": report_rows,
                 },

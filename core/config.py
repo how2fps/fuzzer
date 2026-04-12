@@ -935,6 +935,10 @@ def infer_mutator_kind(
         return "grammar"
 
     target_lower = target.lower()
+    if target_lower == "ipv4-parser":
+        return "ipv4"
+    if target_lower == "ipv6-parser":
+        return "ipv6"
     if "json" in target_lower:
         return "json"
     if "ipv4" in target_lower or "ipv6" in target_lower or "cidr" in target_lower:
