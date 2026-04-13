@@ -55,6 +55,13 @@ def _short_exc(exc: str | None) -> str:
     return s.split(".")[-1].strip()
 
 
+def _pick_shortest_input(current: str | None, candidate: Any) -> str:
+    text = "" if candidate is None else str(candidate)
+    if current is None or len(text) < len(current):
+        return text
+    return current
+
+
 def _build_db_match_index(conn) -> dict[tuple[str, int, str], dict[str, Any]]:
     cur = conn.execute(
         """
@@ -87,7 +94,13 @@ def _build_db_match_index(conn) -> dict[tuple[str, int, str], dict[str, Any]]:
         if line_int is None or not file_norm or not exc_norm:
             continue
         key = (file_norm, line_int, exc_norm)
-        if key in out:
+        existing = out.get(key)
+        shortest_input = _pick_shortest_input(
+            existing.get("shortest_input") if existing is not None else None,
+            mutated_input,
+        )
+        if existing is not None:
+            existing["shortest_input"] = shortest_input
             continue
         out[key] = {
             "exception": exc,
@@ -96,6 +109,7 @@ def _build_db_match_index(conn) -> dict[tuple[str, int, str], dict[str, Any]]:
             "seed_id": seed_id,
             "seed_text": seed_text,
             "mutated_input": mutated_input,
+            "shortest_input": shortest_input,
             "status": status,
             "iteration": iteration,
             "isinteresting_score": score,
@@ -129,6 +143,7 @@ def _export_pairs_from_bug_counts(
         "seed_id",
         "seed_text",
         "mutated_input",
+        "shortest_input",
         "status",
         "iteration",
         "isinteresting_score",
@@ -211,6 +226,7 @@ def export_results(
                             "seed_id",
                             "seed_text",
                             "mutated_input",
+                            "shortest_input",
                             "status",
                             "iteration",
                             "isinteresting_score",
@@ -223,6 +239,7 @@ def export_results(
                 with open(pairs_path, "w", newline="", encoding="utf-8") as f:
                     f.write(
                         "exception,line,file,bug_type,seed_id,seed_text,mutated_input,"
+                        "shortest_input,"
                         "status,iteration,isinteresting_score,datetime_executed\n"
                     )
 

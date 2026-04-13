@@ -621,6 +621,7 @@ def _run_open_target_with_coverage(
     target_dir: Path,
     input_data: bytes,
     timeout: float,
+    ipyparse_family: str | None = None,
 ) -> dict[str, Any] | None:
     if target_name not in {"json_open", "cidrize", "ipyparse"}:
         return None
@@ -640,7 +641,11 @@ from parser.open_coverage_runner import run_open_target_with_branches
 
 def main() -> None:
     data = sys.stdin.buffer.read()
-    out = run_open_target_with_branches(target_name={target_name!r}, input_data=data)
+    out = run_open_target_with_branches(
+        target_name={target_name!r},
+        input_data=data,
+        ipyparse_family={ipyparse_family!r},
+    )
     print(json.dumps(out, sort_keys=True, separators=(",", ":")))
 
 if __name__ == "__main__":
@@ -671,6 +676,7 @@ if __name__ == "__main__":
             "bug_signature": None,
             "covered_branches": 0,
             "missing_branches": 0,
+            "total_branches": 0,
             "branch_details_by_file": [],
         }
     except Exception as exc:
@@ -686,6 +692,7 @@ if __name__ == "__main__":
             },
             "covered_branches": 0,
             "missing_branches": 0,
+            "total_branches": 0,
             "branch_details_by_file": [],
         }
     finally:
@@ -724,9 +731,28 @@ if __name__ == "__main__":
         "bug_signature": payload.get("bug_signature"),
         "covered_branches": payload.get("covered_branches", 0),
         "missing_branches": payload.get("missing_branches", 0),
+        "total_branches": payload.get("total_branches"),
         "branch_details_by_file": payload.get("branch_details_by_file", []),
     }
     return out
+
+
+def _infer_oracle_coverage_family(
+    *,
+    target_name: str,
+    oracle_name: str,
+    input_data: bytes,
+    seed_family: str | None,
+) -> str | None:
+    if oracle_name != "ipyparse":
+        return None
+    if target_name == "ipv4-parser":
+        return "ipv4"
+    if target_name == "ipv6-parser":
+        return "ipv6"
+    if seed_family in {"ipv4", "ipv6"}:
+        return seed_family
+    return _infer_ip_version(input_data=input_data)
 
 
 def _apply_coverage_payload(
@@ -908,15 +934,23 @@ def run_parser(
                 and isinstance(open_entry, dict)
                 and _coverage_enabled(open_entry)
             ):
+                oracle_coverage_family = _infer_oracle_coverage_family(
+                    target_name=target,
+                    oracle_name=open_name,
+                    input_data=data,
+                    seed_family=seed_family,
+                )
                 coverage_open_result = _run_open_target_with_coverage(
                     target_name=open_name,
                     target_dir=open_dir,
                     input_data=data,
                     timeout=timeout,
+                    ipyparse_family=oracle_coverage_family,
                 )
                 coverage_payload = {
                     "covered_branches": 0,
                     "missing_branches": 0,
+                    "total_branches": 0,
                     "branch_details_by_file": [],
                 }
                 if isinstance(coverage_open_result, dict):
@@ -926,6 +960,9 @@ def run_parser(
                         ),
                         "missing_branches": coverage_open_result.get(
                             "missing_branches", 0
+                        ),
+                        "total_branches": coverage_open_result.get(
+                            "total_branches", 0
                         ),
                         "branch_details_by_file": coverage_open_result.get(
                             "branch_details_by_file", []

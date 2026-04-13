@@ -694,6 +694,16 @@ def get_inputs_for_unique_error_line_pairs(
     """)
     rows = cur.fetchall()
     seen: set[tuple[str | None, int | None]] = set()
+    shortest_input_by_key: dict[tuple[str | None, int | None], str] = {}
+    for row in rows:
+        exc = row[0]
+        line = row[1]
+        mutated_input = row[6]
+        key = (exc, line)
+        text = "" if mutated_input is None else str(mutated_input)
+        best = shortest_input_by_key.get(key)
+        if best is None or len(text) < len(best):
+            shortest_input_by_key[key] = text
     out: list[dict[str, Any]] = []
     for row in rows:
         (
@@ -721,6 +731,7 @@ def get_inputs_for_unique_error_line_pairs(
             "seed_id": seed_id,
             "seed_text": seed_text,
             "mutated_input": mutated_input,
+            "shortest_input": shortest_input_by_key.get(key, ""),
             "status": status,
             "iteration": iteration,
             "isinteresting_score": score,

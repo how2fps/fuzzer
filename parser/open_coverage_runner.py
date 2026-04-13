@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import traceback
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -38,77 +39,108 @@ def _path_relative_to_root(path: str | None) -> str | None:
         return path
 
 
-def _parse_missing_branches_string(missing_branches: str) -> dict[int, list[int]]:
-    by_line: dict[int, list[int]] = {}
-    if not missing_branches:
-        return by_line
-    for from_to_line in missing_branches.split(","):
-        from_to_line = from_to_line.strip()
-        if not from_to_line:
-            continue
-        if "-" in from_to_line:
-            from_line_str, to_line_str = from_to_line.split("-", 1)
-            from_line = int(from_line_str)
-            to_line = int(to_line_str)
-            by_line.setdefault(from_line, []).append(to_line)
-        else:
-            from_line = int(from_to_line)
-            by_line.setdefault(from_line, []).append(-1)
-    return by_line
-
-
-def _collect_branch_counts(cov: coverage.Coverage) -> dict[str, int]:
+def _load_branch_report(cov: coverage.Coverage) -> dict[str, Any] | None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
         json_path = tmp.name
     try:
         cov.json_report(outfile=json_path)
         with open(json_path, encoding="utf-8") as f:
             report = json.load(f)
-        totals = report.get("totals", {})
-        num_branches = int(totals.get("num_branches", 0) or 0)
-        covered_branches = int(totals.get("covered_branches", 0) or 0)
-        missing_branches = max(num_branches - covered_branches, 0)
-        return {
-            "covered_branches": covered_branches,
-            "missing_branches": missing_branches,
-        }
+        if isinstance(report, dict):
+            return report
     except NoSource:
-        return {"covered_branches": 0, "missing_branches": 0}
+        return None
     finally:
         try:
             os.remove(json_path)
         except OSError:
             pass
+    return None
 
 
-def _collect_branch_details_by_file(cov: coverage.Coverage) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    data = cov.get_data()
-    for filename in sorted(data.measured_files()):
-        try:
-            (
-                _,
-                statements,
-                _excluded,
-                _missing_lines,
-                missing_branches,
-            ) = cov.analysis2(filename)
-        except coverage.CoverageException:
+def _coerce_branch_list(raw_pairs: object) -> list[dict[str, int]]:
+    branches: list[dict[str, int]] = []
+    if not isinstance(raw_pairs, Sequence):
+        return branches
+    for pair in raw_pairs:
+        if not isinstance(pair, Sequence) or len(pair) != 2:
             continue
+        try:
+            from_line = int(pair[0])
+            to_line = int(pair[1])
+        except (TypeError, ValueError):
+            continue
+        if from_line <= 0:
+            continue
+        branches.append({"from_line": from_line, "to_line": to_line})
+    return branches
 
-        total_lines = len(statements)
-        missing_by_line = _parse_missing_branches_string(missing_branches or "")
-        missing_list: list[dict[str, int]] = []
-        for from_line, targets in sorted(missing_by_line.items()):
-            for to_line in sorted(targets):
-                missing_list.append({"from_line": from_line, "to_line": to_line})
 
-        covered_list: list[dict[str, int]] = []
-        arcs = data.arcs(filename) or []
-        for from_line, to_line in arcs:
-            if from_line <= 0:
-                continue
-            covered_list.append({"from_line": from_line, "to_line": to_line})
+def _infer_ipyparse_family(*, input_data: bytes, ipyparse_family: str | None) -> str:
+    if ipyparse_family in {"ipv4", "ipv6"}:
+        return ipyparse_family
+    try:
+        input_str = input_data.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return "ipv4"
+    return "ipv6" if ":" in input_str else "ipv4"
+
+
+def _ipyparse_coverage_config(
+    *,
+    input_data: bytes,
+    ipyparse_family: str | None,
+) -> dict[str, object]:
+    package_dir = ROOT_DIR / "targets" / "ipyparse" / "src" / "ipyparse"
+    family = _infer_ipyparse_family(
+        input_data=input_data,
+        ipyparse_family=ipyparse_family,
+    )
+    config: dict[str, object] = {
+        "omit": [str(package_dir / "test" / "*")],
+    }
+    module_path = package_dir / f"{family}.py"
+    if module_path.is_file():
+        config["include"] = [str(module_path)]
+    return config
+
+
+def _collect_branch_counts(report: Mapping[str, Any] | None) -> dict[str, int]:
+    if report is None:
+        return {
+            "covered_branches": 0,
+            "missing_branches": 0,
+            "total_branches": 0,
+        }
+    totals = report.get("totals")
+    if not isinstance(totals, Mapping):
+        totals = {}
+    num_branches = int(totals.get("num_branches", 0) or 0)
+    covered_branches = int(totals.get("covered_branches", 0) or 0)
+    missing_branches = max(num_branches - covered_branches, 0)
+    return {
+        "covered_branches": covered_branches,
+        "missing_branches": missing_branches,
+        "total_branches": num_branches,
+    }
+
+
+def _collect_branch_details_by_file(report: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if report is None:
+        return out
+    files = report.get("files")
+    if not isinstance(files, Mapping):
+        return out
+    for filename, file_report in sorted(files.items()):
+        if not isinstance(file_report, Mapping):
+            continue
+        summary = file_report.get("summary")
+        if not isinstance(summary, Mapping):
+            summary = {}
+        total_lines = int(summary.get("num_statements", 0) or 0)
+        covered_list = _coerce_branch_list(file_report.get("executed_branches"))
+        missing_list = _coerce_branch_list(file_report.get("missing_branches"))
 
         out.append(
             {
@@ -196,7 +228,12 @@ def _run_ipyparse_open(*, input_data: bytes) -> dict[str, Any]:
     }
 
 
-def run_open_target_with_branches(*, target_name: str, input_data: bytes) -> dict[str, Any]:
+def run_open_target_with_branches(
+    *,
+    target_name: str,
+    input_data: bytes,
+    ipyparse_family: str | None = None,
+) -> dict[str, Any]:
     if target_name not in {"json_open", "cidrize", "ipyparse"}:
         return {
             "status": "error",
@@ -206,15 +243,20 @@ def run_open_target_with_branches(*, target_name: str, input_data: bytes) -> dic
             "branch_details_by_file": [],
         }
 
-    cov_source: list[str] | None = None
+    cov_kwargs: dict[str, object] = {"branch": True, "data_file": None}
     if target_name == "json_open":
-        cov_source = ["json"]
+        cov_kwargs["source"] = ["json"]
     elif target_name == "cidrize":
-        cov_source = [str(ROOT_DIR / "targets" / "cidrize")]
+        cov_kwargs["source"] = [str(ROOT_DIR / "targets" / "cidrize")]
     elif target_name == "ipyparse":
-        cov_source = [str(ROOT_DIR / "targets" / "ipyparse" / "src" / "ipyparse")]
+        cov_kwargs.update(
+            _ipyparse_coverage_config(
+                input_data=input_data,
+                ipyparse_family=ipyparse_family,
+            )
+        )
 
-    cov = coverage.Coverage(branch=True, data_file=None, source=cov_source)
+    cov = coverage.Coverage(**cov_kwargs)
     cov.start()
     try:
         if target_name == "json_open":
@@ -227,13 +269,15 @@ def run_open_target_with_branches(*, target_name: str, input_data: bytes) -> dic
     finally:
         cov.stop()
 
-    branch_counts = _collect_branch_counts(cov)
-    branch_details_by_file = _collect_branch_details_by_file(cov)
+    branch_report = _load_branch_report(cov)
+    branch_counts = _collect_branch_counts(branch_report)
+    branch_details_by_file = _collect_branch_details_by_file(branch_report)
     return {
         "status": open_result.get("status", "ok"),
         "bug_signature": open_result.get("bug_signature"),
         "covered_branches": branch_counts["covered_branches"],
         "missing_branches": branch_counts["missing_branches"],
+        "total_branches": branch_counts["total_branches"],
         "branch_details_by_file": branch_details_by_file,
     }
 

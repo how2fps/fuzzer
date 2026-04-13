@@ -14,7 +14,6 @@ from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from coverage.parser import PythonParser
 from tqdm import tqdm
 
 from core.config import FuzzConfig, is_debug_run
@@ -46,9 +45,6 @@ from seed_scheduler import (
     ScheduledSeed,
     build_ucb_update_signals,
 )
-
-
-_BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
 
 
 def _bug_key_from_result(result: Mapping[str, Any]) -> tuple[str, str, str] | None:
@@ -257,56 +253,9 @@ def _count_seen_branches(conn: sqlite3.Connection) -> int:
         return 0
 
 
-def _branch_arcs_for_file(file_name: str) -> set[tuple[int, int]]:
-    cached = _BRANCH_ARC_CACHE.get(file_name)
-    if cached is not None:
-        return cached
-
-    path = Path(file_name)
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parent.parent / path
-
-    branch_arcs: set[tuple[int, int]] = set()
-    try:
-        parser = PythonParser(filename=str(path))
-        parser.parse_source()
-        arcs = parser.arcs() or []
-    except OSError:
-        _BRANCH_ARC_CACHE[file_name] = branch_arcs
-        return branch_arcs
-
-    exits: dict[int, set[int]] = {}
-    for from_line, to_line in arcs:
-        if from_line <= 0:
-            continue
-        exits.setdefault(from_line, set()).add(to_line)
-
-    for from_line, targets in exits.items():
-        if len(targets) <= 1:
-            continue
-        for to_line in targets:
-            branch_arcs.add((from_line, to_line))
-
-    _BRANCH_ARC_CACHE[file_name] = branch_arcs
-    return branch_arcs
-
-
 def _count_seen_covered_branches(conn: sqlite3.Connection) -> int:
-    """Return the accumulated number of unique covered branches, excluding non-branch arcs."""
-    total = 0
-    rows = conn.execute(
-        "SELECT file, from_line, to_line FROM seen_branches"
-    ).fetchall()
-    seen_by_file: dict[str, set[tuple[int, int]]] = {}
-    for file_name, from_line, to_line in rows:
-        try:
-            seen_by_file.setdefault(str(file_name), set()).add((int(from_line), int(to_line)))
-        except (TypeError, ValueError):
-            continue
-
-    for file_name, arcs in seen_by_file.items():
-        total += len(arcs & _branch_arcs_for_file(file_name))
-    return total
+    """Return the accumulated number of unique covered branches recorded so far."""
+    return _count_seen_branches(conn)
 
 
 def _extract_total_branches(result: Mapping[str, Any]) -> int:
