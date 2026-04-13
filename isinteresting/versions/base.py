@@ -111,6 +111,24 @@ def get_covered_edges_from_result(result: Mapping[str, Any]) -> set[tuple[str, i
     return _get_covered_edges(coverage_source)
 
 
+def get_covered_lines_from_result(result: Mapping[str, Any]) -> set[tuple[str, int]]:
+    """Extract (file, line) for all covered statements (line-based)."""
+    closed_raw = result.get("closed_result") if isinstance(result, Mapping) else None
+    closed = _as_mapping(closed_raw)
+    if closed is None:
+        return set()
+    shadow_raw = result.get("shadow_result") if isinstance(result, Mapping) else None
+    shadow_res = _as_mapping(shadow_raw) if shadow_raw is not None else None
+    open_raw = result.get("open_result") if isinstance(result, Mapping) else None
+    open_res = _as_mapping(open_raw) if open_raw is not None else None
+    coverage_source = _select_coverage_source(
+        closed=closed,
+        shadow_res=shadow_res,
+        open_res=open_res,
+    )
+    return _get_covered_lines(coverage_source)
+
+
 def get_coverage_source_kind_from_result(result: Mapping[str, Any]) -> str:
     """Return `closed`, `shadow`, `open`, or `none` for the selected coverage source."""
     closed_raw = result.get("closed_result") if isinstance(result, Mapping) else None
@@ -203,6 +221,62 @@ def _get_covered_edges(closed: Mapping[str, Any]) -> set[tuple[str, int, int]]:
     return edges
 
 
+def _get_covered_branch_edges(source: Mapping[str, Any]) -> set[tuple[str, int, int]]:
+    edges: set[tuple[str, int, int]] = set()
+    details = source.get("branch_details_by_file")
+    if not isinstance(details, Sequence):
+        return edges
+    for file_entry in details:
+        if not _as_mapping(file_entry):
+            continue
+        file_name = file_entry.get("file")
+        if not file_name:
+            continue
+        raw_list = file_entry.get("covered_branch_edges")
+        if not isinstance(raw_list, Sequence):
+            raw_list = file_entry.get("covered_branches")
+        if not isinstance(raw_list, Sequence):
+            continue
+        for arc in raw_list:
+            arc_map = _as_mapping(arc) if arc is not None else None
+            if arc_map is None:
+                continue
+            try:
+                from_line = int(arc_map.get("from_line", 0))
+                to_line = int(arc_map.get("to_line", 0))
+            except (TypeError, ValueError):
+                continue
+            if from_line <= 0:
+                continue
+            edges.add((str(file_name), from_line, to_line))
+    return edges
+
+
+def _get_covered_lines(source: Mapping[str, Any]) -> set[tuple[str, int]]:
+    lines: set[tuple[str, int]] = set()
+    details = source.get("branch_details_by_file")
+    if not isinstance(details, Sequence):
+        return lines
+    for file_entry in details:
+        if not _as_mapping(file_entry):
+            continue
+        file_name = file_entry.get("file")
+        if not file_name:
+            continue
+        raw_lines = file_entry.get("covered_lines")
+        if not isinstance(raw_lines, Sequence):
+            continue
+        for raw_line in raw_lines:
+            try:
+                line = int(raw_line)
+            except (TypeError, ValueError):
+                continue
+            if line <= 0:
+                continue
+            lines.add((str(file_name), line))
+    return lines
+
+
 def _coverage_key_from_edges(edges: set[tuple[str, int, int]]) -> str:
     if not edges:
         return ""
@@ -245,6 +319,26 @@ def _new_edges_stats(
     except sqlite3.OperationalError:
         return None
     return (new_count, len(edges))
+
+
+def _new_lines_stats(
+    conn: sqlite3.Connection,
+    lines: set[tuple[str, int]],
+) -> tuple[int, int] | None:
+    if not lines:
+        return (0, 0)
+    new_count = 0
+    try:
+        for file_name, line in lines:
+            row = conn.execute(
+                "SELECT 1 FROM seen_lines WHERE file = ? AND line = ? LIMIT 1",
+                (file_name, line),
+            ).fetchone()
+            if row is None:
+                new_count += 1
+    except sqlite3.OperationalError:
+        return None
+    return (new_count, len(lines))
 
 
 def _coverage_backend_name(value: Mapping[str, Any] | None) -> str:
@@ -525,6 +619,8 @@ def compute_interestingness(
         open_res=open_res,
     )
     edges = _get_covered_edges(coverage_source)
+    branch_edges = _get_covered_branch_edges(coverage_source)
+    covered_lines = _get_covered_lines(coverage_source)
     coverage_key = _coverage_key_from_edges(edges)
     closed_status = _normalize_status(closed.get("status"))
     closed_bug = _as_mapping(closed.get("bug_signature"))
@@ -541,6 +637,8 @@ def compute_interestingness(
 
     new_edges_signal = 0.0
     rare_edges_signal = 0.0
+    new_branch_signal = 0.0
+    new_statement_signal = 0.0
     new_diff_behavior_signal = 0.0
     new_error_site_signal = 0.0
     input_structure_novelty_signal = 0.0
@@ -576,6 +674,12 @@ def compute_interestingness(
                 edges=edges,
             )
             new_edges_signal = 1.0 if new_edge_count > 0 else 0.0
+            branch_stats = _new_edges_stats(conn, branch_edges)
+            if branch_stats is not None:
+                new_branch_signal = 1.0 if branch_stats[0] > 0 else 0.0
+            line_stats = _new_lines_stats(conn, covered_lines)
+            if line_stats is not None:
+                new_statement_signal = 1.0 if line_stats[0] > 0 else 0.0
             if diff_pattern_key and _is_first_diff_behavior(
                 conn,
                 target=target,
@@ -619,6 +723,8 @@ def compute_interestingness(
     weighted_sum = (
         (5.0 * new_edges_signal)
         + (3.0 * rare_edges_signal)
+        + (2.0 * new_branch_signal)
+        + (1.5 * new_statement_signal)
         + (4.0 * new_diff_behavior_signal)
         + (3.0 * new_error_site_signal)
         + (2.0 * late_parse_depth_signal)

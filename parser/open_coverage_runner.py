@@ -76,6 +76,21 @@ def _coerce_branch_list(raw_pairs: object) -> list[dict[str, int]]:
     return branches
 
 
+def _coerce_line_list(raw_lines: object) -> list[int]:
+    lines: list[int] = []
+    if not isinstance(raw_lines, Sequence):
+        return lines
+    for value in raw_lines:
+        try:
+            line = int(value)
+        except (TypeError, ValueError):
+            continue
+        if line <= 0:
+            continue
+        lines.append(line)
+    return lines
+
+
 def _infer_ipyparse_family(*, input_data: bytes, ipyparse_family: str | None) -> str:
     if ipyparse_family in {"ipv4", "ipv6"}:
         return ipyparse_family
@@ -141,6 +156,8 @@ def _collect_branch_details_by_file(report: Mapping[str, Any] | None) -> list[di
         total_lines = int(summary.get("num_statements", 0) or 0)
         covered_list = _coerce_branch_list(file_report.get("executed_branches"))
         missing_list = _coerce_branch_list(file_report.get("missing_branches"))
+        covered_lines = _coerce_line_list(file_report.get("executed_lines"))
+        missing_lines = _coerce_line_list(file_report.get("missing_lines"))
 
         out.append(
             {
@@ -148,6 +165,8 @@ def _collect_branch_details_by_file(report: Mapping[str, Any] | None) -> list[di
                 "total_lines": total_lines,
                 "covered_branches": covered_list,
                 "missing_branches": missing_list,
+                "covered_lines": covered_lines,
+                "missing_lines": missing_lines,
             }
         )
     return out
