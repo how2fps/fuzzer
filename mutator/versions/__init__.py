@@ -24,13 +24,11 @@ class FeedbackFn(Protocol):
 
 from . import base
 from . import adaptive_all
-from . import adaptive_improved
 from . import byte_havoc
 from . import grammar_ast
 
 REGISTRY: dict[str, Callable[..., str]] = {
     "adaptive_all": adaptive_all.mutate,
-    "adaptive_improved": adaptive_improved.mutate,
     "base": base.mutate,
     "byte_havoc": byte_havoc.mutate,
     "grammar_ast": grammar_ast.mutate,
@@ -39,8 +37,6 @@ REGISTRY: dict[str, Callable[..., str]] = {
 FEEDBACK_REGISTRY: dict[str, FeedbackFn] = {}
 if hasattr(adaptive_all, "handle_feedback"):
     FEEDBACK_REGISTRY["adaptive_all"] = adaptive_all.handle_feedback
-if hasattr(adaptive_improved, "handle_feedback"):
-    FEEDBACK_REGISTRY["adaptive_improved"] = adaptive_improved.handle_feedback
 
 
 def get_mutator(version: str) -> MutateFn:
