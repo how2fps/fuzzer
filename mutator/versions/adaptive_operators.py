@@ -14,7 +14,7 @@ class AdaptiveStrategy:
         self.cycle_usage = {op: 0 for op in operators}
         self.cycle_success = {op: 0 for op in operators}
         self.cycle_count = 0
-        self.cycle_window = 50
+        self.cycle_window = len(operators) * 10
         self.w = 0.4
         self.epsilon = 0.05
 
@@ -41,6 +41,21 @@ class AdaptiveStrategy:
                 self.cycle_success[op] = 0
 
     def pso_update(self) -> None:
+        # Dynamic epsilon based on recent coverage success
+        total_cycle_successes = sum(self.cycle_success.values())
+        if total_cycle_successes == 0:
+            # We are stuck. Increase epsilon (explore more), cap at 0.25
+            self.epsilon = min(0.25, self.epsilon * 1.1 + 0.01)
+        else:
+            # We are finding coverage. Decrease epsilon (exploit more), min 0.01
+            self.epsilon = max(0.01, self.epsilon * 0.9)
+
+        # Decay history so ancient success doesn't hold weight forever
+        decay_factor = 0.85
+        for op in self.local_best_efficiencies:
+            self.local_best_efficiencies[op] *= decay_factor
+        self.global_best_efficiency *= decay_factor
+
         for op in self.weights:
             eff = (
                 self.cycle_success[op] / self.cycle_usage[op]
