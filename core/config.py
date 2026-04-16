@@ -35,6 +35,7 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_hours",
             "timeout",
             "memory_telemetry_seconds",
+            "heartbeat_seconds",
             "worker_max_jobs",
             "rng_seed",
             "workers",
@@ -100,6 +101,7 @@ class FuzzConfig(TypedDict):
     max_hours: float | None
     timeout: float
     memory_telemetry_seconds: float
+    heartbeat_seconds: float
     worker_max_jobs: int
     rng_seed: int | None
     workers: int
@@ -144,6 +146,7 @@ def get_default_config() -> FuzzConfig:
         "max_hours": None,
         "timeout": DEFAULT_TIMEOUT,
         "memory_telemetry_seconds": 0.0,
+        "heartbeat_seconds": 0.0,
         "worker_max_jobs": 500,
         "rng_seed": None,
         "workers": 1,
@@ -156,7 +159,7 @@ def get_default_config() -> FuzzConfig:
         "seed_preload_mode": "full",
         "seed_preload_total": 8,
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
-        "seed_refill_mode": "historical",
+        "seed_refill_mode": "grammar",
         "llm_seed_candidates": 5,
         "run_startup_generated_unmutated_first": False,
         "mutator_kind": "auto",
@@ -214,6 +217,7 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "ast_grammar_path": ("--ast-grammar-file",),
     "grammar_rules_file": ("-g", "--grammar-rules-file"),
     "debug_mode": ("--debug",),
+    "heartbeat_seconds": ("--heartbeat-seconds",),
     "seed_preload_mode": ("--seed-preload-mode",),
     "seed_preload_total": ("--seed-preload-total",),
     "seed_refill_mode": ("--seed-refill-mode",),
@@ -696,6 +700,16 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         ),
     )
     parser.add_argument(
+        "--heartbeat-seconds",
+        dest="heartbeat_seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Write a heartbeat JSON file every N seconds (0 disables). "
+            "Useful for detecting abrupt job manager stops."
+        ),
+    )
+    parser.add_argument(
         "--worker-max-jobs",
         dest="worker_max_jobs",
         type=int,
@@ -822,6 +836,8 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         parser.error("--mutation-chain-max-depth must be >= 1.")
     if args.memory_telemetry_seconds < 0:
         parser.error("--memory-telemetry-seconds must be >= 0.")
+    if args.heartbeat_seconds < 0:
+        parser.error("--heartbeat-seconds must be >= 0.")
     if args.worker_max_jobs < 0:
         parser.error("--worker-max-jobs must be >= 0.")
     if args.config is not None and args.configs_dir is not None:
@@ -867,6 +883,7 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         "max_hours": args.max_hours,
         "timeout": args.timeout,
         "memory_telemetry_seconds": args.memory_telemetry_seconds,
+        "heartbeat_seconds": args.heartbeat_seconds,
         "worker_max_jobs": args.worker_max_jobs,
         "rng_seed": args.rng_seed,
         "workers": args.workers,

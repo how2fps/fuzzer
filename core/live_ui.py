@@ -49,6 +49,7 @@ def render_config_panel(
         ("mutator", config["mutator_kind"]),
         ("workers", str(config["workers"])),
         ("mem telemetry", f"{config['memory_telemetry_seconds']}s"),
+        ("heartbeat", f"{config.get('heartbeat_seconds', 0.0)}s"),
         ("worker recycle", str(config.get("worker_max_jobs", 0))),
         ("limit", _fmt_limit(config)),
         ("timeout", f"{config['timeout']}s"),
@@ -507,8 +508,6 @@ class RunDashboard:
         table.add_column("Pending", justify="right")
         table.add_column("Elapsed", justify="right")
         table.add_column("Budget", justify="right")
-        table.add_column("RSS Total", justify="right")
-        table.add_column("Last Event", ratio=4)
 
         timeouts_style = "bold yellow" if self.timeouts_found else "green"
         errors_style = "bold red" if self.errors_found else "green"
@@ -533,14 +532,21 @@ class RunDashboard:
             Text(str(self.pending_jobs), style=pending_style),
             self._fmt_elapsed(),
             budget_text,
-            self.memory_rss_total or "-",
-            self.last_event,
+        )
+        table.add_row(
+            Text("Last Event", style="dim"),
+            self._preview_input(self.last_event, limit=200) or "-",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
         )
         table.add_row(
             Text("Newest Coverage Branch", style="dim"),
             self._preview_branch(self.newest_coverage_branch) or "-",
-            "",
-            "",
             "",
             "",
             "",
@@ -560,16 +566,8 @@ class RunDashboard:
                 "",
                 "",
                 "",
-                "",
-                "",
             )
         return table
-
-    def _memory_panel(self) -> Panel | None:
-        if not self.memory_rss_details:
-            return None
-        text = Text(self.memory_rss_details, style="white")
-        return Panel(text, title="Memory RSS", border_style="green")
 
     def _llm_panel(self) -> Panel | None:
         if self.llm_state == "idle" and not self.llm_seed_previews:
@@ -630,12 +628,6 @@ class RunDashboard:
         last_mutation_panel = self._last_mutation_panel()
         if last_mutation_panel is not None:
             panels.append(last_mutation_panel)
-        llm_panel = self._llm_panel()
-        if llm_panel is not None:
-            panels.append(llm_panel)
-        memory_panel = self._memory_panel()
-        if memory_panel is not None:
-            panels.append(memory_panel)
         panels.append(Panel(footer, border_style="dim"))
         crash_output_panel = self._crash_output_panel()
         if crash_output_panel is not None:

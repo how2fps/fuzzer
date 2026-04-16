@@ -375,31 +375,45 @@ def _parse_bug_signature(stderr: str) -> dict[str, Any]:
             or line.startswith("During handling of the above exception")
         )
 
+    def _exception_line_match(line: str) -> re.Match[str] | None:
+        candidate = re.match(r"^(\w+(?:\.\w+)*)\s*:\s*(.*)$", line)
+        if candidate is None:
+            return None
+        if candidate.group(1).lower() == "warning":
+            return None
+        if not _looks_like_exception_name(candidate.group(1)):
+            return None
+        return candidate
+
     def _looks_like_exception_name(name: str) -> bool:
         final_segment = name.rsplit(".", 1)[-1].strip()
         return bool(final_segment) and bool(re.match(r"^[A-Z][A-Za-z0-9_]*$", final_segment))
 
     exc_line_index: int | None = None
     exc_match: re.Match[str] | None = None
-    for idx in range(len(stripped_lines) - 1, -1, -1):
-        line = stripped_lines[idx]
-        if _is_structural_traceback_line(line):
-            continue
-        candidate = re.match(r"^(\w+(?:\.\w+)*)\s*:\s*(.*)$", line)
-        if candidate and candidate.group(1).lower() != "warning" and _looks_like_exception_name(
-            candidate.group(1)
-        ):
+    traceback_start = next(
+        (idx for idx in range(len(stripped_lines) - 1, -1, -1) if "Traceback" in stripped_lines[idx]),
+        None,
+    )
+    search_starts = [0] if traceback_start is None else [traceback_start + 1, 0]
+    for search_start in search_starts:
+        for idx in range(search_start, len(stripped_lines)):
+            line = stripped_lines[idx]
+            if _is_structural_traceback_line(line):
+                continue
+            candidate = _exception_line_match(line)
+            if candidate is None:
+                continue
             exc_line_index = idx
             exc_match = candidate
+            break
+        if exc_match is not None:
             break
 
     if exc_match is not None and exc_line_index is not None:
         message_parts = [exc_match.group(2).strip()] if exc_match.group(2).strip() else []
         for cont in stripped_lines[exc_line_index + 1 :]:
             if _is_structural_traceback_line(cont):
-                break
-            next_match = re.match(r"^(\w+(?:\.\w+)*)\s*:\s*(.*)$", cont)
-            if next_match and _looks_like_exception_name(next_match.group(1)):
                 break
             message_parts.append(cont)
         out["type"] = "exception"
@@ -678,6 +692,7 @@ if __name__ == "__main__":
             "missing_branches": 0,
             "total_branches": 0,
             "branch_details_by_file": [],
+            "executed_arcs_by_file": [],
         }
     except Exception as exc:
         return {
@@ -694,6 +709,7 @@ if __name__ == "__main__":
             "missing_branches": 0,
             "total_branches": 0,
             "branch_details_by_file": [],
+            "executed_arcs_by_file": [],
         }
     finally:
         if temp_path:
@@ -723,6 +739,7 @@ if __name__ == "__main__":
             "covered_branches": 0,
             "missing_branches": 0,
             "branch_details_by_file": [],
+            "executed_arcs_by_file": [],
         }
 
     out: dict[str, Any] = {
@@ -733,6 +750,7 @@ if __name__ == "__main__":
         "missing_branches": payload.get("missing_branches", 0),
         "total_branches": payload.get("total_branches"),
         "branch_details_by_file": payload.get("branch_details_by_file", []),
+        "executed_arcs_by_file": payload.get("executed_arcs_by_file", []),
     }
     return out
 
@@ -770,6 +788,7 @@ def _apply_coverage_payload(
             "covered_branches",
             "missing_branches",
             "branch_details_by_file",
+            "executed_arcs_by_file",
             "total_branches",
         ):
             if key not in payload:
@@ -952,6 +971,7 @@ def run_parser(
                     "missing_branches": 0,
                     "total_branches": 0,
                     "branch_details_by_file": [],
+                    "executed_arcs_by_file": [],
                 }
                 if isinstance(coverage_open_result, dict):
                     coverage_payload = {
@@ -966,6 +986,9 @@ def run_parser(
                         ),
                         "branch_details_by_file": coverage_open_result.get(
                             "branch_details_by_file", []
+                        ),
+                        "executed_arcs_by_file": coverage_open_result.get(
+                            "executed_arcs_by_file", []
                         ),
                     }
                 open_result.update(coverage_payload)

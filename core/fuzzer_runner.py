@@ -4,6 +4,9 @@ import json
 import random
 import shutil
 import signal
+import datetime as dt
+import traceback
+import faulthandler
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +42,22 @@ _TARGET_DEFAULT_GRAMMARS: dict[str, tuple[str, str]] = {
     "json-decoder": ("json.json", "json.ast.json"),
     "json_open": ("json.json", "json.ast.json"),
 }
+
+
+def _write_crash_log(*, results_folder: Path, target: str, exc: BaseException) -> None:
+    results_folder.mkdir(parents=True, exist_ok=True)
+    crash_path = results_folder / "crash.log"
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    message = (
+        "================================================================================\n"
+        f"Timestamp : {timestamp}\n"
+        f"Target    : {target}\n"
+        f"Exception : {type(exc).__name__}: {exc}\n"
+        "Traceback:\n"
+        f"{traceback.format_exc()}\n"
+    )
+    with crash_path.open("a", encoding="utf-8") as handle:
+        handle.write(message)
 
 
 def _default_target_grammar_paths(
@@ -395,6 +414,26 @@ def run_fuzzer(
     db_path = results_folder / "runs.db"
     conn = open_results_db(db_path)
     init_results_db(conn)
+    stackdump_handle = None
+    stackdump_enabled = False
+    try:
+        stackdump_path = results_folder / "stackdump.log"
+        stackdump_handle = stackdump_path.open("a", encoding="utf-8")
+        stackdump_handle.write(
+            "================================================================================\n"
+            f"Stack dump handler registered at {dt.datetime.now(dt.timezone.utc).isoformat()}\n"
+        )
+        stackdump_handle.flush()
+        faulthandler.register(
+            signal.SIGUSR1,
+            file=stackdump_handle,
+            all_threads=True,
+            chain=False,
+        )
+        stackdump_enabled = True
+        log.info("SIGUSR1 stack dump enabled: %s", stackdump_path)
+    except Exception as exc:
+        log.warning("Could not enable SIGUSR1 stack dump: %s", exc)
     startup_llm_seeds: list[str] = []
     startup_regex_seeds: list[str] = []
 
@@ -510,14 +549,24 @@ def run_fuzzer(
     )
 
     shutdown_requested: list[bool] = [False]
+    shutdown_notice: list[str | None] = [None]
 
     def _sigint_handler(_signum: int, _frame: object) -> None:
         shutdown_requested[0] = True
-        get_fuzzer_logger().info(
+        # Signal handlers must avoid logging/tqdm writes because they may interrupt
+        # code that already holds tqdm's global output lock.
+        shutdown_notice[0] = (
             "\nCtrl+C: shutting down gracefully (workers will finish current run and exit)..."
         )
 
+    def _sigterm_handler(_signum: int, _frame: object) -> None:
+        shutdown_requested[0] = True
+        shutdown_notice[0] = (
+            "\nSIGTERM: shutting down gracefully (workers will finish current run and exit)..."
+        )
+
     original_sigint = None
+    original_sigterm = None
     final_summary_printed = False
     try:
         try:
@@ -525,40 +574,60 @@ def run_fuzzer(
         except (ValueError, OSError):
             original_sigint = None
         try:
+            original_sigterm = signal.getsignal(signal.SIGTERM)
+        except (ValueError, OSError):
+            original_sigterm = None
+        try:
             signal.signal(signal.SIGINT, _sigint_handler)
         except (ValueError, OSError):
             # Some environments (e.g. non-main threads, child processes) do not
             # allow installing signal handlers; in that case we just skip the
             # graceful shutdown behaviour and fall back to defaults.
             pass
+        try:
+            signal.signal(signal.SIGTERM, _sigterm_handler)
+        except (ValueError, OSError):
+            # Some environments do not allow installing signal handlers.
+            pass
 
         workers = max(1, config["workers"])
-        run_fuzzer_multi_worker(
-            config=config,
-            scheduler=scheduler,
-            seed_energies=seed_energies,
-            corpus=corpus,
-            power_scheduler_module=power_scheduler_module,
-            effective_target=effective_target,
-            effective_mutator=effective_mutator,
-            results_folder=results_folder,
-            db_path=db_path,
-            conn=conn,
-            workers=workers,
-            shutdown_requested=shutdown_requested,
-            mutate_fn=mutate_fn,
-            rng=rng,
-            startup_seed_items=startup_seed_items,
-            startup_generated_seeds=startup_llm_seeds or startup_regex_seeds,
-            startup_generated_source=(
-                "startup LLM bootstrap"
-                if startup_llm_seeds
-                else "startup grammar bootstrap"
-                if startup_regex_seeds
-                else ""
-            ),
-            mutator_feedback_fn=mutator_feedback_fn,
-        )
+        try:
+            run_fuzzer_multi_worker(
+                config=config,
+                scheduler=scheduler,
+                seed_energies=seed_energies,
+                corpus=corpus,
+                power_scheduler_module=power_scheduler_module,
+                effective_target=effective_target,
+                effective_mutator=effective_mutator,
+                results_folder=results_folder,
+                db_path=db_path,
+                conn=conn,
+                workers=workers,
+                shutdown_requested=shutdown_requested,
+                mutate_fn=mutate_fn,
+                rng=rng,
+                startup_seed_items=startup_seed_items,
+                startup_generated_seeds=startup_llm_seeds or startup_regex_seeds,
+                startup_generated_source=(
+                    "startup LLM bootstrap"
+                    if startup_llm_seeds
+                    else "startup grammar bootstrap"
+                    if startup_regex_seeds
+                    else ""
+                ),
+                mutator_feedback_fn=mutator_feedback_fn,
+            )
+        except Exception as exc:
+            _write_crash_log(
+                results_folder=results_folder,
+                target=effective_target,
+                exc=exc,
+            )
+            get_fuzzer_logger().exception("Fuzzer crashed unexpectedly.")
+            raise
+        if shutdown_notice[0]:
+            get_fuzzer_logger().info("%s", shutdown_notice[0])
         console.print(
             render_run_summary_panel(
                 target=effective_target,
@@ -585,10 +654,25 @@ def run_fuzzer(
                 target=effective_target,
                 parser_config=config.get("parser_config"),  # type: ignore[arg-type]
             )
+            if stackdump_enabled:
+                try:
+                    faulthandler.unregister(signal.SIGUSR1)
+                except (ValueError, OSError):
+                    pass
+            if stackdump_handle is not None:
+                try:
+                    stackdump_handle.close()
+                except OSError:
+                    pass
             if original_sigint is not None:
                 try:
                     signal.signal(signal.SIGINT, original_sigint)
                 except (ValueError, OSError):
                     # If we cannot restore the original handler, ignore; this is
                     # best-effort and should not mask earlier exceptions.
+                    pass
+            if original_sigterm is not None:
+                try:
+                    signal.signal(signal.SIGTERM, original_sigterm)
+                except (ValueError, OSError):
                     pass

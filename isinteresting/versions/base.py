@@ -176,30 +176,36 @@ def _select_coverage_source(
 
 def _get_covered_edges(closed: Mapping[str, Any]) -> set[tuple[str, int, int]]:
     edges: set[tuple[str, int, int]] = set()
-    details = closed.get("branch_details_by_file")
-    if not isinstance(details, Sequence):
-        return edges
-    for file_entry in details:
-        if not _as_mapping(file_entry):
+    detail_sources: list[tuple[object, str]] = [
+        (closed.get("executed_arcs_by_file"), "executed_arcs"),
+        (closed.get("branch_details_by_file"), "covered_branches"),
+    ]
+    for details, arc_key in detail_sources:
+        if not isinstance(details, Sequence):
             continue
-        file_name = file_entry.get("file")
-        if not file_name:
-            continue
-        covered_list = file_entry.get("covered_branches")
-        if not isinstance(covered_list, Sequence):
-            continue
-        for arc in covered_list:
-            arc_map = _as_mapping(arc) if arc is not None else None
-            if arc_map is None:
+        for file_entry in details:
+            if not _as_mapping(file_entry):
                 continue
-            try:
-                from_line = int(arc_map.get("from_line", 0))
-                to_line = int(arc_map.get("to_line", 0))
-            except (TypeError, ValueError):
+            file_name = file_entry.get("file")
+            if not file_name:
                 continue
-            if from_line <= 0:
+            covered_list = file_entry.get(arc_key)
+            if not isinstance(covered_list, Sequence):
                 continue
-            edges.add((str(file_name), from_line, to_line))
+            for arc in covered_list:
+                arc_map = _as_mapping(arc) if arc is not None else None
+                if arc_map is None:
+                    continue
+                try:
+                    from_line = int(arc_map.get("from_line", 0))
+                    to_line = int(arc_map.get("to_line", 0))
+                except (TypeError, ValueError):
+                    continue
+                if from_line <= 0:
+                    continue
+                edges.add((str(file_name), from_line, to_line))
+        if edges:
+            return edges
     return edges
 
 

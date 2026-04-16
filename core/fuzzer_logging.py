@@ -1,12 +1,19 @@
-"""Logging for the fuzzer: console output goes through tqdm.write so progress bars stay intact."""
+"""Logging for the fuzzer: coordinator uses tqdm-safe output, workers log to files."""
 from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from tqdm import tqdm
 
 FUZZER_LOGGER_NAME = "fuzzer"
+WORKER_LOG_FILENAME = "worker.log"
+
+_COORDINATOR_LOG_FORMATTER = logging.Formatter("%(message)s")
+_WORKER_LOG_FORMATTER = logging.Formatter(
+    "%(asctime)s %(process)d %(levelname)s %(message)s"
+)
 
 
 class TqdmWriteHandler(logging.Handler):
@@ -34,19 +41,58 @@ def get_fuzzer_logger() -> logging.Logger:
     return logging.getLogger(FUZZER_LOGGER_NAME)
 
 
-def configure_fuzzer_logging(*, level: int = logging.INFO) -> logging.Logger:
-    """
-    Attach a tqdm-safe handler to the fuzzer logger (idempotent).
-    Call once at process startup (e.g. main) before any fuzzer output.
-    """
-    logger = get_fuzzer_logger()
+def _replace_handlers(
+    logger: logging.Logger,
+    *,
+    handlers: list[logging.Handler],
+    level: int,
+) -> logging.Logger:
     logger.setLevel(level)
     logger.propagate = False
 
-    if any(isinstance(h, TqdmWriteHandler) for h in logger.handlers):
-        return logger
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
 
-    handler = TqdmWriteHandler(level=level)
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(handler)
+    for handler in handlers:
+        handler.setLevel(level)
+        logger.addHandler(handler)
     return logger
+
+
+def worker_log_path(*, results_folder: str | Path, worker_id: int) -> Path:
+    return (
+        Path(results_folder)
+        / ".worker_cwd"
+        / f"w{worker_id}"
+        / "logs"
+        / WORKER_LOG_FILENAME
+    )
+
+
+def configure_fuzzer_logging(*, level: int = logging.INFO) -> logging.Logger:
+    """
+    Configure the coordinator logger to emit tqdm-safe terminal output.
+    """
+    handler = TqdmWriteHandler(level=level)
+    handler.setFormatter(_COORDINATOR_LOG_FORMATTER)
+    return _replace_handlers(get_fuzzer_logger(), handlers=[handler], level=level)
+
+
+def configure_worker_logging(
+    *,
+    results_folder: str | Path,
+    worker_id: int,
+    level: int = logging.INFO,
+) -> logging.Logger:
+    """
+    Reconfigure a forked worker to log to its own file instead of sharing tqdm's lock.
+    """
+    log_path = worker_log_path(results_folder=results_folder, worker_id=worker_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(_WORKER_LOG_FORMATTER)
+    return _replace_handlers(get_fuzzer_logger(), handlers=[handler], level=level)

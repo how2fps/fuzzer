@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+import time
 
 from .grammar import (
     _build_rule_graph,
@@ -22,6 +23,7 @@ from .shared import (
     _SUPPORTED_QUOTE_CHARS,
     _SURROGATE_PAIR_ESCAPE_PAYLOADS,
     _TEXT_BOM_PREFIX,
+    _NON_TERMINAL_PATTERN,
     _TOKEN_SPLIT_PATTERN,
     _UPPERCASE_LITERAL_FALLBACK,
     sanitize_mutated_text,
@@ -29,6 +31,10 @@ from .shared import (
 
 _ULTRA_LONG_NUMERIC_MIN_DIGITS = 4301
 _ULTRA_LONG_NUMERIC_MAX_DIGITS = 6000
+_ULTRA_LONG_NUMERIC_EXISTING_THRESHOLD = 512
+_ULTRA_LONG_NUMERIC_BASE_PROB = 0.3
+_ULTRA_LONG_NUMERIC_REPEAT_PROB = 0.05
+_RECURSIVE_BURST_TIME_BUDGET_SECONDS = 0.12
 
 def _validate_probability(*, name: str, value: float) -> float:
     if not 0.0 <= value <= 1.0:
@@ -675,6 +681,50 @@ def _find_delimited_content_ranges(
     return ranges
 
 
+def _find_balanced_span_ranges(
+    *,
+    text: str,
+    capabilities: GrammarCapabilities,
+) -> list[tuple[int, int, str, str]]:
+    ranges: list[tuple[int, int, str, str]] = []
+    for opener, closer in capabilities.paired_delimiters:
+        stack: list[int] = []
+        for index, char in enumerate(text):
+            if char == opener:
+                stack.append(index)
+                continue
+            if char == closer and stack:
+                start = stack.pop()
+                if index > start:
+                    ranges.append((start, index + 1, opener, closer))
+    ranges.sort(key=lambda item: (item[1] - item[0], item[0]), reverse=True)
+    return ranges
+
+
+def _range_length(range_pair: tuple[int, int]) -> int:
+    start, end = range_pair
+    return max(0, end - start)
+
+
+def _pick_biased_large_range(
+    *,
+    ranges: list[tuple[int, int]],
+    rng: random.Random,
+    prefer_largest_probability: float = 0.8,
+) -> tuple[int, int]:
+    if len(ranges) == 1:
+        return ranges[0]
+    if rng.random() < prefer_largest_probability:
+        longest_length = max(_range_length(range_pair) for range_pair in ranges)
+        longest_ranges = [
+            range_pair
+            for range_pair in ranges
+            if _range_length(range_pair) == longest_length
+        ]
+        return rng.choice(longest_ranges)
+    return rng.choice(ranges)
+
+
 def _repetition_amplification_surgery(
     *,
     text: str,
@@ -750,6 +800,88 @@ def _repetition_amplification_surgery(
     if candidate != text:
         return sanitize_mutated_text(candidate)
     return None
+
+
+def _remove_large_token_or_subtree(
+    *,
+    text: str,
+    rng: random.Random,
+    capabilities: GrammarCapabilities,
+) -> str | None:
+    strategies: list[str] = []
+    quoted_ranges = [
+        (start, end + 1)
+        for start, end, _quote_char in _find_quoted_ranges(
+            text=text,
+            quote_chars=capabilities.quote_chars or None,
+        )
+        if end >= start
+    ]
+    numeric_ranges = [
+        (start, end)
+        for start, end in _find_numeric_ranges(text=text)
+        if (end - start) >= 3
+    ]
+    if not numeric_ranges:
+        numeric_ranges = _find_numeric_ranges(text=text)
+    balanced_ranges = [
+        (start, end)
+        for start, end, _opener, _closer in _find_balanced_span_ranges(
+            text=text,
+            capabilities=capabilities,
+        )
+    ]
+    non_root_balanced_ranges = [
+        range_pair
+        for range_pair in balanced_ranges
+        if range_pair != (0, len(text))
+    ]
+    if non_root_balanced_ranges:
+        balanced_ranges = non_root_balanced_ranges
+    ranges_by_strategy = {
+        "quoted_string": quoted_ranges,
+        "numeric_token": numeric_ranges,
+        "balanced_region": balanced_ranges,
+    }
+    strategies.extend(
+        strategy_name
+        for strategy_name, ranges in ranges_by_strategy.items()
+        if ranges
+    )
+    if not strategies:
+        return None
+
+    if len(strategies) == 1:
+        strategy = strategies[0]
+    elif rng.random() < 0.8:
+        largest_strategy_span = max(
+            max(_range_length(range_pair) for range_pair in ranges_by_strategy[strategy_name])
+            for strategy_name in strategies
+        )
+        largest_strategies = [
+            strategy_name
+            for strategy_name in strategies
+            if max(
+                _range_length(range_pair)
+                for range_pair in ranges_by_strategy[strategy_name]
+            )
+            == largest_strategy_span
+        ]
+        strategy = rng.choice(largest_strategies)
+    else:
+        strategy = rng.choice(tuple(strategies))
+
+    start, end = _pick_biased_large_range(
+        ranges=ranges_by_strategy[strategy],
+        rng=rng,
+        prefer_largest_probability=0.85,
+    )
+    return _replace_text_range(
+        text=text,
+        start=start,
+        end=end,
+        replacement="",
+    )
 
 def _structured_range_surgery(
     *,
@@ -1255,6 +1387,18 @@ def _ultra_long_numeric_surgery(
     numeric_ranges = _find_numeric_ranges(text=text)
     if not numeric_ranges:
         return None
+    max_body_len = 0
+    for start, end in numeric_ranges:
+        token = text[start:end]
+        body = token.lstrip("+-")
+        if body.isdigit():
+            max_body_len = max(max_body_len, len(body))
+    if max_body_len >= _ULTRA_LONG_NUMERIC_EXISTING_THRESHOLD:
+        if rng.random() > _ULTRA_LONG_NUMERIC_REPEAT_PROB:
+            return None
+    else:
+        if rng.random() > _ULTRA_LONG_NUMERIC_BASE_PROB:
+            return None
     start, end = rng.choice(numeric_ranges)
     token = text[start:end]
     sign = "-" if token.startswith("-") else ""
@@ -2096,6 +2240,159 @@ def _embed_alternative_fragment(
         rng=rng,
     )
 
+
+def _recursive_burst_symbol_candidates(
+    *,
+    grammar_spec: GrammarSpec,
+) -> tuple[str, ...]:
+    normalized = normalize_grammar_spec(grammar_spec=grammar_spec)
+    rules = normalized["rules"]
+    recursive_symbols = set(normalized["recursive_symbols"])
+    if not recursive_symbols:
+        return ()
+    graph = _build_rule_graph(rules=rules)
+    reachable_symbols = _reachable_rule_symbols(start=normalized["start"], graph=graph)
+    symbols_to_scan = sorted(reachable_symbols or rules)
+    candidates: list[str] = []
+    for symbol in symbols_to_scan:
+        if symbol not in recursive_symbols:
+            continue
+        productions = rules.get(symbol, ())
+        if any(
+            any(
+                ref in recursive_symbols
+                for ref in _NON_TERMINAL_PATTERN.findall(production)
+            )
+            for production in productions
+        ):
+            candidates.append(symbol)
+    return tuple(candidates)
+
+
+def _recursive_burst(
+    *,
+    original_text: str,
+    grammar_spec: GrammarSpec,
+    max_depth: int,
+    rng: random.Random,
+) -> str | None:
+    del original_text
+    normalized = normalize_grammar_spec(grammar_spec=grammar_spec)
+    rules = normalized["rules"]
+    recursive_symbols = set(normalized["recursive_symbols"])
+    candidate_symbols = _recursive_burst_symbol_candidates(grammar_spec=normalized)
+    if not candidate_symbols:
+        return None
+
+    symbol = rng.choice(candidate_symbols)
+    production_indexes_by_symbol = {
+        rule_symbol: tuple(range(len(productions)))
+        for rule_symbol, productions in rules.items()
+    }
+    recursive_indexes_by_symbol: dict[str, tuple[int, ...]] = {}
+    terminating_indexes_by_symbol: dict[str, tuple[int, ...]] = {}
+    for rule_symbol, productions in rules.items():
+        recursive_indexes: list[int] = []
+        terminating_indexes: list[int] = []
+        for index, production in enumerate(productions):
+            refs = [
+                ref
+                for ref in _NON_TERMINAL_PATTERN.findall(production)
+                if ref in rules
+            ]
+            if any(ref in recursive_symbols for ref in refs):
+                recursive_indexes.append(index)
+            else:
+                terminating_indexes.append(index)
+        recursive_indexes_by_symbol[rule_symbol] = tuple(recursive_indexes)
+        terminating_indexes_by_symbol[rule_symbol] = tuple(terminating_indexes)
+
+    min_burst = max(8, max_depth * 4)
+    max_burst = max(min_burst, min(128, max_depth * 24))
+    burst_steps = rng.randint(min_burst, max_burst)
+
+    max_node_expansions = max(400, max_depth * 80)
+    max_output_chars = max(4000, max_depth * 800)
+    depth_limit = max(24, max_depth * 4)
+    nodes_expanded = 0
+    output_chars = 0
+    deadline = time.perf_counter() + _RECURSIVE_BURST_TIME_BUDGET_SECONDS
+
+    output_parts: list[str] = []
+    stack: list[tuple[str, str, int, int]] = [("sym", symbol, burst_steps, 0)]
+    aborted = False
+    while stack:
+        if time.perf_counter() >= deadline:
+            aborted = True
+            break
+        if output_chars >= max_output_chars:
+            aborted = True
+            break
+        kind, payload, remaining_burst, depth = stack.pop()
+        if kind == "lit":
+            if not payload:
+                continue
+            output_chars += len(payload)
+            if output_chars > max_output_chars:
+                aborted = True
+                break
+            output_parts.append(payload)
+            continue
+
+        current_symbol = payload
+        nodes_expanded += 1
+        if nodes_expanded > max_node_expansions:
+            aborted = True
+            break
+        if current_symbol not in rules:
+            output_chars += len(current_symbol)
+            if output_chars > max_output_chars:
+                aborted = True
+                break
+            output_parts.append(current_symbol)
+            continue
+
+        recursive_indexes = recursive_indexes_by_symbol.get(current_symbol, ())
+        terminating_indexes = terminating_indexes_by_symbol.get(current_symbol, ())
+        all_indexes = production_indexes_by_symbol[current_symbol]
+        use_recursive = (
+            current_symbol in recursive_symbols
+            and remaining_burst > 0
+            and bool(recursive_indexes)
+            and depth < depth_limit
+        )
+        if use_recursive:
+            production_index = rng.choice(recursive_indexes)
+        else:
+            production_index = rng.choice(terminating_indexes or all_indexes)
+
+        production = rules[current_symbol][production_index]
+        next_remaining_burst = remaining_burst - 1 if use_recursive else remaining_burst
+
+        parts: list[tuple[str, str]] = []
+        last_idx = 0
+        for match in _NON_TERMINAL_PATTERN.finditer(production):
+            literal = production[last_idx:match.start()]
+            if literal:
+                parts.append(("lit", literal))
+            next_symbol = match.group(0)
+            if depth < depth_limit:
+                parts.append(("sym", next_symbol))
+            last_idx = match.end()
+        tail = production[last_idx:]
+        if tail:
+            parts.append(("lit", tail))
+
+        for kind, piece in reversed(parts):
+            if kind == "sym":
+                stack.append(("sym", piece, next_remaining_burst, depth + 1))
+            else:
+                stack.append(("lit", piece, remaining_burst, depth))
+
+    candidate = "" if aborted else "".join(output_parts)
+    candidate = sanitize_mutated_text(candidate)
+    return candidate or None
+
 def _text_surface_match_ratio(
     *,
     text: str,
@@ -2342,7 +2639,7 @@ def _generic_invalidate_text(
             (
                 "ultra_long_numeric_surgery",
                 lambda: _ultra_long_numeric_surgery(text=original_text, rng=rng),
-                0.2,
+                0.05,
             )
         )
     if capabilities is not None and capabilities.separator_chars:
@@ -2452,6 +2749,7 @@ __all__ = [
     "_insert_control_burst",
     "_cross_branch_alternation_splice",
     "_embed_alternative_fragment",
+    "_recursive_burst",
     "_trailing_or_leading_extra_data",
     "_boundary_chars",
     "_duplicate_boundary_token",

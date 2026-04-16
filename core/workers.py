@@ -4,20 +4,23 @@ import queue
 import json
 import os
 import random
+import signal
 import sqlite3
 import sys
 import threading
 import time
+import datetime as dt
 from collections import deque
 from contextlib import nullcontext
 from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from coverage.parser import PythonParser
 from tqdm import tqdm
 
 from core.config import FuzzConfig, is_debug_run
-from core.fuzzer_logging import get_fuzzer_logger
+from core.fuzzer_logging import configure_worker_logging, get_fuzzer_logger
 from core.live_ui import RunDashboard, console
 from core.db_utils import (
     add_unique_coverage_seed_input,
@@ -26,7 +29,6 @@ from core.db_utils import (
     increment_edge_observations,
     input_already_run,
     insert_run,
-    insert_seen_edges_into_conn,
     seed_stats_for_power_schedule,
 )
 from core.sqlite_conn import open_results_db
@@ -45,6 +47,9 @@ from seed_scheduler import (
     ScheduledSeed,
     build_ucb_update_signals,
 )
+
+
+_BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
 
 
 def _bug_key_from_result(result: Mapping[str, Any]) -> tuple[str, str, str] | None:
@@ -242,6 +247,48 @@ def _find_newest_unseen_branch(
     return ""
 
 
+def _format_branch_label(file_name: str, from_line: int, to_line: int) -> str:
+    file_label = Path(file_name).name or str(file_name)
+    target_label = "exit" if int(to_line) < 0 else str(to_line)
+    return f"{file_label}:{from_line} -> {target_label}"
+
+
+def _insert_seen_edges_with_stats(
+    conn: sqlite3.Connection,
+    covered_edges: Sequence[tuple[str, int, int]],
+) -> tuple[int, int, str]:
+    """
+    Insert covered edges and return (new_edge_count, new_branch_edge_count, newest_label).
+
+    newest_label is the first newly inserted edge, formatted for UI display.
+    """
+    if not covered_edges:
+        return 0, 0, ""
+
+    new_edge_count = 0
+    new_branch_edge_count = 0
+    newest_label = ""
+    for file_name, from_line, to_line in covered_edges:
+        before = conn.total_changes
+        conn.execute(
+            "INSERT OR IGNORE INTO seen_branches (file, from_line, to_line) VALUES (?, ?, ?)",
+            (file_name, from_line, to_line),
+        )
+        if conn.total_changes == before:
+            continue
+        new_edge_count += 1
+        if not newest_label:
+            newest_label = _format_branch_label(
+                str(file_name), int(from_line), int(to_line)
+            )
+        if (int(from_line), int(to_line)) in _branch_arcs_for_file(str(file_name)):
+            new_branch_edge_count += 1
+
+    if new_edge_count > 0:
+        conn.commit()
+    return new_edge_count, new_branch_edge_count, newest_label
+
+
 def _count_seen_branches(conn: sqlite3.Connection) -> int:
     """Return the accumulated number of unique covered arcs recorded so far."""
     row = conn.execute("SELECT COUNT(*) FROM seen_branches").fetchone()
@@ -253,9 +300,58 @@ def _count_seen_branches(conn: sqlite3.Connection) -> int:
         return 0
 
 
+def _branch_arcs_for_file(file_name: str) -> set[tuple[int, int]]:
+    cached = _BRANCH_ARC_CACHE.get(file_name)
+    if cached is not None:
+        return cached
+
+    path = Path(file_name)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+
+    branch_arcs: set[tuple[int, int]] = set()
+    try:
+        parser = PythonParser(filename=str(path))
+        parser.parse_source()
+        arcs = parser.arcs() or []
+    except OSError:
+        _BRANCH_ARC_CACHE[file_name] = branch_arcs
+        return branch_arcs
+
+    exits: dict[int, set[int]] = {}
+    for from_line, to_line in arcs:
+        if from_line <= 0:
+            continue
+        exits.setdefault(from_line, set()).add(to_line)
+
+    for from_line, targets in exits.items():
+        if len(targets) <= 1:
+            continue
+        for to_line in targets:
+            branch_arcs.add((from_line, to_line))
+
+    _BRANCH_ARC_CACHE[file_name] = branch_arcs
+    return branch_arcs
+
+
 def _count_seen_covered_branches(conn: sqlite3.Connection) -> int:
-    """Return the accumulated number of unique covered branches recorded so far."""
-    return _count_seen_branches(conn)
+    """Return the accumulated number of unique covered branches, excluding non-branch arcs."""
+    total = 0
+    rows = conn.execute(
+        "SELECT file, from_line, to_line FROM seen_branches"
+    ).fetchall()
+    seen_by_file: dict[str, set[tuple[int, int]]] = {}
+    for file_name, from_line, to_line in rows:
+        try:
+            seen_by_file.setdefault(str(file_name), set()).add(
+                (int(from_line), int(to_line))
+            )
+        except (TypeError, ValueError):
+            continue
+
+    for file_name, arcs in seen_by_file.items():
+        total += len(arcs & _branch_arcs_for_file(file_name))
+    return total
 
 
 def _extract_total_branches(result: Mapping[str, Any]) -> int:
@@ -321,6 +417,43 @@ def _format_rss(kib: int | None) -> str:
     return f"{(kib / 1024.0):.1f}MiB"
 
 
+def _close_multiprocessing_queue(queue_obj: Any) -> None:
+    """
+    Best-effort shutdown for multiprocessing.Queue background feeder threads.
+
+    Without an explicit close/join_thread cycle, QueueFeederThread instances can
+    survive past one fuzzing run and make the next `fork()` happen from a
+    multi-threaded parent, which is unsafe and can deadlock worker IPC.
+    """
+    close = getattr(queue_obj, "close", None)
+    if callable(close):
+        try:
+            close()
+        except (OSError, ValueError):
+            pass
+    join_thread = getattr(queue_obj, "join_thread", None)
+    if callable(join_thread):
+        try:
+            join_thread()
+        except (AssertionError, OSError, RuntimeError, ValueError):
+            pass
+
+
+def _reset_worker_signal_handlers() -> None:
+    """
+    Restore default termination behavior inside forked workers.
+
+    The coordinator installs graceful SIGINT/SIGTERM handlers in the parent
+    process. Because workers are forked, they inherit those handlers unless we
+    reset them, which makes `Process.terminate()` behave like a no-op.
+    """
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def run_worker_process(
     config: FuzzConfig,
     request_queue: Queue,
@@ -330,12 +463,14 @@ def run_worker_process(
     results_folder_str: str,
     effective_mutator: str,
 ) -> None:
+    _reset_worker_signal_handlers()
+    results_folder = Path(results_folder_str)
+    configure_worker_logging(results_folder=results_folder, worker_id=worker_id)
     parser_api = get_parser(config["parser_version"])
     compute_interestingness_fn = get_compute_interestingness(
         config["isinteresting_version"]
     )
     effective_target = config["target"]
-    results_folder = Path(results_folder_str)
     worker_reply: Queue = reply_queues[worker_id]
     wlog = get_fuzzer_logger()
     db_path = results_folder / "runs.db"
@@ -516,12 +651,14 @@ def run_fuzzer_multi_worker(
     last_low_value_signature: list[tuple[str, ...] | None] = [None]
     worker_shutdown_grace_seconds = max(5.0, float(config["timeout"]) * 2.0)
     worker_max_jobs = max(0, int(config.get("worker_max_jobs") or 0))
-    seed_refill_mode = str(config.get("seed_refill_mode") or "historical")
+    seed_refill_mode = str(config.get("seed_refill_mode") or "grammar")
     log = get_fuzzer_logger()
     max_iterations = config["max_iterations"]
     debug_mode = is_debug_run(config)
     use_live_ui = not debug_mode
     seen_bug_keys = _load_seen_bug_keys(conn=conn, target=effective_target)
+    seen_branch_count = _count_seen_branches(conn)
+    seen_covered_branch_count = _count_seen_covered_branches(conn)
     dashboard = RunDashboard(
         target=effective_target,
         configured_workers=workers,
@@ -786,6 +923,18 @@ def run_fuzzer_multi_worker(
         finally:
             conn_thread.close()
 
+    def _record_scheduler_event(event: str) -> None:
+        if use_live_ui:
+            dashboard.record_schedule(
+                pending_jobs=len(pending),
+                scheduler_size=_ready_scheduler_size(),
+                queue_size=len(startup_warm_queue)
+                + len(batch_expected)
+                + len(pending),
+                event=event,
+            )
+        log.info("%s", event)
+
     def request_handler() -> None:
         nones_sent = 0
         try:
@@ -1023,16 +1172,40 @@ def run_fuzzer_multi_worker(
                         if startup_warm_queue or not scheduler.empty():
                             continue
                         if seed_refill_mode == "grammar":
+                            _record_scheduler_event(
+                                "empty scheduler: attempting grammar refill"
+                            )
                             if _try_refill_scheduler_from_grammar_coverage():
+                                _record_scheduler_event(
+                                    "empty scheduler: grammar refill added seeds"
+                                )
                                 cond.notify_all()
                                 continue
+                            _record_scheduler_event(
+                                "empty scheduler: grammar refill produced no seeds"
+                            )
                         else:
+                            _record_scheduler_event(
+                                "empty scheduler: attempting coverage replay refill"
+                            )
                             if _try_refill_scheduler_from_unique_coverage_store():
+                                _record_scheduler_event(
+                                    "empty scheduler: coverage replay added seeds"
+                                )
                                 cond.notify_all()
                                 continue
+                            _record_scheduler_event(
+                                "empty scheduler: attempting LLM refill"
+                            )
                             if _try_refill_scheduler_from_llm():
+                                _record_scheduler_event(
+                                    "empty scheduler: LLM refill added seeds"
+                                )
                                 cond.notify_all()
                                 continue
+                            _record_scheduler_event(
+                                "empty scheduler: refill produced no seeds"
+                            )
                         if total_jobs[0] == 0:
                             total_jobs[0] = iteration_counter[0]
                         reply_queues[wid].put(None)
@@ -1043,8 +1216,7 @@ def run_fuzzer_multi_worker(
                 if total_jobs[0] == 0 and iteration_counter[0] > 0:
                     total_jobs[0] = iteration_counter[0]
 
-    request_thread = threading.Thread(target=request_handler)
-    request_thread.start()
+    request_thread: threading.Thread | None = None
 
     def _sync_dashboard_worker_count() -> None:
         if use_live_ui:
@@ -1070,6 +1242,11 @@ def run_fuzzer_multi_worker(
         return proc
 
     procs = [_spawn_worker(w) for w in range(workers)]
+    request_thread = threading.Thread(
+        target=request_handler,
+        name="request-handler",
+    )
+    request_thread.start()
     pending_worker_refresh: dict[int, str] = {}
     _sync_dashboard_worker_count()
 
@@ -1097,6 +1274,51 @@ def run_fuzzer_multi_worker(
                 reason,
             )
         _sync_dashboard_worker_count()
+
+    heartbeat_seconds = float(config.get("heartbeat_seconds") or 0.0)
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    heartbeat_path = Path(results_folder) / "heartbeat.json"
+
+    def _write_heartbeat_snapshot() -> None:
+        payload = dashboard.snapshot()
+        payload["updated_at"] = time.time()
+        payload["updated_at_iso"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        with cond:
+            payload["iteration_counter"] = iteration_counter[0]
+            payload["results_received"] = results_received_count[0]
+            payload["pending_jobs"] = len(pending)
+            payload["scheduler_size"] = _ready_scheduler_size()
+            payload["queue_size"] = len(startup_warm_queue) + len(batch_expected) + len(pending)
+            payload["total_jobs"] = total_jobs[0]
+        tmp_path = heartbeat_path.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(heartbeat_path)
+
+    if heartbeat_seconds > 0:
+        def _heartbeat_loop() -> None:
+            while not heartbeat_stop.wait(heartbeat_seconds):
+                try:
+                    _write_heartbeat_snapshot()
+                except Exception as exc:
+                    log.warning("Heartbeat write failed: %s", exc)
+
+        _write_heartbeat_snapshot()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name="heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        if not use_live_ui:
+            log.info(
+                "Heartbeat enabled: writing %s every %.1fs",
+                heartbeat_path,
+                heartbeat_seconds,
+            )
 
     memory_telemetry_seconds = float(config.get("memory_telemetry_seconds") or 0.0)
     memory_telemetry_stop = threading.Event()
@@ -1355,17 +1577,22 @@ def run_fuzzer_multi_worker(
                     target=effective_target,
                 )
                 newest_coverage_branch = ""
-                if new_coverage and covered_edges:
-                    newest_coverage_branch = _find_newest_unseen_branch(conn, covered_edges)
                 if covered_edges:
-                    insert_seen_edges_into_conn(conn, covered_edges)
+                    new_edges, new_branch_edges, newest_label = _insert_seen_edges_with_stats(
+                        conn,
+                        covered_edges,
+                    )
+                    if new_edges > 0:
+                        seen_branch_count += new_edges
+                        seen_covered_branch_count += new_branch_edges
+                        newest_coverage_branch = newest_label
                     increment_edge_observations(
                         conn,
                         target=effective_target,
                         edges=covered_edges,
                     )
-                covered_branches = _count_seen_covered_branches(conn)
-                unique_covered_arcs = _count_seen_branches(conn)
+                covered_branches = seen_covered_branch_count
+                unique_covered_arcs = seen_branch_count
                 if new_coverage and coverage_key:
                     add_unique_coverage_seed_input(
                         conn,
@@ -1526,10 +1753,24 @@ def run_fuzzer_multi_worker(
             if pbar is not None:
                 pbar.close()
     finally:
+        shutdown_requested[0] = True
+        with cond:
+            if total_jobs[0] == 0 and iteration_counter[0] > 0:
+                total_jobs[0] = iteration_counter[0]
+            cond.notify_all()
+        if heartbeat_seconds > 0:
+            try:
+                _write_heartbeat_snapshot()
+            except Exception as exc:
+                log.warning("Final heartbeat write failed: %s", exc)
+        heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
         memory_telemetry_stop.set()
         if memory_telemetry_thread is not None:
             memory_telemetry_thread.join(timeout=1.0)
-        request_thread.join(timeout=1.0)
+        if request_thread is not None:
+            request_thread.join(timeout=1.0)
         for p in procs:
             if p.is_alive():
                 p.terminate()
@@ -1543,5 +1784,9 @@ def run_fuzzer_multi_worker(
             )
             p.kill()
             p.join(timeout=1.0)
+        _close_multiprocessing_queue(request_queue)
+        for q in reply_queues:
+            _close_multiprocessing_queue(q)
+        _close_multiprocessing_queue(result_queue)
         _sync_dashboard_worker_count()
         dashboard.save_artifacts(results_folder)

@@ -39,8 +39,10 @@ from .text_ops import (
     _replace_numeric_tail_with_boundary,
     _repetition_amplification_surgery,
     _remove_balanced_token,
+    _remove_large_token_or_subtree,
     _replace_quoted_invalid_surrogate_escape,
     _replace_quoted_surrogate_pair_escape,
+    _recursive_burst,
     _segment_count_change,
     _separator_confusion,
     _separator_run_surgery,
@@ -81,11 +83,23 @@ def _supports_delimiter_invalidator(capabilities: GrammarCapabilities) -> bool:
 def _supports_boundary_operator(capabilities: GrammarCapabilities) -> bool:
     return bool(capabilities.quote_chars or capabilities.paired_delimiters)
 
+def _supports_large_token_or_subtree_removal_operator(
+    capabilities: GrammarCapabilities,
+) -> bool:
+    return bool(
+        capabilities.quote_chars
+        or capabilities.paired_delimiters
+        or capabilities.has_numeric_literals
+    )
+
 def _supports_alternation_operator(capabilities: GrammarCapabilities) -> bool:
     return capabilities.has_alternation
 
 def _supports_alternative_embed_operator(capabilities: GrammarCapabilities) -> bool:
     return capabilities.has_alternation and capabilities.has_delimiter_literals
+
+def _supports_recursive_burst_operator(capabilities: GrammarCapabilities) -> bool:
+    return capabilities.has_recursive_nonterminals
 
 def _supports_structured_range_operator(capabilities: GrammarCapabilities) -> bool:
     return (
@@ -507,7 +521,7 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
     GrammarOperatorSpec(
         name="ultra_long_numeric_surgery",
         valid_weight=0.0,
-        invalid_weight=0.2,
+        invalid_weight=0.05,
         supports=_supports_numeric_operator,
         apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _ultra_long_numeric_surgery(
             text=original_text,
@@ -748,6 +762,17 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
         ),
     ),
     GrammarOperatorSpec(
+        name="remove_large_token_or_subtree",
+        valid_weight=0.0,
+        invalid_weight=2.2,
+        supports=_supports_large_token_or_subtree_removal_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _remove_large_token_or_subtree(
+            text=original_text,
+            rng=rng,
+            capabilities=capabilities,
+        ),
+    ),
+    GrammarOperatorSpec(
         name="cross_branch_alternation_splice",
         valid_weight=0.8,
         invalid_weight=1.8,
@@ -765,6 +790,18 @@ _GRAMMAR_OPERATOR_SPECS: tuple[GrammarOperatorSpec, ...] = (
         invalid_weight=1.4,
         supports=_supports_alternative_embed_operator,
         apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _embed_alternative_fragment(
+            original_text=original_text,
+            grammar_spec=grammar_spec,
+            max_depth=max_depth,
+            rng=rng,
+        ),
+    ),
+    GrammarOperatorSpec(
+        name="recursive_burst",
+        valid_weight=0.25,
+        invalid_weight=0.6,
+        supports=_supports_recursive_burst_operator,
+        apply=lambda original_text, fragment, grammar_spec, max_depth, rng, capabilities: _recursive_burst(
             original_text=original_text,
             grammar_spec=grammar_spec,
             max_depth=max_depth,

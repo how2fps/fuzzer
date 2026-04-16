@@ -311,7 +311,16 @@ def length_bucket(text: str) -> str:
         return "1"
     if lower <= 1:
         return f"1-{upper}"
-    return f"{lower}-{upper}"
+    if upper <= 2048:
+        return f"{lower}-{upper}"
+    span = upper - lower + 1
+    step = max(1, span // 4)
+    idx = int((length - lower) // step)
+    if idx > 3:
+        idx = 3
+    bucket_start = lower + (idx * step)
+    bucket_end = upper if idx == 3 else min(upper, bucket_start + step - 1)
+    return f"{bucket_start}-{bucket_end}"
 
 
 def describe_input_structure(text: str) -> dict[str, Any]:
