@@ -1,0 +1,8 @@
+time,bug_type,exception,message,file,line,classification,stack_hash,input
+28.81904172897339,invalidity,buggy_ipyparse.ipv6_mstv.InvalidityBug,Number of tokens passed exceeds the permitted number of hexes.,buggy_ipyparse/ipv6_mstv.py,132,EXPECTED_REJECT (invalidity),0f4e1408a3e7,ffff:ff:0db:2001:2001:a:ff00:0001:1
+33.84657621383667,bonus,pyparsing.exceptions.ParseException,"Expected {W:(0-9A-Fa-f){1,5} ^ Group:({Combine:({['0']... ^ {Suppress:(['0']) (1-9)} ^ {Suppress:(['",pyparsing/core.py,1340,VALIDITY_BUG (bonus),e87acd0bb02c,::
+192.61054158210754,reliability,buggy_ipyparse.ipv6_mstv.ReliabilityBug,Invalid token(':::') parsed by pyparsing,buggy_ipyparse/ipv6_mstv.py,129,EXPECTED_REJECT (reliability),daa059f8ad2b,2001:db8:::1:2:3:10.0.0.1
+242.24523258209229,reliability,buggy_ipyparse.ipv6_mstv.ReliabilityBug,Incorrect token length.,buggy_ipyparse/ipv6_mstv.py,126,EXPECTED_REJECT (reliability),2195f9e8d9b7,f02:::1
+267.4497449398041,invalidity,buggy_ipyparse.ipv6_mstv.InvalidityBug,Hex of length more than 4 found.,buggy_ipyparse/ipv6_mstv.py,93,EXPECTED_REJECT (invalidity),d860a8e31c8b,db:f:0db32:2001:ffff:f:0000:f
+440.3841073513031,invalidity,DifferentialMismatch,Target accepted invalid input. Out=Running the IPv6 parser with ipstr: 2001:db8::1:2:3:000.0.0.1\nOutput: [425407664, Ref=illegal IP address string passed to inet_pton,differential_test,0,DIFF(invalidity),,2001:db8::1:2:3:000.0.0.1
+1145.5529046058655,bonus,buggy_ipyparse.ipv4_mstv.InvalidityBug,One of the octets are empty (''),buggy_ipyparse/ipv4_mstv.py,81,EXPECTED_REJECT (bonus),d6bec8df5eae,2001:db8:::1:32:3:10.0.0.

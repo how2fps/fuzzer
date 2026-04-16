@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import sys
 import html
 import json
 import math
@@ -10,6 +11,15 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
+
+
+_limit = sys.maxsize
+while True:
+    try:
+        csv.field_size_limit(_limit)
+        break
+    except OverflowError:
+        _limit = int(_limit / 10)
 
 
 BUG_STATUSES = {"bug", "crash", "timeout"}

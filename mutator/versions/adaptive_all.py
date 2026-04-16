@@ -21,11 +21,14 @@ from .lib import (
     interesting_value_mutation,
     mutate_text_with_grammar,
     resolve_grammar_spec,
+    extreme_repeat_mutation,
+    insert_junk_mutation,
+    insert_extreme_number_mutation,
 )
 
 ByteMutator = Callable[..., bytes]
 Operator = Callable[[str, random.Random], str]
-_DEFAULT_MAX_DEPTH = 5
+_DEFAULT_MAX_DEPTH = 100
 
 
 def _wrap_byte_mutator(func: ByteMutator) -> Operator:
@@ -68,6 +71,14 @@ def _build_unified_ops(*, mutator_kind: str) -> dict[str, Operator]:
             "byte_clone_block": _wrap_byte_mutator(clone_block_mutation),
         }
     )
+    if capabilities.has_recursive_nonterminals:
+        ops.update(
+            {
+                "byte_extreme_repeat": _wrap_byte_mutator(extreme_repeat_mutation),
+                "byte_insert_junk": _wrap_byte_mutator(insert_junk_mutation),
+                "byte_extreme_number": _wrap_byte_mutator(insert_extreme_number_mutation),
+            }
+        )
     return ops
 
 

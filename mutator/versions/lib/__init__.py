@@ -53,6 +53,9 @@ from .byte_ops import (
     clone_block_mutation,
     delete_block_mutation,
     interesting_value_mutation,
+    extreme_repeat_mutation,
+    insert_junk_mutation,
+    insert_extreme_number_mutation,
 )
 from .text_ops import (
     _generic_invalidate_text,
@@ -92,6 +95,9 @@ __all__ = [
     "clone_block_mutation",
     "configure_runtime_grammar",
     "delete_block_mutation",
+    "extreme_repeat_mutation",
+    "insert_junk_mutation",
+    "insert_extreme_number_mutation",
     "generate_from_grammar",
     "generate_ip_input",
     "generate_ipv4_input",

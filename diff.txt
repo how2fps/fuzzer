@@ -1,0 +1,109 @@
+﻿diff --git a/mutator/versions/__init__.py b/mutator/versions/__init__.py
+index 3ac32fd..bf30490 100644
+--- a/mutator/versions/__init__.py
++++ b/mutator/versions/__init__.py
+@@ -1,27 +1,27 @@
+-"""
+-Registry of mutator implementations for ablation / version selection.
+-"""
+-from __future__ import annotations
+-
++"""
++Registry of mutator implementations for ablation / version selection.
++"""
++from __future__ import annotations
++
+ import random
+ from collections.abc import Callable
+ from typing import Protocol
+-
+-
++
++
+ class MutateFn(Protocol):
+-    def __call__(
+-        self,
+-        text: str,
+-        *,
+-        mutator_kind: str,
+-        rng: random.Random,
++    def __call__(
++        self,
++        text: str,
++        *,
++        mutator_kind: str,
++        rng: random.Random,
+     ) -> str: ...
+ 
+ 
+ class FeedbackFn(Protocol):
+     def __call__(self, *, mutated_text: str, gained_coverage: bool) -> bool: ...
+-
+-
++
++
+ from . import base
+ from . import adaptive_all
+ from . import byte_havoc
+@@ -37,16 +37,16 @@ REGISTRY: dict[str, Callable[..., str]] = {
+ FEEDBACK_REGISTRY: dict[str, FeedbackFn] = {}
+ if hasattr(adaptive_all, "handle_feedback"):
+     FEEDBACK_REGISTRY["adaptive_all"] = adaptive_all.handle_feedback
+-
+-
+-def get_mutator(version: str) -> MutateFn:
+-    if version not in REGISTRY:
+-        raise ValueError(
+-            f"unknown mutator version {version!r}; choices: {sorted(REGISTRY)}"
+-        )
+-    return REGISTRY[version]
+-
+-
++
++
++def get_mutator(version: str) -> MutateFn:
++    if version not in REGISTRY:
++        raise ValueError(
++            f"unknown mutator version {version!r}; choices: {sorted(REGISTRY)}"
++        )
++    return REGISTRY[version]
++
++
+ def list_versions() -> list[str]:
+     return sorted(REGISTRY.keys())
+ 
+diff --git a/mutator/versions/adaptive_operators.py b/mutator/versions/adaptive_operators.py
+index c8f3e41..1189ad7 100644
+--- a/mutator/versions/adaptive_operators.py
++++ b/mutator/versions/adaptive_operators.py
+@@ -14,7 +14,7 @@ class AdaptiveStrategy:
+         self.cycle_usage = {op: 0 for op in operators}
+         self.cycle_success = {op: 0 for op in operators}
+         self.cycle_count = 0
+-        self.cycle_window = 50
++        self.cycle_window = len(operators) * 10
+         self.w = 0.4
+         self.epsilon = 0.05
+ 
+@@ -41,6 +41,21 @@ class AdaptiveStrategy:
+                 self.cycle_success[op] = 0
+ 
+     def pso_update(self) -> None:
++        # Dynamic epsilon based on recent coverage success
++        total_cycle_successes = sum(self.cycle_success.values())
++        if total_cycle_successes == 0:
++            # We are stuck. Increase epsilon (explore more), cap at 0.25
++            self.epsilon = min(0.25, self.epsilon * 1.1 + 0.01)
++        else:
++            # We are finding coverage. Decrease epsilon (exploit more), min 0.01
++            self.epsilon = max(0.01, self.epsilon * 0.9)
++
++        # Decay history so ancient success doesn't hold weight forever
++        decay_factor = 0.85
++        for op in self.local_best_efficiencies:
++            self.local_best_efficiencies[op] *= decay_factor
++        self.global_best_efficiency *= decay_factor
++
+         for op in self.weights:
+             eff = (
+                 self.cycle_success[op] / self.cycle_usage[op]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,15 @@ from core.db_utils import get_inputs_for_unique_error_line_pairs
 from core.fuzzer_logging import get_fuzzer_logger
 from core.sqlite_conn import open_results_db
 from core.target_artifacts import copy_bug_counts_csv_if_present
+
+
+_limit = sys.maxsize
+while True:
+    try:
+        csv.field_size_limit(_limit)
+        break
+    except OverflowError:
+        _limit = int(_limit / 10)
 
 
 def _safe_int(value: Any) -> int | None:
