@@ -1,8 +1,0 @@
-time,bug_type,exception,message,file,line,classification,stack_hash,input
-23.42112135887146,performance,buggy_ipyparse.ipv4_stv.PerformanceBug,Performance bug has been hit!,buggy_ipyparse/ipv4_stv.py,91,VALIDITY_BUG (performance),8a5bd8e4b389,254.127.252.192
-24.700560808181763,validity,pyparsing.exceptions.ParseException,"Expected '.', found '5'  (at char 8), (line:1, col:9)",pyparsing/core.py,1340,EXPECTED_REJECT (validity),11da092aaaa7,10.10.255.-1
-28.55441927909851,invalidity,pyparsing.exceptions.ParseException,"Expected '.', found 'C'  (at char 1), (line:1, col:2)",pyparsing/core.py,1340,EXPECTED_REJECT (invalidity),11da092aaaa7,5C.V@2=2012564Z.128
-44.89235591888428,functional,buggy_ipyparse.ipv4_stv.FunctionalBug,Invalid ipv4 calculation.,buggy_ipyparse/ipv4_stv.py,134,VALIDITY_BUG (functional),f806d0bfdcec,0.200.192.251
-48.72532892227173,invalidity,buggy_ipyparse.ipv4_stv.InvalidityBug,One of the octets are empty,buggy_ipyparse/ipv4_stv.py,80,EXPECTED_REJECT (invalidity),66815282a378,50.	252.2.249
-113.31873607635498,invalidity,DifferentialMismatch,"Target accepted invalid input. Out=, Ref=Non-numeric octet: -1",differential_test,0,DIFF(invalidity),,-1.0.0.0
-232.56563663482666,bonus,ValueError,Exceeds the limit (4300 digits) for integer string conversion: value has 20885 digits; use sys.set_i,buggy_ipyparse/ipv4_stv.py,81,EXPECTED_REJECT (bonus),74dd8e421186,00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
