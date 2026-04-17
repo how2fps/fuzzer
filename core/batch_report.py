@@ -5,6 +5,7 @@ import html
 import json
 import math
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,40 @@ from typing import Any
 BUG_STATUSES = {"bug", "crash", "timeout"}
 DEFAULT_INTERESTING_SCORE_THRESHOLD = 0.5
 MAX_CONFIGS_PER_CHART = 10
+TARGET_NAME_ALIASES = {
+    "cidrize-runner": "cidrize-runner",
+    "ipv4": "ipv4-parser",
+    "ipv4-parser": "ipv4-parser",
+    "ipv4-ipv6-parser": "IPv4-IPv6-parser",
+    "ipv6": "ipv6-parser",
+    "ipv6-parser": "ipv6-parser",
+    "json-decoder": "json-decoder",
+}
+
+
+def _resolve_csv_field_size_limit() -> int:
+    original_limit = csv.field_size_limit()
+    candidate = sys.maxsize
+    try:
+        while candidate > 0:
+            try:
+                csv.field_size_limit(candidate)
+                return candidate
+            except OverflowError:
+                candidate //= 10
+    finally:
+        csv.field_size_limit(original_limit)
+    raise OverflowError("Unable to determine a usable CSV field size limit")
+
+
+CSV_FIELD_SIZE_LIMIT: int = _resolve_csv_field_size_limit()
+
+
+def _ensure_large_csv_field_limit() -> None:
+    if csv.field_size_limit() < CSV_FIELD_SIZE_LIMIT:
+        csv.field_size_limit(CSV_FIELD_SIZE_LIMIT)
+
+
 @dataclass(frozen=True)
 class RunData:
     run_folder: Path
@@ -73,6 +108,30 @@ def _slug(value: str) -> str:
     return safe or "na"
 
 
+def _normalize_target_name(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return TARGET_NAME_ALIASES.get(text.lower(), text)
+
+
+def _infer_target_from_config_name(config_name: str) -> str | None:
+    raw_name = (config_name or "").strip()
+    if not raw_name:
+        return None
+    normalized_name = re.sub(r"^\d+_", "", raw_name).lower()
+    for alias, canonical in sorted(
+        TARGET_NAME_ALIASES.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if normalized_name == alias:
+            return canonical
+        if normalized_name.startswith(f"{alias}_") or normalized_name.startswith(f"{alias}-"):
+            return canonical
+    return None
+
+
 def _chart_config_label(config: str, *, target: str | None = None) -> str:
     if target:
         target_aliases = {
@@ -108,6 +167,7 @@ def _find_run_folders(*, batch_folder: Path) -> list[Path]:
 def _load_runs_csv_rows(runs_csv: Path) -> list[dict[str, str]]:
     if not runs_csv.is_file():
         return []
+    _ensure_large_csv_field_limit()
     with open(runs_csv, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
@@ -116,6 +176,7 @@ def _load_unique_error_line_pairs_rows(run_folder: Path) -> list[dict[str, str]]
     path = run_folder / "unique_error_line_pairs.csv"
     if not path.is_file():
         return []
+    _ensure_large_csv_field_limit()
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
@@ -129,6 +190,7 @@ def _load_run_data(*, run_folder: Path) -> RunData | None:
     rows = _load_runs_csv_rows(run_folder / "runs.csv")
     if not rows:
         return None
+    config_name = run_folder.parent.name
     config_file = run_folder / "config.json"
     config: dict[str, Any] = {}
     if config_file.is_file():
@@ -141,16 +203,18 @@ def _load_run_data(*, run_folder: Path) -> RunData | None:
             config = {}
     target_values = sorted(
         {
-            (row.get("target") or "").strip()
+            normalized
             for row in rows
-            if (row.get("target") or "").strip()
+            if (normalized := _normalize_target_name(row.get("target"))) is not None
         }
     )
-    target = target_values[0] if target_values else "unknown"
+    config_target = _normalize_target_name(config.get("target"))
+    folder_target = _infer_target_from_config_name(config_name)
+    target = folder_target or config_target or (target_values[0] if target_values else "unknown")
     return RunData(
         run_folder=run_folder,
         target=target,
-        config_name=run_folder.parent.name,
+        config_name=config_name,
         run_id=run_folder.name,
         rows=rows,
         config=config,
@@ -689,9 +753,13 @@ def _render_table(*, headers: list[str], rows: list[list[str]], table_id: str = 
     return f"<div class='table-wrap'><table{tid}><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
 
 
-def save_chart_png(fig: Any, output_path: Path) -> Path:
-    import matplotlib.pyplot as plt
-
+def save_chart_png(fig: Any, output_path: Path) -> Path | None:
+    if fig is None:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        return None
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -699,6 +767,8 @@ def save_chart_png(fig: Any, output_path: Path) -> Path:
 
 
 def _render_chart_html(*, title: str, output_path: Path, root: Path, description: str = "") -> str:
+    if not output_path.is_file():
+        return f"<p class='meta'>Chart unavailable for {html.escape(title.lower())} in this environment.</p>"
     rel = output_path.relative_to(root).as_posix()
     desc_html = f"<p class='meta'>{html.escape(description)}</p>" if description else ""
     return (
@@ -717,7 +787,10 @@ def _plot_grouped_bar(
     show_legend: bool = True,
     value_formatter: Any | None = None,
 ) -> Any:
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        return None
 
     fig, ax = plt.subplots(figsize=(11.5, 4.8))
     if not categories:
@@ -875,7 +948,10 @@ def _plot_lines(
     lines: list[tuple[str, list[tuple[float, int]]]],
     extend_to_chart_end: bool = False,
 ) -> Any:
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        return None
 
     fig, ax = plt.subplots(figsize=(11.5, 4.8))
     drawn = 0
