@@ -1,0 +1,13 @@
+# Self-contained email grammar demo for grammar_ast.
+#
+# This file is intentionally independent of the built-in JSON/IP grammars:
+# every rule needed by email_start is defined here. It demonstrates that the
+# grammar_ast mutator can generate and mutate a new input family without
+# changing mutator code.
+
+local ::= [a-z] ([a-z]|[0-9]|"."|"_"|"-"){0,8}
+label ::= [a-z] ([a-z]|[0-9]|"-"){0,7}
+tld ::= "com" | "net" | "org" | "io" | "dev" | "ai"
+domain ::= <label> "." <tld> | <label> "." <label> "." <tld>
+email ::= <local> "@" <domain>
+email_start ::= <email>
