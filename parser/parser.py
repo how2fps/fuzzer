@@ -38,6 +38,17 @@ except ImportError:
         run_target_with_qemu_coverage,
     )
 
+try:
+    from pyc_coverage_runner import (
+        pyc_coverage_supported,
+        run_pyc_coverage,
+    )
+except ImportError:
+    from .pyc_coverage_runner import (
+        pyc_coverage_supported,
+        run_pyc_coverage,
+    )
+
 DEFAULT_TIMEOUT = 10.0
 
 COVERAGE_TARGET_NAME = "json_open"
@@ -810,6 +821,7 @@ def run_parser(
     seed_family: str | None = None,
     enable_open_coverage: bool = False,
     enable_qemu_coverage: bool = False,
+    enable_pyc_coverage: bool = False,
     closed_cwd_override: Path | str | None = None,
     parser_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -854,6 +866,7 @@ def run_parser(
         return wrapped
 
     entry = target_registry[target]
+    shadow_result: dict[str, Any] | None = None
 
     handler = _handler_name(entry)
     if handler == "json_decoder":
@@ -931,6 +944,13 @@ def run_parser(
                 )
                 if isinstance(qemu_payload, dict):
                     _apply_coverage_payload(result=result, payload=qemu_payload)
+
+        if enable_pyc_coverage and pyc_coverage_supported(target):
+            shadow_result = run_pyc_coverage(
+                target_name=target,
+                input_data=data,
+                parser_config=parser_config,
+            )
 
     open_name = entry.get("oracle")
     if open_name is not None:
@@ -1023,6 +1043,8 @@ def run_parser(
     wrapped_result: dict[str, Any] = {"closed_result": result}
     if open_result is not None:
         wrapped_result["open_result"] = open_result
+    if shadow_result is not None:
+        wrapped_result["shadow_result"] = shadow_result
 
     if print_json:
         print(json.dumps(wrapped_result, indent=2))

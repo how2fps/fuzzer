@@ -8,12 +8,14 @@ from .versions.base import (
     compute_interestingness,
     get_coverage_source_kind_from_result,
     get_covered_edges_from_result,
+    get_covered_lines_from_result,
 )
 
 __all__ = [
     "compute_interestingness",
     "get_coverage_source_kind_from_result",
     "get_covered_edges_from_result",
+    "get_covered_lines_from_result",
     "get_compute_interestingness",
     "list_versions",
 ]

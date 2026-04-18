@@ -139,7 +139,11 @@ class RunDashboard:
     covered_branches_total: int = 0
     total_branches: int = 0
     unique_covered_arcs: int = 0
+    covered_lines_total: int = 0
+    total_lines: int = 0
+    total_edges: int = 0
     coverage_backend: str = ""
+    coverage_source_kind: str = ""
     qemu_bitmap_slots_total: int = 0
     scheduler_size: int = 0
     queue_size: int = 0
@@ -176,7 +180,11 @@ class RunDashboard:
             "covered_branches_total": self.covered_branches_total,
             "total_branches": self.total_branches,
             "unique_covered_arcs": self.unique_covered_arcs,
+            "covered_lines_total": self.covered_lines_total,
+            "total_lines": self.total_lines,
+            "total_edges": self.total_edges,
             "coverage_backend": self.coverage_backend,
+            "coverage_source_kind": self.coverage_source_kind,
             "qemu_bitmap_slots_total": self.qemu_bitmap_slots_total,
             "scheduler_size": self.scheduler_size,
             "queue_size": self.queue_size,
@@ -340,6 +348,10 @@ class RunDashboard:
         covered_branches: int,
         total_branches: int = 0,
         coverage_backend: str = "",
+        coverage_source_kind: str = "",
+        covered_lines: int = 0,
+        total_lines: int = 0,
+        total_edges: int = 0,
         unique_covered_arcs: int,
         pending_jobs: int,
         scheduler_size: int,
@@ -358,8 +370,15 @@ class RunDashboard:
         self.covered_branches_total = max(0, int(covered_branches))
         self.total_branches = max(self.total_branches, max(0, int(total_branches)))
         self.unique_covered_arcs = max(0, int(unique_covered_arcs))
+        self.covered_lines_total = max(
+            self.covered_lines_total, max(0, int(covered_lines))
+        )
+        self.total_lines = max(self.total_lines, max(0, int(total_lines)))
+        self.total_edges = max(self.total_edges, max(0, int(total_edges)))
         if coverage_backend:
             self.coverage_backend = coverage_backend
+        if coverage_source_kind:
+            self.coverage_source_kind = coverage_source_kind
         if self.coverage_backend == "afl-qemu-showmap":
             self.qemu_bitmap_slots_total = max(0, int(unique_covered_arcs))
 
@@ -433,6 +452,20 @@ class RunDashboard:
             )
         elif self.coverage_backend == "afl-qemu-showmap":
             covered_branches_text = "n/a (QEMU)"
+        edge_coverage_text = str(self.unique_covered_arcs)
+        if self.total_edges > 0:
+            ratio = (self.unique_covered_arcs / float(self.total_edges)) * 100.0
+            edge_coverage_text = (
+                f"{self.unique_covered_arcs} / {self.total_edges} ({ratio:.1f}%)"
+            )
+        elif self.coverage_backend == "afl-qemu-showmap":
+            edge_coverage_text = "n/a (QEMU)"
+        statement_coverage_text = str(self.covered_lines_total)
+        if self.total_lines > 0:
+            ratio = (self.covered_lines_total / float(self.total_lines)) * 100.0
+            statement_coverage_text = (
+                f"{self.covered_lines_total} / {self.total_lines} ({ratio:.1f}%)"
+            )
         values = [
             ("Status", self._status_text()),
             ("Exec/s", Text(f"{self._exec_rate():.1f}", style="bold white")),
@@ -452,17 +485,24 @@ class RunDashboard:
                 ),
             ),
             (
-                "Covered Branches",
+                "Branch Coverage",
                 Text(
                     covered_branches_text,
                     style="bold magenta" if self.covered_branches_total else "dim",
                 ),
             ),
             (
-                "Unique Covered Arcs",
+                "Edge Coverage",
                 Text(
-                    str(self.unique_covered_arcs),
+                    edge_coverage_text,
                     style="bold magenta" if self.unique_covered_arcs else "dim",
+                ),
+            ),
+            (
+                "Statement Coverage",
+                Text(
+                    statement_coverage_text,
+                    style="bold magenta" if self.covered_lines_total else "dim",
                 ),
             ),
         ]
@@ -555,6 +595,20 @@ class RunDashboard:
             "",
             "",
         )
+        if self.coverage_source_kind:
+            table.add_row(
+                Text("Coverage Source", style="dim"),
+                self.coverage_source_kind,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            )
         if self.coverage_backend:
             table.add_row(
                 Text("Coverage Backend", style="dim"),
