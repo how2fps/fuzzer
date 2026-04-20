@@ -83,6 +83,7 @@ CONFIG_MODULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "parser_config",
             "enable_open_coverage",
             "enable_qemu_coverage",
+            "enable_pyc_coverage",
         ),
     ),
     ("power_scheduler", ("power_scheduler_version",)),
@@ -133,6 +134,7 @@ class FuzzConfig(TypedDict):
     parser_config: dict[str, object]
     enable_open_coverage: bool
     enable_qemu_coverage: bool
+    enable_pyc_coverage: bool
 
     power_scheduler_version: str
 
@@ -174,6 +176,7 @@ def get_default_config() -> FuzzConfig:
         "parser_config": {},
         "enable_open_coverage": ENABLE_OPEN_COVERAGE,
         "enable_qemu_coverage": False,
+        "enable_pyc_coverage": False,
         "power_scheduler_version": "base",
     }
 
@@ -238,6 +241,7 @@ CLI_OVERRIDE_FLAGS: dict[str, tuple[str, ...]] = {
     "llm_seed_candidates": ("--llm-seed-candidates",),
     "enable_open_coverage": ("--enable-open-coverage",),
     "enable_qemu_coverage": ("--enable-qemu-coverage",),
+    "enable_pyc_coverage": ("--enable-pyc-coverage",),
 }
 
 
@@ -472,6 +476,8 @@ def _validate_config(config: FuzzConfig) -> None:
         raise ValueError("enable_open_coverage must be a boolean.")
     if not isinstance(config["enable_qemu_coverage"], bool):
         raise ValueError("enable_qemu_coverage must be a boolean.")
+    if not isinstance(config["enable_pyc_coverage"], bool):
+        raise ValueError("enable_pyc_coverage must be a boolean.")
 
 
 def load_config_from_file(path: Path) -> FuzzConfig:
@@ -814,6 +820,12 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
             "closed/binary targets."
         ),
     )
+    parser.add_argument(
+        "--enable-pyc-coverage",
+        action="store_true",
+        default=False,
+        help="Enable optional bytecode (pyc) line/edge coverage for supported targets.",
+    )
 
     argv = sys.argv[1:]
     args = parser.parse_args()
@@ -901,6 +913,7 @@ def get_run_plan() -> list[tuple[Path | None, FuzzConfig, int]]:
         "run_startup_generated_unmutated_first": False,
         "enable_open_coverage": args.enable_open_coverage,
         "enable_qemu_coverage": args.enable_qemu_coverage,
+        "enable_pyc_coverage": args.enable_pyc_coverage,
         "parser_config": {},
         "seed_preload_bucket_ratios": dict(DEFAULT_PRELOAD_BUCKET_RATIOS),
         "seed_corpus_initial_draw": None,

@@ -76,6 +76,21 @@ def _coerce_branch_list(raw_pairs: object) -> list[dict[str, int]]:
     return branches
 
 
+def _coerce_line_list(raw_lines: object) -> list[int]:
+    lines: list[int] = []
+    if not isinstance(raw_lines, Sequence):
+        return lines
+    for value in raw_lines:
+        try:
+            line = int(value)
+        except (TypeError, ValueError):
+            continue
+        if line <= 0:
+            continue
+        lines.append(line)
+    return lines
+
+
 def _infer_ipyparse_family(*, input_data: bytes, ipyparse_family: str | None) -> str:
     if ipyparse_family in {"ipv4", "ipv6"}:
         return ipyparse_family
@@ -141,6 +156,8 @@ def _collect_branch_details_by_file(report: Mapping[str, Any] | None) -> list[di
         total_lines = int(summary.get("num_statements", 0) or 0)
         covered_list = _coerce_branch_list(file_report.get("executed_branches"))
         missing_list = _coerce_branch_list(file_report.get("missing_branches"))
+        covered_lines = _coerce_line_list(file_report.get("executed_lines"))
+        missing_lines = _coerce_line_list(file_report.get("missing_lines"))
 
         out.append(
             {
@@ -148,26 +165,8 @@ def _collect_branch_details_by_file(report: Mapping[str, Any] | None) -> list[di
                 "total_lines": total_lines,
                 "covered_branches": covered_list,
                 "missing_branches": missing_list,
-            }
-        )
-    return out
-
-
-def _collect_executed_arcs_by_file(cov: coverage.Coverage) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    try:
-        measured_files = sorted(cov.get_data().measured_files())
-    except Exception:
-        return out
-
-    for filename in measured_files:
-        arcs = _coerce_branch_list(cov.get_data().arcs(filename))
-        if not arcs:
-            continue
-        out.append(
-            {
-                "file": _path_relative_to_root(filename),
-                "executed_arcs": arcs,
+                "covered_lines": covered_lines,
+                "missing_lines": missing_lines,
             }
         )
     return out
@@ -292,7 +291,6 @@ def run_open_target_with_branches(
     branch_report = _load_branch_report(cov)
     branch_counts = _collect_branch_counts(branch_report)
     branch_details_by_file = _collect_branch_details_by_file(branch_report)
-    executed_arcs_by_file = _collect_executed_arcs_by_file(cov)
     return {
         "status": open_result.get("status", "ok"),
         "bug_signature": open_result.get("bug_signature"),
@@ -300,7 +298,6 @@ def run_open_target_with_branches(
         "missing_branches": branch_counts["missing_branches"],
         "total_branches": branch_counts["total_branches"],
         "branch_details_by_file": branch_details_by_file,
-        "executed_arcs_by_file": executed_arcs_by_file,
     }
 
 def refill_from_uncovered(history: list[str], rng: random.Random) -> tuple[str, ...]:

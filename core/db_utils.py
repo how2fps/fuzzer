@@ -250,6 +250,15 @@ def init_results_db(conn: sqlite3.Connection) -> None:
     """)
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS seen_lines (
+            file TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            PRIMARY KEY (file, line)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS added_seed_inputs (
             target TEXT NOT NULL,
             input_text TEXT NOT NULL,
@@ -286,6 +295,17 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             to_line INTEGER NOT NULL,
             hit_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (target, file, from_line, to_line)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS line_observations (
+            target TEXT NOT NULL,
+            file TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (target, file, line)
         )
         """
     )
@@ -619,6 +639,28 @@ def increment_edge_observations(
         conn.commit()
 
 
+def increment_line_observations(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    lines: Iterable[tuple[str, int]],
+) -> None:
+    wrote_any = False
+    for file_name, line in lines:
+        conn.execute(
+            """
+            INSERT INTO line_observations (target, file, line, hit_count)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(target, file, line)
+            DO UPDATE SET hit_count = hit_count + 1
+            """,
+            (target, file_name, line),
+        )
+        wrote_any = True
+    if wrote_any:
+        conn.commit()
+
+
 def input_already_run(
     conn: sqlite3.Connection,
     mutated_input: str,
@@ -651,6 +693,24 @@ def insert_seen_edges_into_conn(
             conn.execute(
                 "INSERT OR IGNORE INTO seen_branches (file, from_line, to_line) VALUES (?, ?, ?)",
                 (f, fl, tl),
+            )
+            wrote_any = True
+        if wrote_any:
+            conn.commit()
+    except (sqlite3.Error, OSError):
+        pass
+
+
+def insert_seen_lines_into_conn(
+    conn: sqlite3.Connection,
+    lines: Iterable[tuple[str, int]],
+) -> None:
+    wrote_any = False
+    try:
+        for file_name, line in lines:
+            conn.execute(
+                "INSERT OR IGNORE INTO seen_lines (file, line) VALUES (?, ?)",
+                (file_name, line),
             )
             wrote_any = True
         if wrote_any:

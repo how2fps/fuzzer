@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from coverage.parser import PythonParser
+from coverage.exceptions import NoSource
 from tqdm import tqdm
 
 from core.config import FuzzConfig, is_debug_run
@@ -27,8 +28,11 @@ from core.db_utils import (
     add_seed_input_if_new,
     get_coverage_replay_seed_inputs,
     increment_edge_observations,
+    increment_line_observations,
     input_already_run,
     insert_run,
+    insert_seen_edges_into_conn,
+    insert_seen_lines_into_conn,
     seed_stats_for_power_schedule,
 )
 from core.sqlite_conn import open_results_db
@@ -36,6 +40,8 @@ from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_cand
 from isinteresting import (
     get_compute_interestingness,
     get_covered_edges_from_result,
+    get_covered_lines_from_result,
+    get_coverage_source_kind_from_result,
 )
 from core.mutation_utils import make_discovered_seed
 from core.seed_refill import collect_history_texts, generate_grammar_refill_seeds
@@ -47,7 +53,6 @@ from seed_scheduler import (
     ScheduledSeed,
     build_ucb_update_signals,
 )
-
 
 _BRANCH_ARC_CACHE: dict[str, set[tuple[int, int]]] = {}
 
@@ -314,7 +319,7 @@ def _branch_arcs_for_file(file_name: str) -> set[tuple[int, int]]:
         parser = PythonParser(filename=str(path))
         parser.parse_source()
         arcs = parser.arcs() or []
-    except OSError:
+    except (OSError, NoSource):
         _BRANCH_ARC_CACHE[file_name] = branch_arcs
         return branch_arcs
 
@@ -334,6 +339,20 @@ def _branch_arcs_for_file(file_name: str) -> set[tuple[int, int]]:
     return branch_arcs
 
 
+def _count_branch_like_arcs(arcs: set[tuple[int, int]]) -> int:
+    exits: dict[int, set[int]] = {}
+    for from_line, to_line in arcs:
+        if from_line <= 0 or to_line <= 0:
+            continue
+        exits.setdefault(from_line, set()).add(to_line)
+    total = 0
+    for targets in exits.values():
+        if len(targets) <= 1:
+            continue
+        total += len(targets)
+    return total
+
+
 def _count_seen_covered_branches(conn: sqlite3.Connection) -> int:
     """Return the accumulated number of unique covered branches, excluding non-branch arcs."""
     total = 0
@@ -343,52 +362,115 @@ def _count_seen_covered_branches(conn: sqlite3.Connection) -> int:
     seen_by_file: dict[str, set[tuple[int, int]]] = {}
     for file_name, from_line, to_line in rows:
         try:
-            seen_by_file.setdefault(str(file_name), set()).add(
-                (int(from_line), int(to_line))
-            )
+            seen_by_file.setdefault(str(file_name), set()).add((int(from_line), int(to_line)))
         except (TypeError, ValueError):
             continue
 
     for file_name, arcs in seen_by_file.items():
-        total += len(arcs & _branch_arcs_for_file(file_name))
+        branch_arcs = _branch_arcs_for_file(file_name)
+        if branch_arcs:
+            total += len(arcs & branch_arcs)
+        else:
+            total += _count_branch_like_arcs(arcs)
     return total
 
 
 def _extract_total_branches(result: Mapping[str, Any]) -> int:
     """Return total branches from the active coverage source when available."""
-    candidates = []
-    closed = result.get("closed_result")
-    open_res = result.get("open_result")
-    if isinstance(closed, Mapping):
-        candidates.append(closed)
-    if isinstance(open_res, Mapping):
-        candidates.append(open_res)
+    selected = _select_coverage_source(result)
+    total = _extract_total_branches_from_candidate(selected)
+    if total > 0:
+        return total
 
-    for candidate in candidates:
-        details = candidate.get("branch_details_by_file")
-        if not isinstance(details, Sequence):
-            continue
-        explicit_total = candidate.get("total_branches")
-        if explicit_total not in (None, ""):
-            try:
-                total = int(explicit_total)
-            except (TypeError, ValueError):
-                total = 0
-            if total > 0:
-                return total
-        covered_raw = candidate.get("covered_branches")
-        missing_raw = candidate.get("missing_branches")
-        if covered_raw is None or missing_raw is None:
-            continue
-        try:
-            covered = int(covered_raw or 0)
-            missing = int(missing_raw or 0)
-        except (TypeError, ValueError):
-            continue
-        total = covered + missing
+    for candidate in (
+        result.get("closed_result"),
+        result.get("shadow_result"),
+        result.get("open_result"),
+    ):
+        total = _extract_total_branches_from_candidate(
+            candidate if isinstance(candidate, Mapping) else None
+        )
         if total > 0:
             return total
     return 0
+
+
+def _extract_total_branches_from_candidate(candidate: Mapping[str, Any] | None) -> int:
+    if not isinstance(candidate, Mapping):
+        return 0
+    details = candidate.get("branch_details_by_file")
+    if not isinstance(details, Sequence):
+        return 0
+    explicit_total = candidate.get("total_branches")
+    if explicit_total not in (None, ""):
+        try:
+            total = int(explicit_total)
+        except (TypeError, ValueError):
+            total = 0
+        if total > 0:
+            return total
+    covered_raw = candidate.get("covered_branches")
+    missing_raw = candidate.get("missing_branches")
+    if covered_raw is None or missing_raw is None:
+        return 0
+    try:
+        covered = int(covered_raw or 0)
+        missing = int(missing_raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    total = covered + missing
+    return total if total > 0 else 0
+
+
+def _select_coverage_source(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not isinstance(result, Mapping):
+        return {}
+    kind = get_coverage_source_kind_from_result(result)
+    if kind == "shadow":
+        candidate = result.get("shadow_result")
+    elif kind == "open":
+        candidate = result.get("open_result")
+    else:
+        candidate = result.get("closed_result")
+    return candidate if isinstance(candidate, Mapping) else {}
+
+
+def _extract_coverage_backend(result: Mapping[str, Any]) -> str:
+    source = _select_coverage_source(result)
+    return str(source.get("coverage_backend") or "").strip()
+
+
+def _extract_covered_lines(result: Mapping[str, Any]) -> int:
+    source = _select_coverage_source(result)
+    raw = source.get("covered_lines")
+    if raw in (None, ""):
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_total_lines(result: Mapping[str, Any]) -> int:
+    source = _select_coverage_source(result)
+    raw = source.get("total_lines")
+    if raw in (None, ""):
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_total_edges(result: Mapping[str, Any]) -> int:
+    source = _select_coverage_source(result)
+    raw = source.get("total_edges")
+    if raw in (None, ""):
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _read_rss_kib(pid: int) -> int | None:
@@ -517,6 +599,7 @@ def run_worker_process(
                     seed_family=seed_family,
                     enable_open_coverage=config.get("enable_open_coverage", False),
                     enable_qemu_coverage=config.get("enable_qemu_coverage", False),
+                    enable_pyc_coverage=config.get("enable_pyc_coverage", False),
                     parser_config=config.get("parser_config"),  # type: ignore[arg-type]
                     closed_cwd_override=results_folder
                     / ".worker_cwd"
@@ -554,6 +637,12 @@ def run_worker_process(
                 sqlite_conn=db_conn,
             )
             closed = result.get("closed_result", {})
+            coverage_source_kind = get_coverage_source_kind_from_result(result)
+            coverage_backend = _extract_coverage_backend(result)
+            covered_lines = _extract_covered_lines(result)
+            total_lines = _extract_total_lines(result)
+            total_edges = _extract_total_edges(result)
+            covered_line_pairs = tuple(get_covered_lines_from_result(result))
             signals = build_ucb_update_signals(
                 result=result,
                 db_path=db_path,
@@ -578,10 +667,15 @@ def run_worker_process(
                     "run_time_seconds": run_time_seconds,
                     "status": closed.get("status"),
                     "bug_signature": closed.get("bug_signature"),
-                    "coverage_backend": closed.get("coverage_backend"),
+                    "coverage_backend": coverage_backend,
+                    "coverage_source_kind": coverage_source_kind,
+                    "covered_lines": covered_lines,
+                    "total_lines": total_lines,
+                    "total_edges": total_edges,
                     "isinteresting_score": score,
                     "signals": signals,
                     "covered_edges": tuple(get_covered_edges_from_result(result)),
+                    "covered_line_pairs": covered_line_pairs,
                     "total_branches": _extract_total_branches(result),
                     "parser_result": result if debug_mode else None,
                     "worker_retiring": (
@@ -1538,8 +1632,15 @@ def run_fuzzer_multi_worker(
                                 cond.notify_all()
                 parser_result = result.pop("parser_result", None)
                 covered_edges = result.pop("covered_edges", ())
+                covered_line_pairs = result.pop("covered_line_pairs", ())
                 total_branches = max(0, int(result.pop("total_branches", 0) or 0))
                 coverage_backend = str(result.pop("coverage_backend", "") or "").strip()
+                coverage_source_kind = str(
+                    result.pop("coverage_source_kind", "") or ""
+                ).strip()
+                covered_lines = max(0, int(result.pop("covered_lines", 0) or 0))
+                total_lines = max(0, int(result.pop("total_lines", 0) or 0))
+                total_edges = max(0, int(result.pop("total_edges", 0) or 0))
                 result.pop("worker_id", None)
                 result.pop("worker_retiring", None)
                 coverage_key = _coverage_key_from_signals(signals)
@@ -1591,8 +1692,15 @@ def run_fuzzer_multi_worker(
                         target=effective_target,
                         edges=covered_edges,
                     )
-                covered_branches = seen_covered_branch_count
-                unique_covered_arcs = seen_branch_count
+                if covered_line_pairs:
+                    insert_seen_lines_into_conn(conn, covered_line_pairs)
+                    increment_line_observations(
+                        conn,
+                        target=effective_target,
+                        lines=covered_line_pairs,
+                    )
+                covered_branches = _count_seen_covered_branches(conn)
+                unique_covered_arcs = _count_seen_branches(conn)
                 if new_coverage and coverage_key:
                     add_unique_coverage_seed_input(
                         conn,
@@ -1680,6 +1788,10 @@ def run_fuzzer_multi_worker(
                     covered_branches=covered_branches,
                     total_branches=total_branches,
                     coverage_backend=coverage_backend,
+                    coverage_source_kind=coverage_source_kind,
+                    covered_lines=covered_lines,
+                    total_lines=total_lines,
+                    total_edges=total_edges,
                     unique_covered_arcs=unique_covered_arcs,
                     pending_jobs=pending_jobs,
                     scheduler_size=scheduler_size,
