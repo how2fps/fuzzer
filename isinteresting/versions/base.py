@@ -630,8 +630,8 @@ def compute_interestingness(
         + (2.0 * late_parse_depth_signal)
         + (2.0 * input_structure_novelty_signal)
     )
-    if weighted_sum > 0.0:
-        weighted_sum += 1.0 * execution_stability_signal
+    # if weighted_sum > 0.0:
+    #     weighted_sum += 1.0 * execution_stability_signal
 
     score = min(1.0, weighted_sum / 8.0)
     return max(0.0, float(score))

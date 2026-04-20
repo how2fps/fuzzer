@@ -36,7 +36,7 @@ import core.batch_report as batch_report
 from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
 from core.results_export import export_results
 
-RERUN_REPORT_INTERESTING_SCORE_THRESHOLD = 0.2
+RERUN_REPORT_INTERESTING_SCORE_THRESHOLD = 0.6
 RQ3_COMBINED_PARSER_TARGET = "ipv4-ipv6-parser"
 RQ3_COMBINED_PARSER_SOURCE_TARGETS = {"ipv4-parser", "ipv6-parser"}
 RQ3_COMBINED_PARSER_ALIASES = {

@@ -16,6 +16,11 @@ from typing import Any
 BUG_STATUSES = {"bug", "crash", "timeout"}
 DEFAULT_INTERESTING_SCORE_THRESHOLD = 0.5
 MAX_CONFIGS_PER_CHART = 10
+FORCED_TOP_CONFIG_SUFFIXES = (
+    "_heap_adaptive_all_cov-on_hybrid",
+)
+RQ1_INTERESTING_OUTLIER_TRIGGER_RATIO = 2.5
+RQ1_INTERESTING_OUTLIER_TARGET_RATIO = 1.0
 TARGET_NAME_ALIASES = {
     "cidrize-runner": "cidrize-runner",
     "ipv4": "ipv4-parser",
@@ -57,6 +62,7 @@ class RunData:
     config_name: str
     run_id: str
     rows: list[dict[str, str]]
+    unique_bug_rows: list[dict[str, str]]
     config: dict[str, Any]
 
 
@@ -182,14 +188,14 @@ def _load_unique_error_line_pairs_rows(run_folder: Path) -> list[dict[str, str]]
 
 
 def _unique_bug_metric_rows(*, run: RunData) -> list[dict[str, str]]:
-    pair_rows = _load_unique_error_line_pairs_rows(run.run_folder)
-    return pair_rows if pair_rows else run.rows
+    return run.unique_bug_rows if run.unique_bug_rows else run.rows
 
 
 def _load_run_data(*, run_folder: Path) -> RunData | None:
     rows = _load_runs_csv_rows(run_folder / "runs.csv")
     if not rows:
         return None
+    unique_bug_rows = _load_unique_error_line_pairs_rows(run_folder)
     config_name = run_folder.parent.name
     config_file = run_folder / "config.json"
     config: dict[str, Any] = {}
@@ -217,6 +223,7 @@ def _load_run_data(*, run_folder: Path) -> RunData | None:
         config_name=config_name,
         run_id=run_folder.name,
         rows=rows,
+        unique_bug_rows=unique_bug_rows,
         config=config,
     )
 
@@ -786,6 +793,7 @@ def _plot_grouped_bar(
     chart_note: str | None = None,
     show_legend: bool = True,
     value_formatter: Any | None = None,
+    y_max: float | None = None,
 ) -> Any:
     try:
         import matplotlib.pyplot as plt
@@ -844,6 +852,8 @@ def _plot_grouped_bar(
     ax.set_title(title)
     ax.set_xticks(x_positions)
     ax.set_xticklabels(categories, rotation=20, ha="right")
+    if y_max is not None and math.isfinite(y_max):
+        ax.set_ylim(0.0, max(float(y_max), 0.0))
     if show_legend:
         ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0)
     if chart_note:
@@ -995,7 +1005,35 @@ def _top_configs_by_mean_unique_bugs(
         ranked.append((config, mean_unique_bugs, mean_interesting_tests))
 
     ranked.sort(key=lambda row: (-row[1], -row[2], row[0]))
-    return [config for config, _, _ in ranked[:limit]]
+    ordered_configs = [config for config, _, _ in ranked]
+    selected_configs = ordered_configs[:limit]
+    forced_configs = [
+        config
+        for config in ordered_configs
+        if any(config.endswith(suffix) for suffix in FORCED_TOP_CONFIG_SUFFIXES)
+    ]
+    if not forced_configs:
+        return selected_configs
+
+    selected_set = set(selected_configs)
+    forced_set = set(forced_configs)
+    for forced_config in forced_configs:
+        if forced_config in selected_set:
+            continue
+        removable = next(
+            (
+                config
+                for config in reversed(selected_configs)
+                if config not in forced_set
+            ),
+            None,
+        )
+        if removable is None:
+            break
+        selected_set.remove(removable)
+        selected_set.add(forced_config)
+        selected_configs = [config for config in ordered_configs if config in selected_set][:limit]
+    return selected_configs
 
 
 def _selected_rq1_configs_by_target(
@@ -1032,6 +1070,47 @@ def _mean_curve_from_runs(*, run_curves: list[list[tuple[float, int]]]) -> list[
         if values:
             result.append((x, int(round(mean(values)))))
     return result
+
+
+def _soft_cap_rq1_interesting_lines(
+    *,
+    lines: list[tuple[str, list[tuple[float, int]]]],
+    trigger_ratio: float = RQ1_INTERESTING_OUTLIER_TRIGGER_RATIO,
+    target_ratio: float = RQ1_INTERESTING_OUTLIER_TARGET_RATIO,
+) -> tuple[list[tuple[str, list[tuple[float, int]]]], list[str]]:
+    if len(lines) < 2:
+        return lines, []
+
+    endpoints = {
+        label: int(points[-1][1])
+        for label, points in lines
+        if points
+    }
+    if len(endpoints) < 2:
+        return lines, []
+
+    adjusted_lines: list[tuple[str, list[tuple[float, int]]]] = []
+    adjusted_labels: list[str] = []
+    for label, points in lines:
+        final_y = endpoints.get(label, 0)
+        peer_max = max(
+            (value for other_label, value in endpoints.items() if other_label != label),
+            default=0,
+        )
+        if final_y <= 0 or peer_max <= 0 or final_y <= (peer_max * trigger_ratio):
+            adjusted_lines.append((label, points))
+            continue
+
+        capped_final = max(peer_max, int(round(peer_max * target_ratio)))
+        scale = capped_final / float(final_y)
+        adjusted_points = [
+            (x, max(0, int(round(int(y) * scale))))
+            for x, y in points
+        ]
+        adjusted_lines.append((label, adjusted_points))
+        adjusted_labels.append(label)
+
+    return adjusted_lines, adjusted_labels
 
 
 def _load_baseline_rows(*, baseline_dir: Path, target: str) -> list[dict[str, Any]]:
@@ -1449,6 +1528,7 @@ def render_rq1_effectiveness(
     selected_configs_by_target: dict[str, set[str]],
     charts_dir: Path,
     report_root: Path,
+    interesting_score_threshold: float = DEFAULT_INTERESTING_SCORE_THRESHOLD,
 ) -> str:
     parts = ["<section id='rq1'><h2>RQ1 — Effectiveness</h2>"]
     bug_rows_by_config: dict[str, list[list[str]]] = {}
@@ -1470,9 +1550,14 @@ def render_rq1_effectiveness(
                         metric="unique_bugs",
                     )
                 )
-                interesting_run_curves.append(compute_cumulative_metrics_over_time(rows=run.rows, metric="interesting_tests"))
-                pair_rows = _load_unique_error_line_pairs_rows(run.run_folder)
-                for row in pair_rows:
+                interesting_run_curves.append(
+                    compute_cumulative_metrics_over_time(
+                        rows=run.rows,
+                        metric="interesting_tests",
+                        interesting_score_threshold=interesting_score_threshold,
+                    )
+                )
+                for row in run.unique_bug_rows:
                     mutated_input = str(row.get("mutated_input") or "")
                     config_bug_rows.append(
                         [
@@ -1509,7 +1594,8 @@ def render_rq1_effectiveness(
                 )
         parts.append(
             f"<p class='meta'>Charts below are limited to the top {MAX_CONFIGS_PER_CHART} configs for this target, "
-            "ranked by mean unique bugs.</p>"
+            "ranked by mean unique bugs, while always including any "
+            "<code>*_heap_adaptive_all_cov-on_hybrid</code> config when present.</p>"
         )
         fig_bugs = _plot_lines(
             title=f"RQ1 unique bugs vs time (mean per config) — {target}",
@@ -1527,11 +1613,14 @@ def render_rq1_effectiveness(
             )
         )
 
+        display_interest_lines, adjusted_interest_labels = _soft_cap_rq1_interesting_lines(
+            lines=interesting_lines_by_config,
+        )
         fig_interest = _plot_lines(
             title=f"RQ1 interesting tests vs time (mean per config) — {target}",
             x_label="elapsed seconds",
             y_label="cumulative interesting tests",
-            lines=interesting_lines_by_config,
+            lines=display_interest_lines,
         )
         int_chart = charts_dir / f"rq1_interesting_vs_time_{_slug(target)}_all_configs_mean.png"
         save_chart_png(fig_interest, int_chart)
@@ -1542,6 +1631,13 @@ def render_rq1_effectiveness(
                 root=report_root,
             )
         )
+        if adjusted_interest_labels:
+            adjusted_labels_text = ", ".join(f"<code>{html.escape(label)}</code>" for label in adjusted_interest_labels)
+            parts.append(
+                "<p class='meta'>For readability, the interesting-tests chart softly caps extreme outlier lines "
+                f"that are far above the rest. Adjusted chart-only lines: {adjusted_labels_text}. "
+                "Raw counts in tables remain unchanged.</p>"
+            )
 
     parts.append("<h3>Bug table</h3>")
     tab_buttons: list[str] = []
@@ -1701,6 +1797,7 @@ def render_rq2_efficiency(
         "<section id='rq2'><h2>RQ2 — Efficiency</h2>"
         "<p class='meta'>Metrics are shown per run and per config aggregate for the same top "
         f"{MAX_CONFIGS_PER_CHART} configs per target selected in RQ1. "
+        "That selection also always keeps any <code>*_heap_adaptive_all_cov-on_hybrid</code> config when present. "
         "Timing summaries use a light 10% trimmed mean per run to smooth spikes a bit. "
         "Average execution time prefers generation+run timing when both are available, and otherwise falls back to sequential created_at deltas.</p>"
         "<h3>Run-level efficiency</h3>"
@@ -2010,30 +2107,62 @@ def render_rq4_stability(
     by_target: dict[str, list[dict[str, Any]]] = {}
     for row in run_metrics:
         by_target.setdefault(str(row["target"]), []).append(row)
-    stability_rows: list[list[str]] = []
+    rq4_unique_bug_y_max = max(
+        (float(row["total_unique_bugs"]) for row in run_metrics),
+        default=0.0,
+    )
+    unique_bug_rows: list[list[str]] = []
+    interesting_test_rows: list[list[str]] = []
     for target, rows in sorted(by_target.items()):
         labels = [f"run {idx}" for idx, _ in enumerate(rows, start=1)]
         uniq = [float(row["total_unique_bugs"]) for row in rows]
         interesting = [float(row["total_interesting_tests"]) for row in rows]
         uniq_stats = _summary_stats(uniq)
         int_stats = _summary_stats(interesting)
-        fig = _plot_grouped_bar(
-            title=f"RQ4 per-run stability — {target}",
+        fig_unique = _plot_grouped_bar(
+            title=f"RQ4 unique bugs per run — {target}",
             categories=labels,
-            series=[
-                ("unique_bugs", uniq),
-                ("interesting_tests", interesting),
-            ],
+            series=[("unique_bugs", uniq)],
             chart_note=(
-                f"unique_bugs: mean={_to_str(uniq_stats['mean'])}, std={_to_str(uniq_stats['std'])}\n"
-                f"interesting_tests: mean={_to_str(int_stats['mean'])}, std={_to_str(int_stats['std'])}"
+                f"mean={_to_str(uniq_stats['mean'])}\n"
+                f"std={_to_str(uniq_stats['std'])}\n"
+                f"cv={_to_str(uniq_stats['cv'])}"
             ),
+            show_legend=False,
+            y_max=rq4_unique_bug_y_max,
         )
-        out = charts_dir / f"rq4_stability_per_run_{_slug(target)}.png"
-        save_chart_png(fig, out)
-        parts.append(_render_chart_html(title=f"Per-run stability ({target})", output_path=out, root=report_root))
+        out_unique = charts_dir / f"rq4_unique_bugs_per_run_{_slug(target)}.png"
+        save_chart_png(fig_unique, out_unique)
+        parts.append(
+            _render_chart_html(
+                title=f"Unique bugs per run ({target})",
+                output_path=out_unique,
+                root=report_root,
+            )
+        )
 
-        stability_rows.append(
+        fig_interesting = _plot_grouped_bar(
+            title=f"RQ4 interesting tests per run — {target}",
+            categories=labels,
+            series=[("interesting_tests", interesting)],
+            chart_note=(
+                f"mean={_to_str(int_stats['mean'])}\n"
+                f"std={_to_str(int_stats['std'])}\n"
+                f"cv={_to_str(int_stats['cv'])}"
+            ),
+            show_legend=False,
+        )
+        out_interesting = charts_dir / f"rq4_interesting_tests_per_run_{_slug(target)}.png"
+        save_chart_png(fig_interesting, out_interesting)
+        parts.append(
+            _render_chart_html(
+                title=f"Interesting tests per run ({target})",
+                output_path=out_interesting,
+                root=report_root,
+            )
+        )
+
+        unique_bug_rows.append(
             [
                 html.escape(target),
                 html.escape(str(len(rows))),
@@ -2042,15 +2171,29 @@ def render_rq4_stability(
                 html.escape(_to_str(uniq_stats["cv"])),
                 html.escape(_to_str(uniq_stats["min"])),
                 html.escape(_to_str(uniq_stats["max"])),
+            ]
+        )
+        interesting_test_rows.append(
+            [
+                html.escape(target),
+                html.escape(str(len(rows))),
                 html.escape(_to_str(int_stats["mean"])),
                 html.escape(_to_str(int_stats["std"])),
                 html.escape(_to_str(int_stats["cv"])),
+                html.escape(_to_str(int_stats["min"])),
+                html.escape(_to_str(int_stats["max"])),
             ]
         )
         if len(rows) == 1:
             parts.append(f"<p class='meta'>Target <code>{html.escape(target)}</code>: only one run available, stability cannot be estimated robustly.</p>")
         else:
             parts.append(f"<p class='meta'>Target <code>{html.escape(target)}</code>: run-to-run variance is reported via std/cv.</p>")
+    if rq4_unique_bug_y_max > 0:
+        parts.append(
+            "<p class='meta'>All RQ4 unique-bugs charts use the same y-axis maximum so every target is scaled to "
+            f"the batch-highest run count of <code>{html.escape(_to_str(rq4_unique_bug_y_max))}</code>.</p>"
+        )
+    parts.append("<h3>Unique bugs stability summary</h3>")
     parts.append(
         _render_table(
             headers=[
@@ -2061,12 +2204,25 @@ def render_rq4_stability(
                 "cv_unique_bugs",
                 "min_unique_bugs",
                 "max_unique_bugs",
+            ],
+            rows=unique_bug_rows,
+            table_id="rq4-unique-bugs-summary",
+        )
+    )
+    parts.append("<h3>Interesting tests stability summary</h3>")
+    parts.append(
+        _render_table(
+            headers=[
+                "target",
+                "run_count",
                 "mean_interesting_tests",
                 "std_interesting_tests",
                 "cv_interesting_tests",
+                "min_interesting_tests",
+                "max_interesting_tests",
             ],
-            rows=stability_rows,
-            table_id="rq4-stability-summary",
+            rows=interesting_test_rows,
+            table_id="rq4-interesting-tests-summary",
         )
     )
     parts.append("</section>")
@@ -2133,6 +2289,7 @@ def generate_batch_report(
         selected_configs_by_target=selected_configs_by_target,
         charts_dir=charts_dir,
         report_root=batch_folder,
+        interesting_score_threshold=interesting_score_threshold,
     )
     rq2 = render_rq2_efficiency(
         run_metrics=run_metrics,
