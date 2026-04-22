@@ -58,6 +58,13 @@ def load_runs_dataframe(runs_csv: Path) -> pd.DataFrame:
     return df
 
 
+def _coerce_metric_column(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series([0] * len(df), index=df.index, dtype="int64")
+    values = pd.to_numeric(df[column], errors="coerce").fillna(0)
+    return values.astype("int64")
+
+
 def choose_bin_seconds(elapsed_seconds: pd.Series, requested_bin_seconds: float | None) -> float:
     if requested_bin_seconds is not None:
         if requested_bin_seconds <= 0:
@@ -138,6 +145,21 @@ def build_cumulative_validity_table(df: pd.DataFrame, *, fmt: str) -> pd.DataFra
     ].reset_index(drop=True)
 
 
+def build_cumulative_coverage_table(df: pd.DataFrame) -> pd.DataFrame:
+    working = df.copy()
+    start_time = working["created_at"].min()
+    working["elapsed_seconds"] = (
+        working["created_at"] - start_time
+    ).dt.total_seconds()
+    working["unique_covered_arcs"] = _coerce_metric_column(
+        working, "unique_covered_arcs"
+    )
+    working["covered_branches"] = _coerce_metric_column(working, "covered_branches")
+    return working[
+        ["elapsed_seconds", "iteration", "unique_covered_arcs", "covered_branches"]
+    ].reset_index(drop=True)
+
+
 def plot_validity_chart(
     summary: pd.DataFrame,
     *,
@@ -200,9 +222,84 @@ def plot_validity_chart(
     plt.close(fig)
 
 
+def plot_coverage_chart(
+    summary: pd.DataFrame,
+    *,
+    runs_csv: Path,
+    unique_arcs_output_path: Path,
+    covered_branches_output_path: Path,
+) -> None:
+    x = summary["elapsed_seconds"]
+    final_unique_arcs = int(summary["unique_covered_arcs"].iloc[-1]) if not summary.empty else 0
+    final_covered_branches = int(summary["covered_branches"].iloc[-1]) if not summary.empty else 0
+
+    def _plot_single_metric(
+        *,
+        y: pd.Series,
+        title: str,
+        y_label: str,
+        color: str,
+        final_value: int,
+        output_path: Path,
+    ) -> None:
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        ax.plot(
+            x,
+            y,
+            color=color,
+            linewidth=2.5,
+        )
+
+        ax.set_title(title)
+        ax.set_xlabel("Elapsed time (seconds)")
+        ax.set_ylabel(y_label)
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        ax.grid(alpha=0.25, linestyle=":")
+
+        subtitle = f"Source: {runs_csv.name} | final={final_value}"
+        fig.text(0.5, 0.01, subtitle, ha="center", fontsize=10)
+
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=160)
+        plt.close(fig)
+
+    _plot_single_metric(
+        y=summary["unique_covered_arcs"],
+        title="Unique arcs coverage growth over time",
+        y_label="Unique covered arcs",
+        color="#264653",
+        final_value=final_unique_arcs,
+        output_path=unique_arcs_output_path,
+    )
+    _plot_single_metric(
+        y=summary["covered_branches"],
+        title="Covered branches growth over time",
+        y_label="Covered branches",
+        color="#f4a261",
+        final_value=final_covered_branches,
+        output_path=covered_branches_output_path,
+    )
+
+
 def default_output_path(runs_csv: Path, fmt: str, mode: str) -> Path:
     stem = f"{runs_csv.stem}_{fmt}_validity_{mode}"
     return runs_csv.with_name(f"{stem}.png")
+
+
+def default_coverage_output_path(runs_csv: Path) -> Path:
+    return runs_csv.with_name(f"{runs_csv.stem}_coverage_growth.png")
+
+
+def split_coverage_output_paths(coverage_output_path: Path) -> tuple[Path, Path]:
+    suffix = coverage_output_path.suffix if coverage_output_path.suffix else ".png"
+    stem = coverage_output_path.stem if coverage_output_path.stem else "coverage_growth"
+    parent = coverage_output_path.parent
+    unique_arcs_path = parent / f"{stem}_unique_arcs{suffix}"
+    covered_branches_path = parent / f"{stem}_covered_branches{suffix}"
+    return unique_arcs_path, covered_branches_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -243,6 +340,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path for the aggregated summary CSV.",
     )
+    parser.add_argument(
+        "--coverage-output",
+        type=Path,
+        default=None,
+        help="Optional path for the coverage growth PNG. Defaults next to runs.csv.",
+    )
+    parser.add_argument(
+        "--coverage-summary-csv",
+        type=Path,
+        default=None,
+        help="Optional path for the coverage growth summary CSV.",
+    )
     return parser.parse_args()
 
 
@@ -273,6 +382,20 @@ def main() -> None:
         if args.summary_csv is not None
         else output_path.with_suffix(".csv")
     )
+    coverage_output_path = (
+        args.coverage_output.resolve()
+        if args.coverage_output is not None
+        else default_coverage_output_path(runs_csv)
+    )
+    unique_arcs_output_path, covered_branches_output_path = split_coverage_output_paths(
+        coverage_output_path
+    )
+    coverage_summary_csv = (
+        args.coverage_summary_csv.resolve()
+        if args.coverage_summary_csv is not None
+        else coverage_output_path.with_suffix(".csv")
+    )
+    coverage_summary = build_cumulative_coverage_table(df)
 
     plot_validity_chart(
         summary,
@@ -282,10 +405,20 @@ def main() -> None:
         mode=args.mode,
         bin_seconds=resolved_bin_seconds,
     )
+    plot_coverage_chart(
+        coverage_summary,
+        runs_csv=runs_csv,
+        unique_arcs_output_path=unique_arcs_output_path,
+        covered_branches_output_path=covered_branches_output_path,
+    )
     summary.to_csv(summary_csv, index=False)
+    coverage_summary.to_csv(coverage_summary_csv, index=False)
 
     print(f"Wrote chart to {output_path}")
     print(f"Wrote summary to {summary_csv}")
+    print(f"Wrote unique arcs chart to {unique_arcs_output_path}")
+    print(f"Wrote covered branches chart to {covered_branches_output_path}")
+    print(f"Wrote coverage summary to {coverage_summary_csv}")
 
 
 if __name__ == "__main__":

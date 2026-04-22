@@ -1,0 +1,44 @@
+{
+  "target": "cidrize-runner",
+  "batch": {
+    "runs": 5
+  },
+  "runtime": {
+    "debug_mode": false,
+    "max_iterations": null,
+    "max_hours": 2,
+    "timeout": 300,
+    "rng_seed": 42,
+    "workers": 2
+  },
+  "seed_scheduler": {
+    "scheduler_kind": "heap",
+    "ucb_trace": false,
+    "ucb_debug_tree": false
+  },
+  "seed_corpus": {
+    "seed_corpus_version": "regex-noseed",
+    "seed_corpus_initial_draw": null,
+    "seed_preload_mode": "full",
+    "seed_preload_total": 32,
+    "seed_refill_mode": "grammar",
+    "run_startup_generated_unmutated_first": true
+  },
+  "mutator": {
+    "mutator_kind": "auto",
+    "mutator_version": "adaptive_all",
+    "grammar_path": null,
+    "grammar_rules_file": null
+  },
+  "isinteresting": {
+    "isinteresting_version": "base"
+  },
+  "parser": {
+    "parser_version": "base",
+    "parser_config": {},
+    "enable_open_coverage": true
+  },
+  "power_scheduler": {
+    "power_scheduler_version": "hybrid"
+  }
+}

@@ -236,6 +236,8 @@ def init_results_db(conn: sqlite3.Connection) -> None:
             representative_key TEXT,
             late_parse_depth REAL,
             execution_stability_bonus REAL,
+            unique_covered_arcs INTEGER,
+            covered_branches INTEGER,
             target TEXT,
             created_at TEXT NOT NULL
         )
@@ -341,6 +343,10 @@ def init_results_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN late_parse_depth REAL")
     if "execution_stability_bonus" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN execution_stability_bonus REAL")
+    if "unique_covered_arcs" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN unique_covered_arcs INTEGER")
+    if "covered_branches" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN covered_branches INTEGER")
     conn.commit()
 
 
@@ -533,6 +539,8 @@ def insert_run(
     representative_key: str | None = None,
     late_parse_depth: float | None = None,
     execution_stability_bonus: float | None = None,
+    unique_covered_arcs: int | None = None,
+    covered_branches: int | None = None,
     target: str,
 ) -> None:
     bug_type = (bug_signature or {}).get("type")
@@ -551,8 +559,9 @@ def insert_run(
             isinteresting_score, parse_category, output_signature, error_code,
             diff_behavior_key, diff_pattern_key, mismatch_type_key, structure_key, length_bucket,
             representative_key, late_parse_depth, execution_stability_bonus,
+            unique_covered_arcs, covered_branches,
             target, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             iteration,
             seed_id,
@@ -590,6 +599,8 @@ def insert_run(
                 if execution_stability_bonus is not None
                 else 0.0
             ),
+            int(unique_covered_arcs) if unique_covered_arcs is not None else 0,
+            int(covered_branches) if covered_branches is not None else 0,
             target,
             datetime.now(timezone.utc).isoformat(),
         ),

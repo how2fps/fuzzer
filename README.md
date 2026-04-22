@@ -1,10 +1,29 @@
-# Fuzzer
+# BunnyCov
 
 AFL-style fuzzer harness that wires a seed corpus, mutator, parser, interestingness scoring, and schedulers. Each run persists results to SQLite and exports CSVs under `results/`.
 
 ## How to run
 
 From the project root (the directory containing `main.py`):
+
+```bash
+uv venv
+source .venv/bin/activate
+uv sync
+```
+
+Clone the target repositories into `targets/`:
+
+```bash
+mkdir -p targets
+git clone https://github.com/TrustWare-Research-Group/IPv4-IPv6-parser targets/IPv4-IPv6-parser
+git clone https://github.com/TrustWare-Research-Group/cidrize-runner targets/cidrize-runner
+git clone https://github.com/TrustWare-Research-Group/json-decoder targets/json-decoder
+git clone https://github.com/jathanism/cidrize targets/cidrize
+git clone https://github.com/jcollie/ipyparse targets/ipyparse
+```
+
+Or, if you are already inside an environment with the project dependencies installed:
 
 ```bash
 python main.py
@@ -14,6 +33,11 @@ With options:
 
 ```bash
 python main.py --target json-decoder --iterations 5000 --seed 42
+```
+
+With the best configs:
+```bash
+uv run main.py --configs-dir configs/best_configs
 ```
 
 You can always see the authoritative list of options and defaults with:
@@ -74,8 +98,11 @@ python main.py --config configs/my_run.json --runs 5
 # { "batch": { "runs": 5 }, ... }
 python main.py --config configs/my_run.json
 
-# Run all configs in a target folder (non-recursive), 3 times each
-python main.py --configs-dir configs/rerun_allcombos_sched_mut_cov_power_alltargets --runs 3
+# Run all configs in a target folder (non-recursive), 5 times each
+python main.py --configs-dir configs/best_configs --runs 5
+
+# Run all configs from the local best_configs folder
+python main.py --configs-dir /home/fuzzer/fuzzer/best_configs
 ```
 
 ## Results
@@ -118,33 +145,3 @@ After the full run plan finishes, an overview report is written into the batch f
 
 - **`report.html`** — charts + tables comparing configs
 - **`report.json`** — raw aggregated metrics used by the report
-
-Run from the repository root so that imports (`isinteresting`, `mutator`, `parser`, etc.) resolve correctly.
-
-## Validity Analysis
-
-To chart how much of the mutated output is valid vs invalid over time for a saved run:
-
-```bash
-python analyze_runs_validity.py \
-  results/batch_20260403_045300/001_json-decoder_heap_adaptive_all_cov-on_constant/run_1_20260403_045300/runs.csv \
-  --format json
-```
-
-For IP-oriented runs:
-
-```bash
-python analyze_runs_validity.py path/to/runs.csv --format ipv4
-python analyze_runs_validity.py path/to/runs.csv --format ipv6
-```
-
-This writes:
-
-- a PNG chart next to the input `runs.csv`
-- a CSV summary with valid/invalid percentages over time
-
-Useful options:
-
-- `--mode cumulative` for cumulative percentages instead of per-bin percentages
-- `--bin-seconds 10` to control the time-bin size in binned mode
-- `--output path/to/chart.png` to choose the chart location

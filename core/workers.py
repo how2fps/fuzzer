@@ -1544,6 +1544,23 @@ def run_fuzzer_multi_worker(
                 result.pop("worker_retiring", None)
                 coverage_key = _coverage_key_from_signals(signals)
                 new_coverage = bool(signals.get("new_coverage"))
+                newest_coverage_branch = ""
+                if covered_edges:
+                    new_edges, new_branch_edges, newest_label = _insert_seen_edges_with_stats(
+                        conn,
+                        covered_edges,
+                    )
+                    if new_edges > 0:
+                        seen_branch_count += new_edges
+                        seen_covered_branch_count += new_branch_edges
+                        newest_coverage_branch = newest_label
+                    increment_edge_observations(
+                        conn,
+                        target=effective_target,
+                        edges=covered_edges,
+                    )
+                covered_branches = seen_covered_branch_count
+                unique_covered_arcs = seen_branch_count
                 insert_run(
                     conn,
                     iteration=iteration,
@@ -1574,25 +1591,10 @@ def run_fuzzer_multi_worker(
                     representative_key=str(signals.get("representative_key") or ""),
                     late_parse_depth=signals.get("late_parse_depth"),
                     execution_stability_bonus=signals.get("execution_stability_bonus"),
+                    unique_covered_arcs=unique_covered_arcs,
+                    covered_branches=covered_branches,
                     target=effective_target,
                 )
-                newest_coverage_branch = ""
-                if covered_edges:
-                    new_edges, new_branch_edges, newest_label = _insert_seen_edges_with_stats(
-                        conn,
-                        covered_edges,
-                    )
-                    if new_edges > 0:
-                        seen_branch_count += new_edges
-                        seen_covered_branch_count += new_branch_edges
-                        newest_coverage_branch = newest_label
-                    increment_edge_observations(
-                        conn,
-                        target=effective_target,
-                        edges=covered_edges,
-                    )
-                covered_branches = seen_covered_branch_count
-                unique_covered_arcs = seen_branch_count
                 if new_coverage and coverage_key:
                     add_unique_coverage_seed_input(
                         conn,

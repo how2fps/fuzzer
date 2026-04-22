@@ -1,6 +1,7 @@
 [project]
 name = "my_fuzzer"
 version = "0.1.0"
+requires-python = ">=3.12"
 dependencies = [
     "tqdm>=4.66.0",
     "coverage>=7.13.4",
@@ -11,12 +12,7 @@ dependencies = [
     "rich>=14.0.0",
 ]
 
-[project.scripts]
-# This allows you to run 'fuzz-now' in the terminal to start your fuzzer
-fuzz-now = "fuzzer.main:main"
-
 [tool.ruff]
-# Configure your linter for clean code
 line-length = 88
 
 [dependency-groups]

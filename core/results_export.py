@@ -9,6 +9,13 @@ from core.fuzzer_logging import get_fuzzer_logger
 from core.sqlite_conn import open_results_db
 from core.target_artifacts import copy_bug_counts_csv_if_present
 
+_VALIDITY_FORMAT_BY_TARGET = {
+    "json-decoder": "json",
+    "json_open": "json",
+    "ipv4-parser": "ipv4",
+    "ipv6-parser": "ipv6",
+}
+
 
 def _safe_int(value: Any) -> int | None:
     if value is None:
@@ -116,6 +123,56 @@ def _build_db_match_index(conn) -> dict[tuple[str, int, str], dict[str, Any]]:
             "datetime_executed": created_at,
         }
     return out
+
+
+def _export_run_charts(*, results_folder: Path, target: str) -> None:
+    runs_csv = results_folder / "runs.csv"
+    if not runs_csv.is_file():
+        return
+
+    log = get_fuzzer_logger()
+    try:
+        from analyze_runs_validity import (
+            build_binned_validity_table,
+            build_cumulative_coverage_table,
+            default_coverage_output_path,
+            default_output_path,
+            load_runs_dataframe,
+            plot_coverage_chart,
+            plot_validity_chart,
+        )
+
+        df = load_runs_dataframe(runs_csv)
+
+        coverage_summary = build_cumulative_coverage_table(df)
+        coverage_output = default_coverage_output_path(runs_csv)
+        plot_coverage_chart(
+            coverage_summary,
+            runs_csv=runs_csv,
+            output_path=coverage_output,
+        )
+        coverage_summary.to_csv(coverage_output.with_suffix(".csv"), index=False)
+
+        fmt = _VALIDITY_FORMAT_BY_TARGET.get(target)
+        if fmt:
+            validity_summary, bin_seconds = build_binned_validity_table(df, fmt=fmt)
+            validity_output = default_output_path(runs_csv, fmt, "binned")
+            plot_validity_chart(
+                validity_summary,
+                fmt=fmt,
+                runs_csv=runs_csv,
+                output_path=validity_output,
+                mode="binned",
+                bin_seconds=bin_seconds,
+            )
+            validity_summary.to_csv(validity_output.with_suffix(".csv"), index=False)
+        else:
+            log.info(
+                "Skipping validity chart for target %s; no known validity format mapping.",
+                target,
+            )
+    except Exception as exc:
+        log.warning("Failed to generate charts for %s: %s", results_folder, exc)
 
 
 def _export_pairs_from_bug_counts(
@@ -247,7 +304,8 @@ def export_results(
         cur = conn.execute(
             "SELECT iteration, seed_id, seed_text, mutated_input, generation_time_seconds, "
             "run_time_seconds, status, bug_type, exception, message, file, line, "
-            "isinteresting_score, target, created_at FROM runs"
+            "isinteresting_score, unique_covered_arcs, covered_branches, target, created_at "
+            "FROM runs"
         )
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
@@ -255,6 +313,7 @@ def export_results(
             w = csv.writer(f)
             w.writerow(cols)
             w.writerows(rows)
+        _export_run_charts(results_folder=results_folder, target=target)
     finally:
         conn.close()
 
