@@ -37,7 +37,7 @@ python main.py --target json-decoder --iterations 5000 --seed 42
 
 With the best configs:
 ```bash
-uv run main.py --configs-dir configs/best_configs
+uv run main.py --configs-dir ./best_configs/
 ```
 
 You can always see the authoritative list of options and defaults with:
