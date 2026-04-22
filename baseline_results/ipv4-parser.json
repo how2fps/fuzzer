@@ -1,0 +1,42 @@
+[
+  {
+    "exception": "ParseException",
+    "line": 1340,
+    "file": "pyparsing/core.py",
+    "bug_type": "invalidity",
+    "mutated_input": "1\u0092\u0092\u0092\u0092\u0092\u0092\u0092",
+    "status": "bug",
+    "iteration": 4,
+    "datetime_executed": 1774202484.69218
+  },
+  {
+    "exception": "InvalidityBug",
+    "line": 80,
+    "file": "buggy_ipyparse/ipv4_stv.py",
+    "bug_type": "invalidity",
+    "mutated_input": "fe80::1\n",
+    "status": "bug",
+    "iteration": 1,
+    "datetime_executed": 1774202479.5352495
+  },
+  {
+    "exception": "FunctionalBug",
+    "line": 134,
+    "file": "buggy_ipyparse/ipv4_stv.py",
+    "bug_type": "functional",
+    "mutated_input": "192.168.0.0/24\n",
+    "status": "bug",
+    "iteration": 0,
+    "datetime_executed": 1774202478.4909298
+  },
+  {
+    "exception": "ParseException",
+    "line": 1340,
+    "file": "pyparsing/core.py",
+    "bug_type": "validity",
+    "mutated_input": "255?554565555555@5Q555 555555?55456B55\u007f\u00ff55?55456555555555Q555 555555?55456555\u007f\u00ff\u00ff\u00ff\u00ff\u00ff55.21\u00ff\u00ff\u00ff\u00ff55.21\n",
+    "status": "bug",
+    "iteration": 2837,
+    "datetime_executed": 1774204531.7466714
+  }
+]

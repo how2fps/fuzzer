@@ -7,7 +7,9 @@ This module runs fuzzer inputs against a selected target and emits a normalized 
 The hard‑coded targets are defined in `parser.py` in the `TARGETS` mapping:
 
 - **cidrize-runner**: closed binary that calls `cidrize`; has open target `cidrize`.
-- **IPv4-IPv6-parser**: closed binary IPv4/IPv6 parser; has open target `ipyparse`.
+- **ipv4-parser**: closed binary IPv4 parser; has open target `ipyparse`.
+- **ipv6-parser**: closed binary IPv6 parser; has open target `ipyparse`.
+- **IPv4-IPv6-parser**: legacy combined target that auto-selects the IPv4/IPv6 binary; has open target `ipyparse`.
 - **cidrize**: open Python target (invoked via `uv run cidr`).
 - **ipyparse**: open Python library target (reads input from stdin).
 - **json-decoder**: buggy JSON decoder with coverage and bug categorization.
@@ -35,6 +37,8 @@ Arguments:
 - **target**: target name (key in `TARGETS`).
 - **timeout**: per‑run timeout in seconds (default `10.0`).
 - **print_json**: if `True`, pretty‑prints the result JSON to stdout.
+- **enable_open_coverage**: when `True`, collect branch coverage for supported open/oracle targets.
+- **enable_qemu_coverage**: when `True`, collect AFL-QEMU bitmap coverage for supported closed/binary targets using `afl-showmap -Q`.
 
 Exactly one of `input_data` or `input_path` must be provided; if neither is given, `run_parser` reads from stdin.
 
@@ -71,9 +75,16 @@ For any target, `run_parser` returns a dict of the form:
 - **semantic_output**: normalized semantic representation of the output (or `None`).
 - **coverage_bitmap**: list of integers for coverage (only populated for coverage‑enabled targets, e.g. `json_open`), else `None`.
 
-For closed targets with an open equivalent (`cidrize-runner`, `IPv4-IPv6-parser`), the result also includes:
+For closed targets with an open equivalent (`cidrize-runner`, `ipv4-parser`, `ipv6-parser`, and legacy `IPv4-IPv6-parser`), the result also includes:
 
 - **open_result**: another result dict in the same format, produced by running the open target against the same input.
+
+When QEMU coverage is enabled for a supported closed target, the closed result may also include:
+
+- **coverage_backend**: currently `afl-qemu-showmap`.
+- **covered_branches**: number of bitmap slots observed in the AFL-QEMU trace.
+- **missing_branches**: `None` because the total number of basic blocks / edges is not known a priori.
+- **branch_details_by_file**: pseudo-edge coverage under a synthetic file label such as `qemu_bitmap:cidrize-runner`.
 
 For the `json-decoder` target, an additional field is included:
 

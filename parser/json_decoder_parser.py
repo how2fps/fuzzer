@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,26 +33,48 @@ def _path_relative_to_root(path: str | None) -> str | None:
 from buggy_json.decoder_stv import InvalidityBug, JSONDecodeError, PerformanceBug
 
 
-def _parse_missing_branches_string(missing_branches: str) -> dict[int, list[int]]:
-    by_line: dict[int, list[int]] = {}
-    if not missing_branches:
-        return by_line
+def _load_branch_report(cov: coverage.Coverage) -> dict[str, Any] | None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
+        json_path = tmp.name
 
-    for from_to_line in missing_branches.split(","):
-        from_to_line = from_to_line.strip()
-        if not from_to_line:
+    try:
+        cov.json_report(outfile=json_path)
+        with open(json_path, encoding="utf-8") as f:
+            report = json.load(f)
+        if isinstance(report, dict):
+            return report
+    except NoSource:
+        # Coverage data can contain paths from another machine (e.g. after
+        # loading a .coverage file from elsewhere). When source files are
+        # not found, return None so the fuzzer can continue.
+        return None
+    finally:
+        try:
+            os.remove(json_path)
+        except OSError:
+            pass
+    return None
+
+
+def _coerce_branch_list(raw_pairs: object) -> list[dict[str, int]]:
+    branches: list[dict[str, int]] = []
+    if not isinstance(raw_pairs, Sequence):
+        return branches
+    for pair in raw_pairs:
+        if not isinstance(pair, Sequence) or len(pair) != 2:
             continue
-        if "-" in from_to_line:
-            from_line_str, to_line_str = from_to_line.split("-", 1)
-            from_line = int(from_line_str)
-            to_line = int(to_line_str)
-            by_line.setdefault(from_line, []).append(to_line)
-        else:
-            from_line = int(from_to_line)
-            by_line.setdefault(from_line, []).append(-1)
-    return by_line
+        try:
+            from_line = int(pair[0])
+            to_line = int(pair[1])
+        except (TypeError, ValueError):
+            continue
+        if from_line <= 0:
+            continue
+        branches.append({"from_line": from_line, "to_line": to_line})
+    return branches
 
-def _collect_branch_counts(cov: coverage.Coverage) -> dict[str, int]:
+
+def _collect_branch_counts(report: Mapping[str, Any] | None) -> dict[str, int]:
     """
     Collect aggregate branch coverage counts using coverage.py's JSON report.
 
@@ -61,36 +84,28 @@ def _collect_branch_counts(cov: coverage.Coverage) -> dict[str, int]:
             "missing_branches": int,
         }
     """
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
-        json_path = tmp.name
-
-    try:
-        cov.json_report(outfile=json_path)
-        with open(json_path, encoding="utf-8") as f:
-            report = json.load(f)
-
-        totals = report.get("totals", {})
-        num_branches = int(totals.get("num_branches", 0) or 0)
-        covered_branches = int(totals.get("covered_branches", 0) or 0)
-        missing_branches = max(num_branches - covered_branches, 0)
-
+    if report is None:
         return {
-            "covered_branches": covered_branches,
-            "missing_branches": missing_branches,
+            "covered_branches": 0,
+            "missing_branches": 0,
+            "total_branches": 0,
         }
-    except NoSource:
-        # Coverage data can contain paths from another machine (e.g. after
-        # loading a .coverage file from elsewhere). When source files are
-        # not found, return zeros so the fuzzer can continue.
-        return {"covered_branches": 0, "missing_branches": 0}
-    finally:
-        try:
-            os.remove(json_path)
-        except OSError:
-            pass
+
+    totals = report.get("totals")
+    if not isinstance(totals, Mapping):
+        totals = {}
+    num_branches = int(totals.get("num_branches", 0) or 0)
+    covered_branches = int(totals.get("covered_branches", 0) or 0)
+    missing_branches = max(num_branches - covered_branches, 0)
+
+    return {
+        "covered_branches": covered_branches,
+        "missing_branches": missing_branches,
+        "total_branches": num_branches,
+    }
 
 
-def _collect_branch_details_by_file(cov: coverage.Coverage) -> list[dict[str, Any]]:
+def _collect_branch_details_by_file(report: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     """
     Collect per-file branch details including:
     - total executable lines (statements)
@@ -98,46 +113,23 @@ def _collect_branch_details_by_file(cov: coverage.Coverage) -> list[dict[str, An
     - detailed missing branches (from_line -> to_line, -1 means exit)
     """
     out: list[dict[str, Any]] = []
-    data = cov.get_data()
+    if report is None:
+        return out
+    files = report.get("files")
+    if not isinstance(files, Mapping):
+        return out
 
-    for filename in sorted(data.measured_files()):
+    for filename, file_report in sorted(files.items()):
         if "buggy_json" not in filename:
             continue
-        try:
-            (
-                _,
-                statements,
-                _excluded,
-                _missing_lines,
-                missing_branches,
-            ) = cov.analysis2(filename)
-        except coverage.CoverageException:
+        if not isinstance(file_report, Mapping):
             continue
-
-        total_lines = len(statements)
-
-        missing_by_line = _parse_missing_branches_string(missing_branches or "")
-        missing_list: list[dict[str, int]] = []
-        for from_line, targets in sorted(missing_by_line.items()):
-            for to_line in sorted(targets):
-                missing_list.append(
-                    {
-                        "from_line": from_line,
-                        "to_line": to_line,
-                    }
-                )
-
-        covered_list: list[dict[str, int]] = []
-        arcs = data.arcs(filename) or []
-        for from_line, to_line in arcs:
-            if from_line <= 0:
-                continue
-            covered_list.append(
-                {
-                    "from_line": from_line,
-                    "to_line": to_line,
-                }
-            )
+        summary = file_report.get("summary")
+        if not isinstance(summary, Mapping):
+            summary = {}
+        total_lines = int(summary.get("num_statements", 0) or 0)
+        covered_list = _coerce_branch_list(file_report.get("executed_branches"))
+        missing_list = _coerce_branch_list(file_report.get("missing_branches"))
 
         out.append(
             {
@@ -145,6 +137,29 @@ def _collect_branch_details_by_file(cov: coverage.Coverage) -> list[dict[str, An
                 "total_lines": total_lines,
                 "covered_branches": covered_list,
                 "missing_branches": missing_list,
+            }
+        )
+
+    return out
+
+
+def _collect_executed_arcs_by_file(cov: coverage.Coverage) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    try:
+        measured_files = sorted(cov.get_data().measured_files())
+    except Exception:
+        return out
+
+    for filename in measured_files:
+        if "buggy_json" not in filename:
+            continue
+        arcs = _coerce_branch_list(cov.get_data().arcs(filename))
+        if not arcs:
+            continue
+        out.append(
+            {
+                "file": _path_relative_to_root(filename),
+                "executed_arcs": arcs,
             }
         )
 
@@ -239,6 +254,7 @@ def run_json_decoder_with_branches(
     *,
     json_string: str,
     coverage_file: str | None = None,  # ignored: coverage is kept in memory
+    log_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     Clone of json_decoder_stv main logic that:
@@ -246,9 +262,20 @@ def run_json_decoder_with_branches(
     - tracks bug counts and logs tracebacks
     - returns detailed information about uncovered branches
 
+    log_dir: Directory for tracebacks.log and bug_counts.csv. If None, uses
+    targets/json-decoder/logs. When fuzzing with multiple workers, pass a per-worker
+    scratch path (e.g. results/.../.worker_cwd/w0/logs) to avoid concurrent writes.
+
     This is intended to be callable from parser/parser.py so the
     returned data can be embedded directly into the overall result JSON.
     """
+    effective_log_dir = (
+        log_dir
+        if log_dir is not None
+        else str((BUGGY_JSON_DIR / "logs").resolve())
+    )
+    os.makedirs(effective_log_dir, exist_ok=True)
+
     bug_count: dict[tuple[Any, ...], int] = defaultdict(int)
 
     cov = coverage.Coverage(
@@ -286,7 +313,7 @@ def run_json_decoder_with_branches(
         bug_count[bug_id] += 1
     except (InvalidityBug, JSONDecodeError) as exc:
         bug_category = "invalidity"
-        _log_full_traceback(exc, bug_category)
+        _log_full_traceback(exc, bug_category, log_dir=effective_log_dir)
         bug_details = _track_exception(exc)
         bug_signature = {
             "type": bug_category,
@@ -305,7 +332,7 @@ def run_json_decoder_with_branches(
         bug_count[bug_id] += 1
     except Exception as exc:
         bug_category = "bonus"
-        _log_full_traceback(exc, bug_category)
+        _log_full_traceback(exc, bug_category, log_dir=effective_log_dir)
         bug_details = _track_exception(exc)
         bug_signature = {
             "type": bug_category,
@@ -325,14 +352,30 @@ def run_json_decoder_with_branches(
     finally:
         cov.stop()
 
-    branch_counts = _collect_branch_counts(cov)
-    branch_details_by_file = _collect_branch_details_by_file(cov)
+    branch_report = _load_branch_report(cov)
+    branch_counts = _collect_branch_counts(branch_report)
+    branch_details_by_file = _collect_branch_details_by_file(branch_report)
+    executed_arcs_by_file = _collect_executed_arcs_by_file(cov)
+
+    _bug_count_to_csv(
+        bug_count,
+        os.path.join(effective_log_dir, "bug_counts.csv"),
+    )
+
+    try:
+        json.dumps(decoded)
+        decoded_repr: Any = decoded
+    except TypeError:
+        decoded_repr = repr(decoded)
 
     return {
         "status": "ok" if bug_signature is None else "bug",
         "bug_signature": bug_signature,
+        "decoded": decoded_repr,
         "covered_branches": branch_counts["covered_branches"],
         "missing_branches": branch_counts["missing_branches"],
+        "total_branches": branch_counts["total_branches"],
         "branch_details_by_file": branch_details_by_file,
+        "executed_arcs_by_file": executed_arcs_by_file,
     }
 

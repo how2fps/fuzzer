@@ -10,9 +10,9 @@ from seed_corpus import Seed
 
 
 DEFAULT_PRELOAD_BUCKET_RATIOS: dict[str, float] = {
-    "valid": 0.7,
-    "string_stress": 0.2,
-    "near_valid": 0.1,
+    "valid": 0.5,
+    "string_stress": 0.25,
+    "near_valid": 0.25,
 }
 
 
@@ -21,16 +21,20 @@ def initial_scheduler_seeds(
     corpus: Any,
     target: str,
     preload_mode: str,
-    preload_total: int,
+    preload_total: int | None,
     rng: random.Random,
+    bucket_ratios: dict[str, float] | None = None,
 ) -> list[Seed]:
+    if preload_total is None or preload_total <= 0:
+        return []
+    ratios = bucket_ratios if bucket_ratios is not None else DEFAULT_PRELOAD_BUCKET_RATIOS
     if preload_mode == "full":
         return list(corpus.target(target).seeds)
     if preload_mode == "ratio_batch":
         return corpus.sample_ratio_batch(
             target,
             total=preload_total,
-            bucket_ratios=DEFAULT_PRELOAD_BUCKET_RATIOS,
+            bucket_ratios=ratios,
             rng=rng,
             shuffle=True,
         )
@@ -73,6 +77,9 @@ def generate_unique_mutations(
     max_attempts: int = 200,
 ) -> list[str]:
     """Generate up to n unique mutated inputs not already present in runs for this target."""
+    def _is_rejected_candidate(candidate: str) -> bool:
+        return "\x00" in candidate
+
     seen: set[str] = set()
     batch: list[str] = []
     for _ in range(n):
@@ -81,7 +88,14 @@ def generate_unique_mutations(
             mutator_kind=mutator_kind,
             rng=rng,
         )
-        for attempt in range(max_attempts):
+        for _attempt in range(max_attempts):
+            if _is_rejected_candidate(candidate):
+                candidate = mutate_fn(
+                    seed_text,
+                    mutator_kind=mutator_kind,
+                    rng=rng,
+                )
+                continue
             if candidate not in seen and not input_already_run(conn, candidate, target):
                 seen.add(candidate)
                 batch.append(candidate)
@@ -95,4 +109,3 @@ def generate_unique_mutations(
             seen.add(candidate)
             batch.append(candidate)
     return batch
-

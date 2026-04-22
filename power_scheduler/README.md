@@ -88,6 +88,20 @@ schedule = compute_power_schedule(
 )
 ```
 
+### Annealing version
+
+The `annealing` power scheduler assigns energy with a temperature-controlled
+softmax over feedback scores:
+
+- higher temperature: flatter, more exploratory energy allocation
+- lower temperature: sharper, more exploitative allocation
+
+Use it via:
+
+```bash
+python main.py --power-scheduler-version annealing
+```
+
 `seed_stats` is a `list[SeedStats]`. The function returns a `PowerScheduleResult`:
 
 - `seed_energies[seed_id]` is the number of fuzzing attempts you should allocate to that seed in the next cycle.
@@ -109,12 +123,13 @@ This draws a seed identifier at random, with probability proportional to its ass
 import random
 from typing import List
 
-from mutator import mutate_json_input
+from mutator.versions.lib import mutate_text_with_grammar, resolve_grammar_spec
 from parser import run_parser
 from power_scheduler import SeedStats, compute_power_schedule, pick_seed_id
 
 
 def fuzz_loop(seed_corpus: list[str], max_iterations: int) -> None:
+    grammar_spec = resolve_grammar_spec(kind="grammar")
     # Initialise simple per-seed stats.
     stats: List[SeedStats] = [
         {
@@ -134,7 +149,10 @@ def fuzz_loop(seed_corpus: list[str], max_iterations: int) -> None:
 
         entry = stats[seed_id]
         original = seed_corpus[seed_id]
-        mutated = mutate_json_input(original_text=original)
+        mutated = mutate_text_with_grammar(
+            original_text=original,
+            grammar_spec=grammar_spec,
+        )
         payload = mutated.encode("utf-8")
 
         result = run_parser(input_data=payload, target="json-decoder", timeout=5.0)
@@ -148,4 +166,3 @@ You can extend this skeleton by:
 
 - Tracking coverage bitmaps per seed (from your targets) and feeding them into `SeedStats["coverage_bitmap"]`.
 - Recording average execution times per seed in `exec_time_ms` and using that for future non-uniform schedulers.
-

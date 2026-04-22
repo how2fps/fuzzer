@@ -1,11 +1,14 @@
 """
-Base mutator: grammar-based JSON and IP mutation with auto-dispatch by kind.
+Base mutator: grammar-driven mutation using the active runtime grammar.
 """
 from __future__ import annotations
 
 import random
 
-from ..mutator import mutate_ip_input, mutate_json_input
+from .lib import mutate_text_with_grammar, resolve_grammar_spec
+
+
+_DEFAULT_MAX_DEPTH = 5
 
 
 def mutate(
@@ -14,7 +17,12 @@ def mutate(
     mutator_kind: str,
     rng: random.Random,
 ) -> str:
-    """Mutate seed text; mutator_kind is 'json', 'ip', or inferred from target."""
-    if mutator_kind == "ip":
-        return mutate_ip_input(original_text=text, rng=rng)
-    return mutate_json_input(original_text=text, rng=rng)
+    """Mutate seed text with the configured grammar for this target family."""
+    grammar_spec = resolve_grammar_spec(kind=mutator_kind)
+    return mutate_text_with_grammar(
+        original_text=text,
+        grammar_spec=grammar_spec,
+        kind=mutator_kind,
+        max_depth=_DEFAULT_MAX_DEPTH,
+        rng=rng,
+    )

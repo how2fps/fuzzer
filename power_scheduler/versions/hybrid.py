@@ -18,31 +18,22 @@ BREAKTHROUGH_LIMIT: int = 5
 _mode: str = "exploration"
 _consecutive_no_gain: int = 0
 _finds_in_fast_mode: int = 0
-_total_interesting: int = 0
+_total_arc_gains: int = 0
 
 
-def _count_interesting_seeds(seeds: Sequence[SeedStats]) -> int:
-    """Approximate 'new path' discoveries from DB stats."""
-    count = 0
-    for s in seeds:
-        bug_count = int(s.get("bug_count", 0))
-        if bug_count > 0:
-            count += 1
-            continue
-        avg_score = s.get("avg_isinteresting_score")
-        if avg_score is not None and avg_score > 0:
-            count += 1
-    return count
+def _total_discovered_arc_gains(seeds: Sequence[SeedStats]) -> int:
+    """Count cumulative edge/arc gains observed across all seeds."""
+    return sum(max(0, int(seed.get("arc_gain_count", 0) or 0)) for seed in seeds)
 
 
 def _update_mode(seeds: Sequence[SeedStats]) -> None:
     """Update global mode based on plateau / breakthrough heuristics."""
-    global _mode, _consecutive_no_gain, _finds_in_fast_mode, _total_interesting
+    global _mode, _consecutive_no_gain, _finds_in_fast_mode, _total_arc_gains
 
-    interesting_now = _count_interesting_seeds(seeds)
-    if interesting_now > _total_interesting:
-        gained = interesting_now - _total_interesting
-        _total_interesting = interesting_now
+    arc_gains_now = _total_discovered_arc_gains(seeds)
+    if arc_gains_now > _total_arc_gains:
+        gained = arc_gains_now - _total_arc_gains
+        _total_arc_gains = arc_gains_now
         _consecutive_no_gain = 0
         if _mode == "fast":
             _finds_in_fast_mode += gained
@@ -113,14 +104,20 @@ def _compute_fast_schedule(
     for s in seeds:
         fuzz_count = max(0, int(s.get("fuzz_count", 0)))
         bug_count = max(0, int(s.get("bug_count", 0)))
-        avg_score = s.get("avg_isinteresting_score")
+        avg_score = float(s.get("avg_isinteresting_score") or 0.0)
+        recent_arc_novelty_rate = min(
+            1.0, max(0.0, float(s.get("recent_arc_novelty_rate", 0.0) or 0.0))
+        )
+        same_arc_streak = max(0, int(s.get("same_arc_streak", 0)))
+        arc_gain_count = max(0, int(s.get("arc_gain_count", 0)))
 
         s_i = min(fuzz_count, 10)  # cap exponent to keep numbers reasonable
-        f_i = 1.0
-        if avg_score is not None and avg_score > 0:
-            f_i += float(avg_score)
+        f_i = 1.0 + avg_score + (2.0 * recent_arc_novelty_rate)
         if bug_count > 0:
             f_i += min(float(bug_count), 5.0)
+        if arc_gain_count > 0:
+            f_i += min(math.log1p(float(arc_gain_count)), 5.0)
+        f_i += math.log1p(float(same_arc_streak))
 
         energy_estimate = ALPHA_RHO * (math.pow(2.0, float(s_i)) / f_i)
         energy_estimate = min(energy_estimate, MAX_FAST_ENERGY)
@@ -169,6 +166,14 @@ def compute_power_schedule(
         min_energy=min_energy,
         max_energy=max_energy,
     )
+
+
+def _reset_state() -> None:
+    global _mode, _consecutive_no_gain, _finds_in_fast_mode, _total_arc_gains
+    _mode = "exploration"
+    _consecutive_no_gain = 0
+    _finds_in_fast_mode = 0
+    _total_arc_gains = 0
 
 
 __all__ = ["compute_power_schedule"]

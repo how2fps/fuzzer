@@ -62,6 +62,12 @@ Behavior:
 - `ipv6-parser` -> `ipv6`
 - `cidrize-runner` -> grouped target (`ipv4` + `ipv6`)
 
+## Seed corpus versions
+
+- `base`: normal manifest-backed seed corpus
+- `llm_bootstrap`: skip startup preload and let the runner bootstrap initial seeds from the LLM for the chosen target
+- `regex-noseed`: skip startup preload and let the runner bootstrap initial seeds from the grammar_ast generator (seedless mode)
+
 ## AFL loop integration (minimal)
 
 ```python
@@ -70,3 +76,34 @@ for seed in corpus.sample_ratio_batch("json-decoder", 40, {"valid": 0.5, "string
     # mutate -> run target -> collect signals -> compute isinteresting_score
     # log seed.seed_id, seed.bucket, isinteresting_score
 ```
+
+## Synthetic generation (same LLM path as bootstrap)
+
+If you want the corpus object to request additional seeds on demand, use:
+
+```python
+import sqlite3
+from pathlib import Path
+from seed_corpus import SeedCorpus
+
+corpus = SeedCorpus.load()
+conn = sqlite3.connect("runs.db")
+
+config = {
+    "llm_seed_candidates": 5,
+}
+
+generated = corpus.synthetic_generation(
+    "json-decoder",
+    needed=5,
+    conn=conn,
+    config=config,
+    results_folder=Path("results/demo"),
+)
+```
+
+Behavior:
+- uses the same LLM helper as bootstrap fallback
+- requests exactly `needed` candidates
+- returns generated `Seed` objects ready to add to a scheduler
+- does not mutate the corpus stored on disk

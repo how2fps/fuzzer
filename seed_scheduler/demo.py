@@ -48,11 +48,13 @@ def run_demo(kind: str) -> None:
             if kind == "heap"
             else {"ucb_c": 1.0, "max_seeds_per_leaf": 4}
             if kind == "ucb_tree"
+            else {"rng_seed": 42}
+            if kind == "thompson"
             else {}
         ),
     )
     for i, seed in enumerate(batch):
-        if kind == "ucb_tree":
+        if kind in {"ucb_tree", "thompson"}:
             scheduler.add(
                 seed,
                 metadata={
@@ -70,7 +72,7 @@ def run_demo(kind: str) -> None:
         item = scheduler.next()
         score = _fake_isinteresting_score(item.seed.bucket, rng)
         signals = _demo_signals(step, item)
-        if kind == "ucb_tree":
+        if kind in {"ucb_tree", "thompson"}:
             scheduler.update(
                 item,
                 isinteresting_score=score,
@@ -94,6 +96,7 @@ def main() -> None:
     run_demo("queue")
     run_demo("heap")
     run_demo("ucb_tree")
+    run_demo("thompson")
 
 
 if __name__ == "__main__":

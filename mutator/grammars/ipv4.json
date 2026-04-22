@@ -1,0 +1,26 @@
+{
+  "start": "<ipv4_input>",
+  "recursive_symbols": [],
+  "rules": {
+    "<ipv4_input>": [
+      "<ipv4>",
+      "<ipv4>/<prefix4>",
+      "<ipv4_glob>",
+      "<ipv4_last_octet_range>",
+      "<ipv4_full_range>",
+      "<ipv4_bracket_range>"
+    ],
+    "<ipv4>": ["<octet>.<octet>.<octet>.<octet>"],
+    "<ipv4_glob>": ["<octet>.<octet>.<octet>.*"],
+    "<ipv4_last_octet_range>": ["<octet>.<octet>.<octet>.<octet>-<octet>"],
+    "<ipv4_full_range>": ["<ipv4>-<ipv4>"],
+    "<ipv4_bracket_range>": [
+      "<octet>.<octet>.<octet>.[<digit>-<digit>]",
+      "<octet>.<octet>.<octet>.<digit>[<digit>-<digit>]",
+      "<octet>.<octet>.<octet>.[<digit><digit>]"
+    ],
+    "<octet>": ["0", "1", "10", "127", "192", "223", "254", "255"],
+    "<prefix4>": ["0", "8", "16", "24", "30", "32"],
+    "<digit>": ["0", "1", "2", "3", "4", "5", "8", "9"]
+  }
+}

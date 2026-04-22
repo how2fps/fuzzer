@@ -1,6 +1,6 @@
 # Seed Scheduler (Usage)
 
-Swappable scheduler backends for fuzz loop (`queue`, `heap`, `ucb_tree`).
+Swappable scheduler backends for fuzz loop (`queue`, `heap`, `ucb_tree`, `thompson`).
 
 ## Architecture (important)
 
@@ -30,7 +30,9 @@ scheduler = make_scheduler("queue")  # FIFO baseline
 # or
 scheduler = make_scheduler("heap", priority_mode="avg_score")
 # or
-scheduler = make_scheduler("ucb_tree", ucb_c=1.0, max_seeds_per_leaf=8)
+scheduler = make_scheduler("ucb_tree", ucb_c=1.0, max_seeds_per_leaf=16)
+# or
+scheduler = make_scheduler("thompson", rng_seed=42)
 ```
 
 ## Add a seed from seed corpus
@@ -63,9 +65,10 @@ while not scheduler.empty():
     # add newly interesting mutated children back with scheduler.add(...)
 ```
 
-For `ucb_tree`, one `next()` call is one bandit pull and one mutation attempt.
-After that single mutation finishes, call `update(...)` immediately with that mutation result.
-Then the owner does:
+For feedback-driven schedulers like `ucb_tree` and `thompson`, one `next()`
+call is one bandit pull and one mutation attempt. After that single mutation
+finishes, call `update(...)` immediately with that mutation result. Then the
+owner does:
 
 ```python
 item = scheduler.next()
@@ -84,6 +87,9 @@ if score > 0:
 - `queue`: FIFO one-shot baseline
 - `heap`: priority-based ordering at insertion time
 - `ucb_tree`: tree buckets (`coverage -> bug/output -> seeds`) selected with UCB1 and updated once per mutation result
+- `thompson`: Thompson Sampling over execution features; uses coverage edges
+  when available and falls back to differential/bug/status features for
+  black-box targets
 
 `heap` `priority_mode` options:
 
@@ -97,6 +103,13 @@ if score > 0:
 - `isinteresting_score` is accepted but UCB updates use signal-derived reward
 - for bucket placement on `add(...)`, pass hints via `metadata={"signals": ...}`
 
+`thompson` notes:
+
+- keeps Beta(`alpha`, `beta`) posteriors per execution feature
+- success is a novel result (`new_coverage`, `new_bug`, or `new_differential_behavior`)
+- coverage targets use covered edges as features
+- black-box / oracle targets fall back to differential behavior tuples, bug signatures, and status classes
+
 ## Helpful methods
 
 - `scheduler.add(seed)`
@@ -105,6 +118,7 @@ if score > 0:
 - `scheduler.stats()`
 - `scheduler.debug_dump(limit=20)` (inspect current scheduler contents)
 - `ucb_tree.update(item, isinteresting_score=..., signals=...)`
+- `thompson.update(item, isinteresting_score=..., signals=...)`
 
 ## Inspect current scheduler contents (debug)
 

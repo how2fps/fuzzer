@@ -1,0 +1,21 @@
+{
+  "start": "json",
+  "recursive_symbols": [
+    "object",
+    "array",
+    "members",
+    "elements",
+    "value"
+  ],
+  "rules": {
+    "json": "<value>",
+    "value": "<object> | <array> | <string> | <number> | \"true\" | \"false\" | \"null\"",
+    "object": "\"{}\" | \"{\" <members> \"}\"",
+    "members": "<pair> | <pair> \",\" <members>",
+    "pair": "<string> \":\" <value>",
+    "array": "\"[]\" | \"[\" <elements> \"]\"",
+    "elements": "<value> | <value> \",\" <elements>",
+    "string": "\"\\\"a\\\"\" | \"\\\"b\\\"\" | \"\\\"json\\\"\" | \"\\\"\\\\u0030\\\"\" | \"\\\"x y\\\"\" | \"\\\"long_key_123\\\"\"",
+    "number": "\"0\" | \"-1\" | \"1\" | \"42\" | \"3.14\" | \"-0.001\" | \"1e10\" | \"-2E-2\""
+  }
+}

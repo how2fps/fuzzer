@@ -23,6 +23,7 @@ def run_parser(
     target: str,
     timeout: float = DEFAULT_TIMEOUT,
     print_json: bool = False,
+    seed_family: str | None = None,
 ) -> dict[str, Any]:
     """
     Run fuzzer input against the selected target. Return dict with at least:
@@ -35,4 +36,5 @@ def run_parser(
     _ = target
     _ = timeout
     _ = print_json
+    _ = seed_family
     return {"closed_result": {"status": "ok", "bug_signature": None}}

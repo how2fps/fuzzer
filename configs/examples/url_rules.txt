@@ -1,0 +1,17 @@
+# URL grammar demo for the generalized grammar_ast mutator.
+# Core format rules:
+scheme ::= "http" | "https"
+label ::= (<letter>|<digit>|"-"){1,8}
+host ::= <label> "." <label>
+segment ::= (<letter>|<digit>|"-"|"_"){1,10}
+path ::= "/" <segment> ("/" <segment>){0,3}
+query ::= "" | "?id=" <digit>{1,4}
+url ::= <scheme> "://" <host> <path> <query>
+url_start ::= <url>
+
+# Second demo format: email addresses.
+mail_atom ::= (<letter>|<digit>|"."|"_"|"-"){1,12}
+mail_label ::= (<letter>|<digit>|"-"){1,10}
+mail_domain ::= <mail_label> "." <mail_label>
+email ::= <mail_atom> "@" <mail_domain>
+email_start ::= <email>

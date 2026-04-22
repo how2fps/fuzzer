@@ -1,33 +1,306 @@
 from __future__ import annotations
 
+import json
 import random
+import shutil
 import signal
-import sqlite3
-from datetime import datetime, timezone
+import datetime as dt
+import traceback
+import faulthandler
+from pathlib import Path
 from typing import Any
 
 from core.config import FuzzConfig, infer_mutator_kind
-from core.db_utils import init_results_db, warmup_power_schedule
-from isinteresting import get_compute_interestingness
+from core.db_utils import get_run_summary, init_results_db, warmup_power_schedule
+from core.fuzzer_logging import configure_fuzzer_logging, get_fuzzer_logger
+from core.live_ui import console, render_run_summary_panel
+from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
+from core.paths import DISCOVERED_SEED_ORDINAL_BASE
+from core.sqlite_conn import open_results_db
 from core.mutation_utils import initial_scheduler_seeds
-from mutator import get_mutator
-from parser import get_parser
-from core.paths import RESULTS_DIR
+from mutator import get_feedback_handler, get_mutator
 from power_scheduler import get_power_scheduler
 from core.results_export import export_results
-from seed_corpus import get_corpus_loader
-from seed_scheduler import UCBTreeScheduler, make_scheduler
+from core.seed_refill import generate_grammar_refill_seeds
+from seed_corpus import Seed, get_version_spec
+from seed_scheduler import ScheduledSeed, UCBTreeScheduler, make_scheduler
 from core.workers import run_fuzzer_multi_worker
+from core.target_artifacts import clear_bug_counts_csv
+from mutator import configure_runtime_grammar
+from mutator.versions import grammar_ast
+from mutator.versions.lib import resolve_ast_grammar_spec
 
 
-def run_fuzzer(config: FuzzConfig) -> None:
-    corpus_loader = get_corpus_loader(config["seed_corpus_version"])
+_GRAMMARS_DIR = Path(__file__).resolve().parent.parent / "mutator" / "grammars"
+_TARGET_DEFAULT_GRAMMARS: dict[str, tuple[str, str]] = {
+    "cidrize": ("ip.json", "ip.ast.json"),
+    "cidrize-runner": ("ip.json", "ip.ast.json"),
+    "ipyparse": ("ip.json", "ip.ast.json"),
+    "IPv4-IPv6-parser": ("ip.json", "ip.ast.json"),
+    "ipv4-parser": ("ipv4.json", "ipv4.ast.json"),
+    "ipv6-parser": ("ipv6.json", "ipv6.ast.json"),
+    "json-decoder": ("json.json", "json.ast.json"),
+    "json_open": ("json.json", "json.ast.json"),
+}
+
+
+def _write_crash_log(*, results_folder: Path, target: str, exc: BaseException) -> None:
+    results_folder.mkdir(parents=True, exist_ok=True)
+    crash_path = results_folder / "crash.log"
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    message = (
+        "================================================================================\n"
+        f"Timestamp : {timestamp}\n"
+        f"Target    : {target}\n"
+        f"Exception : {type(exc).__name__}: {exc}\n"
+        "Traceback:\n"
+        f"{traceback.format_exc()}\n"
+    )
+    with crash_path.open("a", encoding="utf-8") as handle:
+        handle.write(message)
+
+
+def _default_target_grammar_paths(
+    *,
+    target: str,
+    grammar_path: str | Path | None,
+    ast_grammar_path: str | Path | None,
+) -> tuple[str | Path | None, str | Path | None]:
+    """
+    Resolve built-in target-specific grammar defaults only when no explicit
+    grammar override was provided.
+    """
+    if grammar_path is not None or ast_grammar_path is not None:
+        return grammar_path, ast_grammar_path
+
+    default_files = _TARGET_DEFAULT_GRAMMARS.get(target)
+    if default_files is None:
+        return grammar_path, ast_grammar_path
+
+    grammar_name, ast_name = default_files
+    return (_GRAMMARS_DIR / grammar_name, _GRAMMARS_DIR / ast_name)
+
+
+def _preferred_startup_generation_plans(
+    *,
+    effective_mutator: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    ast_grammar_spec = resolve_ast_grammar_spec(kind=effective_mutator)
+    start_rule = str(ast_grammar_spec.get("start") or "")
+    if effective_mutator == "ip" and start_rule == "ip":
+        return (
+            (
+                start_rule,
+                (
+                    "production:ip:0",
+                    "production:ipv4_input:1",
+                    "production:octet:0",
+                    "production:prefix4:0",
+                ),
+            ),
+        )
+    if effective_mutator == "ipv4" and start_rule == "ipv4_input":
+        return (
+            (
+                start_rule,
+                (
+                    "production:ipv4_input:1",
+                    "production:octet:0",
+                    "production:prefix4:0",
+                ),
+            ),
+        )
+    if effective_mutator == "ipv6" and start_rule == "ipv6_input":
+        return (
+            (
+                start_rule,
+                (
+                    "production:ipv6_input:1",
+                    "production:h:0",
+                    "production:prefix6:0",
+                ),
+            ),
+        )
+    return ()
+
+
+def _generate_startup_grammar_seeds(
+    *,
+    effective_mutator: str,
+    rng: random.Random,
+    count: int | None,
+) -> list[str]:
+    """Generate startup seeds that try to cover as much AST grammar space as possible."""
+    if count is not None and count <= 0:
+        return []
+
+    log = get_fuzzer_logger()
+    debug_label = f"startup grammar bootstrap [{effective_mutator}]"
+    available_items = grammar_ast.available_coverage_items(mutator_kind=effective_mutator)
+    available_set = set(available_items)
+    target_coverage = len(available_set)
+    min_requested = max(0, int(count or 0))
+    if count is None and target_coverage <= 0:
+        return []
+
+    max_seeds_cap = (
+        max(64, target_coverage * 2)
+        if count is None
+        else max(1, int(count))
+    )
+    progress_interval = max(1, max_seeds_cap // 8)
+    generated: list[str] = []
+
+    covered_items: set[str] = set()
+
+    def _record_coverage(text: str) -> None:
+        if not text:
+            return
+        covered_items.update(
+            grammar_ast.coverage_items_for_text(
+                text=text,
+                mutator_kind=effective_mutator,
+            )
+            & available_set
+        )
+
+    def _is_covered() -> bool:
+        if not available_set:
+            return True
+        return len(covered_items) >= len(available_set)
+
+    for start_rule, preferred_coverage_items in _preferred_startup_generation_plans(
+        effective_mutator=effective_mutator
+    ):
+        if len(generated) >= max_seeds_cap:
+            break
+        if count is None and _is_covered():
+            break
+        preferred_candidates = grammar_ast.generate_from_rule(
+            start_rule=start_rule,
+            rng=rng,
+            count=1,
+            min_mutation_rounds=0,
+            max_mutation_rounds=0,
+            preferred_coverage_items=list(preferred_coverage_items),
+            mutator_kind=effective_mutator,
+        )
+        if not preferred_candidates:
+            log.warning(
+                "%s: preferred coverage generation for rule %s hit its retry limit.",
+                debug_label,
+                start_rule,
+            )
+            continue
+        candidate = preferred_candidates[0]
+        if candidate in generated:
+            continue
+        generated.append(candidate)
+        _record_coverage(candidate)
+        log.info(
+            "%s: generated %s/%s grammar seeds after preferred coverage targeting.",
+            debug_label,
+            len(generated),
+            max_seeds_cap if count is None else count,
+        )
+
+    if count is not None:
+        remaining = count - len(generated)
+        if remaining <= 0:
+            return generated
+    else:
+        remaining = max(0, max_seeds_cap - len(generated))
+
+    refill = generate_grammar_refill_seeds(
+        history_texts=tuple(generated),
+        ready_texts=(),
+        mutator_kind=effective_mutator,
+        rng=rng,
+        count=remaining,
+        debug_label=debug_label,
+    )
+    for candidate in refill.seeds:
+        if candidate in generated:
+            continue
+        generated.append(candidate)
+        _record_coverage(candidate)
+        if len(generated) >= max_seeds_cap:
+            break
+        if count is None and _is_covered():
+            break
+    if refill.seeds:
+        log.info(
+            "%s: coverage-guided refill produced %s new seeds (%s uncovered grammar items before refill).",
+            debug_label,
+            len(refill.seeds),
+            len(refill.uncovered_coverage_items),
+        )
+    if count is not None and len(generated) >= count:
+        return generated
+    if count is None and _is_covered():
+        return generated
+
+    start_index = 0
+    while len(generated) < max_seeds_cap:
+        if count is None and _is_covered():
+            break
+        preferred_item = (
+            [available_items[start_index % len(available_items)]]
+            if available_items
+            else None
+        )
+        fallback = grammar_ast.generate_without_seed(
+            mutator_kind=effective_mutator,
+            rng=rng,
+            count=1,
+            preferred_coverage_items=preferred_item,
+        )
+        if not fallback:
+            log.warning(
+                "%s: seedless fallback hit its retry limit after generating %s/%s grammar seeds.",
+                debug_label,
+                len(generated),
+                count,
+            )
+            break
+        candidate = fallback[0]
+        if candidate in generated:
+            start_index += 1
+            continue
+        generated.append(candidate)
+        _record_coverage(candidate)
+        if (
+            (count is not None and len(generated) == count)
+            or (count is None and _is_covered())
+            or len(generated) % progress_interval == 0
+        ):
+            log.info(
+                "%s: generated %s/%s grammar seeds after seedless fallback.",
+                debug_label,
+                len(generated),
+                max_seeds_cap if count is None else count,
+            )
+        start_index += 1
+    return generated
+
+
+def run_fuzzer(
+    config: FuzzConfig,
+    *,
+    results_folder: Path,
+    config_path: Path | None = None,
+) -> None:
+    configure_fuzzer_logging()
+    log = get_fuzzer_logger()
+    corpus_version = get_version_spec(config["seed_corpus_version"])
+    use_llm_bootstrap = corpus_version.startup_mode == "llm_bootstrap"
+    use_regex_noseed = corpus_version.startup_mode == "grammar_bootstrap"
+    corpus_loader = corpus_version.loader
     corpus = corpus_loader.load()
+    grammar_ast.configure(grammar_rules_file=config["grammar_rules_file"])
 
-    parser_api = get_parser(config["parser_version"])
     mutate_fn = get_mutator(config["mutator_version"])
-    compute_interestingness_fn = get_compute_interestingness(
-        config["isinteresting_version"])
+    mutator_feedback_fn = get_feedback_handler(config["mutator_version"])
     power_scheduler_module = get_power_scheduler(
         config["power_scheduler_version"])
 
@@ -35,18 +308,65 @@ def run_fuzzer(config: FuzzConfig) -> None:
     effective_mutator = infer_mutator_kind(
         mutator_kind=config["mutator_kind"],
         target=effective_target,
+        grammar_path=config["grammar_path"],
+    )
+    grammar_path, ast_grammar_path = _default_target_grammar_paths(
+        target=effective_target,
+        grammar_path=config["grammar_path"],
+        ast_grammar_path=config["ast_grammar_path"],
+    )
+    configure_runtime_grammar(
+        kind=effective_mutator,
+        grammar_path=grammar_path,
+        ast_grammar_path=ast_grammar_path,
     )
 
     rng = random.Random(
         config["rng_seed"]) if config["rng_seed"] is not None else random.Random()
 
-    scheduler = make_scheduler(config["scheduler_kind"])
-    initial_seeds = initial_scheduler_seeds(
-        corpus=corpus,
-        target=effective_target,
-        preload_mode=config["seed_preload_mode"],
-        preload_total=config["seed_preload_total"],
-        rng=rng,
+    scheduler_kwargs: dict[str, Any] = {}
+    if config["scheduler_kind"] == "heap":
+        startup_min_batches = int(config["heap_startup_min_batches_per_seed"])
+        if config["seed_preload_mode"] == "full":
+            startup_min_batches = 0
+        scheduler_kwargs["startup_min_batches_per_seed"] = startup_min_batches
+    scheduler = make_scheduler(config["scheduler_kind"], **scheduler_kwargs)
+    startup_seed_items: list[ScheduledSeed] = []
+    startup_seed_item_seq = 0
+
+    def _queue_startup_seed(
+        seed: Seed,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        nonlocal startup_seed_item_seq
+        startup_seed_item_seq += 1
+        startup_metadata = dict(metadata or {})
+        startup_metadata["startup_warm_pending_insert"] = True
+        startup_seed_items.append(
+            ScheduledSeed(
+                item_id=f"startup-{startup_seed_item_seq:06d}",
+                seed=seed,
+                metadata=startup_metadata,
+            )
+        )
+
+    initial_seeds = (
+        []
+        if use_llm_bootstrap or use_regex_noseed
+        else initial_scheduler_seeds(
+            corpus=corpus,
+            target=effective_target,
+            preload_mode=config["seed_preload_mode"],
+            preload_total=config["seed_preload_total"],
+            rng=rng,
+            bucket_ratios=config["seed_preload_bucket_ratios"],
+        )
+    )
+    startup_preloaded = bool(
+        config["scheduler_kind"] == "heap"
+        and config["seed_preload_mode"] in {"ratio_batch", "sample"}
+        and int(config["heap_startup_min_batches_per_seed"]) > 0
     )
     for seed in initial_seeds:
         metadata: dict[str, Any] = {
@@ -56,59 +376,303 @@ def run_fuzzer(config: FuzzConfig) -> None:
                 "status": "ok",
             },
         }
+        if startup_preloaded:
+            metadata["startup_preloaded"] = True
         if config["ucb_trace"] and isinstance(scheduler, UCBTreeScheduler):
             metadata["_ucb_trace"] = True
-        scheduler.add(seed, metadata=metadata)
+        _queue_startup_seed(seed, metadata=metadata)
 
-    if not scheduler or scheduler.empty():
-        return
+    def _make_regex_seed(*, text: str, family: str, ordinal: int) -> Seed:
+        seed_id = f"regex-{family}-{ordinal}"
+        return Seed(
+            seed_id=seed_id,
+            family=family,
+            bucket="generated",
+            label=seed_id,
+            text=text,
+            tags=("regex_generated",),
+            expected="",
+            ordinal=ordinal,
+            fingerprint=seed_id,
+        )
 
-    timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    results_folder = RESULTS_DIR / f"{effective_target}_{timestamp_str}"
     results_folder.mkdir(parents=True, exist_ok=True)
+    # Clear canonical target logs + per-worker scratch so bug_counts doesn't leak across runs.
+    clear_bug_counts_csv(
+        target=effective_target,
+        results_folder=results_folder,
+        parser_config=config.get("parser_config"),  # type: ignore[arg-type]
+    )
+
+    config_dest = results_folder / "config.json"
+    if config_path is not None:
+        shutil.copy2(config_path, config_dest)
+    else:
+        with open(config_dest, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
     db_path = results_folder / "runs.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = open_results_db(db_path)
     init_results_db(conn)
+    stackdump_handle = None
+    stackdump_enabled = False
+    try:
+        stackdump_path = results_folder / "stackdump.log"
+        stackdump_handle = stackdump_path.open("a", encoding="utf-8")
+        stackdump_handle.write(
+            "================================================================================\n"
+            f"Stack dump handler registered at {dt.datetime.now(dt.timezone.utc).isoformat()}\n"
+        )
+        stackdump_handle.flush()
+        faulthandler.register(
+            signal.SIGUSR1,
+            file=stackdump_handle,
+            all_threads=True,
+            chain=False,
+        )
+        stackdump_enabled = True
+        log.info("SIGUSR1 stack dump enabled: %s", stackdump_path)
+    except Exception as exc:
+        log.warning("Could not enable SIGUSR1 stack dump: %s", exc)
+    startup_llm_seeds: list[str] = []
+    startup_regex_seeds: list[str] = []
+
+    if not startup_seed_items and scheduler.empty() and use_regex_noseed:
+        family = corpus.resolve_family_or_target(effective_target)
+        with console.status(
+            f"Generating grammar seeds for {effective_target} until grammar tree is covered...",
+            spinner="dots",
+        ):
+            generated = _generate_startup_grammar_seeds(
+                effective_mutator=effective_mutator,
+                rng=rng,
+                count=config["seed_preload_total"],
+            )
+        startup_regex_seeds = list(generated)
+        next_ordinal = DISCOVERED_SEED_ORDINAL_BASE
+        for text in generated:
+            candidate = _make_regex_seed(
+                text=text,
+                family=family,
+                ordinal=next_ordinal,
+            )
+            _queue_startup_seed(
+                candidate,
+                metadata={
+                    "bucket": candidate.bucket,
+                    "startup_generated_run_unmutated_first": bool(
+                        config.get("run_startup_generated_unmutated_first")
+                    ),
+                    "signals": {
+                        "coverage_key": {
+                            "family": candidate.family,
+                            "bucket": candidate.bucket,
+                        },
+                        "status": "generated",
+                    },
+                },
+            )
+            next_ordinal += 1
+        if generated:
+            log.info(
+                "Bootstrapped scheduler with %s grammar-generated seeds.",
+                len(generated),
+            )
+
+    if not startup_seed_items and scheduler.empty() and use_llm_bootstrap:
+        family = corpus.resolve_family_or_target(effective_target)
+        llm_bootstrap_config = dict(config)
+        requested = int(llm_bootstrap_config["llm_seed_candidates"])
+        if requested > 0:
+            with console.status(
+                f"Generating {requested} LLM seeds for {effective_target}...",
+                spinner="dots",
+            ):
+                llm_generated = maybe_generate_seed_candidates(
+                    conn=conn,
+                    corpus=corpus,
+                    target=effective_target,
+                    config=llm_bootstrap_config,  # type: ignore[arg-type]
+                    results_folder=results_folder,
+                    include_corpus_context=not use_llm_bootstrap,
+                )
+        else:
+            llm_generated = None
+        if llm_generated is not None and llm_generated.seeds:
+            startup_llm_seeds = list(llm_generated.seeds)
+            next_ordinal = DISCOVERED_SEED_ORDINAL_BASE
+            for text in llm_generated.seeds:
+                candidate = make_generated_seed(
+                    text=text,
+                    family=family,
+                    ordinal=next_ordinal,
+                )
+                _queue_startup_seed(
+                    candidate,
+                    metadata={
+                        "bucket": candidate.bucket,
+                        "startup_generated_run_unmutated_first": bool(
+                            config.get("run_startup_generated_unmutated_first")
+                        ),
+                        "signals": {
+                            "coverage_key": {
+                                "family": candidate.family,
+                                "bucket": candidate.bucket,
+                            },
+                            "status": "generated",
+                        },
+                    },
+                )
+                next_ordinal += 1
+            log.info(
+                "Bootstrapped scheduler with %s LLM-generated seeds.",
+                len(llm_generated.seeds),
+            )
+
+    if (not scheduler or scheduler.empty()) and not startup_seed_items:
+        log.warning(
+            "No schedulable seeds available after preload%s.",
+            (
+                " and startup seed bootstrap"
+                if use_llm_bootstrap or use_regex_noseed
+                else ""
+            ),
+        )
+        return
 
     seed_energies = warmup_power_schedule(
         corpus=corpus,
         target=effective_target,
         power_scheduler_module=power_scheduler_module,
         conn=conn,
+        scheduler_seeds=[item.seed for item in scheduler.ready_items()],
     )
 
     shutdown_requested: list[bool] = [False]
+    shutdown_notice: list[str | None] = [None]
 
     def _sigint_handler(_signum: int, _frame: object) -> None:
         shutdown_requested[0] = True
-        print("\nCtrl+C: shutting down gracefully (workers will finish current run and exit)...", flush=True)
+        # Signal handlers must avoid logging/tqdm writes because they may interrupt
+        # code that already holds tqdm's global output lock.
+        shutdown_notice[0] = (
+            "\nCtrl+C: shutting down gracefully (workers will finish current run and exit)..."
+        )
 
+    def _sigterm_handler(_signum: int, _frame: object) -> None:
+        shutdown_requested[0] = True
+        shutdown_notice[0] = (
+            "\nSIGTERM: shutting down gracefully (workers will finish current run and exit)..."
+        )
+
+    original_sigint = None
+    original_sigterm = None
+    final_summary_printed = False
     try:
-        signal.signal(signal.SIGINT, _sigint_handler)
-    except (ValueError, OSError):
-        pass
+        try:
+            original_sigint = signal.getsignal(signal.SIGINT)
+        except (ValueError, OSError):
+            original_sigint = None
+        try:
+            original_sigterm = signal.getsignal(signal.SIGTERM)
+        except (ValueError, OSError):
+            original_sigterm = None
+        try:
+            signal.signal(signal.SIGINT, _sigint_handler)
+        except (ValueError, OSError):
+            # Some environments (e.g. non-main threads, child processes) do not
+            # allow installing signal handlers; in that case we just skip the
+            # graceful shutdown behaviour and fall back to defaults.
+            pass
+        try:
+            signal.signal(signal.SIGTERM, _sigterm_handler)
+        except (ValueError, OSError):
+            # Some environments do not allow installing signal handlers.
+            pass
 
-    workers = max(1, config["workers"])
-    run_fuzzer_multi_worker(
-        config=config,
-        scheduler=scheduler,
-        seed_energies=seed_energies,
-        corpus=corpus,
-        power_scheduler_module=power_scheduler_module,
-        effective_target=effective_target,
-        effective_mutator=effective_mutator,
-        results_folder=results_folder,
-        db_path=db_path,
-        conn=conn,
-        workers=workers,
-        shutdown_requested=shutdown_requested,
-        mutate_fn=mutate_fn,
-        rng=rng,
-    )
-    conn.close()
-    export_results(
-        results_folder=results_folder,
-        db_path=db_path,
-        target=effective_target,
-    )
-
+        workers = max(1, config["workers"])
+        try:
+            run_fuzzer_multi_worker(
+                config=config,
+                scheduler=scheduler,
+                seed_energies=seed_energies,
+                corpus=corpus,
+                power_scheduler_module=power_scheduler_module,
+                effective_target=effective_target,
+                effective_mutator=effective_mutator,
+                results_folder=results_folder,
+                db_path=db_path,
+                conn=conn,
+                workers=workers,
+                shutdown_requested=shutdown_requested,
+                mutate_fn=mutate_fn,
+                rng=rng,
+                startup_seed_items=startup_seed_items,
+                startup_generated_seeds=startup_llm_seeds or startup_regex_seeds,
+                startup_generated_source=(
+                    "startup LLM bootstrap"
+                    if startup_llm_seeds
+                    else "startup grammar bootstrap"
+                    if startup_regex_seeds
+                    else ""
+                ),
+                mutator_feedback_fn=mutator_feedback_fn,
+            )
+        except Exception as exc:
+            _write_crash_log(
+                results_folder=results_folder,
+                target=effective_target,
+                exc=exc,
+            )
+            get_fuzzer_logger().exception("Fuzzer crashed unexpectedly.")
+            raise
+        if shutdown_notice[0]:
+            get_fuzzer_logger().info("%s", shutdown_notice[0])
+        console.print(
+            render_run_summary_panel(
+                target=effective_target,
+                results_folder=str(results_folder),
+                summary=get_run_summary(conn, target=effective_target),
+            )
+        )
+        final_summary_printed = True
+    finally:
+        try:
+            if not final_summary_printed:
+                console.print(
+                    render_run_summary_panel(
+                        target=effective_target,
+                        results_folder=str(results_folder),
+                        summary=get_run_summary(conn, target=effective_target),
+                    )
+                )
+            conn.close()
+        finally:
+            export_results(
+                results_folder=results_folder,
+                db_path=db_path,
+                target=effective_target,
+                parser_config=config.get("parser_config"),  # type: ignore[arg-type]
+            )
+            if stackdump_enabled:
+                try:
+                    faulthandler.unregister(signal.SIGUSR1)
+                except (ValueError, OSError):
+                    pass
+            if stackdump_handle is not None:
+                try:
+                    stackdump_handle.close()
+                except OSError:
+                    pass
+            if original_sigint is not None:
+                try:
+                    signal.signal(signal.SIGINT, original_sigint)
+                except (ValueError, OSError):
+                    # If we cannot restore the original handler, ignore; this is
+                    # best-effort and should not mask earlier exceptions.
+                    pass
+            if original_sigterm is not None:
+                try:
+                    signal.signal(signal.SIGTERM, original_sigterm)
+                except (ValueError, OSError):
+                    pass

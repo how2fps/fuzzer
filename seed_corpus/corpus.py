@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ DEFAULT_TARGET_ALIASES: dict[str, str] = {
 # Runtime target that can consume both IPv4 and IPv6 seeds.
 DEFAULT_TARGET_GROUPS: dict[str, tuple[str, ...]] = {
     "cidrize-runner": ("ipv4", "ipv6"),
+    "IPv4-IPv6-parser": ("ipv4", "ipv6"),
 }
 
 
@@ -133,6 +135,36 @@ class TargetSeedSet:
         return self.__repr__()
 
 
+class GroupedTargetSeedSet(TargetSeedSet):
+    """
+    TargetSeedSet variant where `.seeds` ordering is explicitly defined.
+
+    This is used for grouped runtime targets (e.g. pooling ipv4 + ipv6) where we
+    want deterministic round-robin ordering for `seed_preload_mode="full"`.
+    """
+
+    def __init__(
+        self,
+        *,
+        family: str,
+        dataset_id: str,
+        buckets: dict[str, SeedBucket],
+        metadata: dict[str, Any],
+        ordered_seeds: tuple[Seed, ...],
+    ) -> None:
+        super().__init__(
+            family=family,
+            dataset_id=dataset_id,
+            buckets=buckets,
+            metadata=metadata,
+        )
+        self._ordered_seeds = ordered_seeds
+
+    @property
+    def seeds(self) -> tuple[Seed, ...]:
+        return self._ordered_seeds
+
+
 class SeedCorpus:
     def __init__(
         self,
@@ -145,7 +177,9 @@ class SeedCorpus:
         self._aliases = {**DEFAULT_TARGET_ALIASES, **(aliases or {})}
         self._target_groups = {
             **DEFAULT_TARGET_GROUPS, **(target_groups or {})}
+        self._group_targets: dict[str, TargetSeedSet] = {}
         self.manifest_path = manifest_path
+        self._build_group_targets()
 
     @classmethod
     def load(
@@ -178,6 +212,10 @@ class SeedCorpus:
 
     def resolve_family(self, target_or_family: str) -> str:
         family = self._aliases.get(target_or_family, target_or_family)
+        if family in self._targets:
+            return family
+        if family in self._target_groups:
+            return family
         if family not in self._targets:
             known = ", ".join(sorted(self._targets))
             raise KeyError(
@@ -185,8 +223,23 @@ class SeedCorpus:
             )
         return family
 
+    def resolve_family_or_target(self, target_or_family: str) -> str:
+        family = self._aliases.get(target_or_family, target_or_family)
+        if family in self._targets or family in self._target_groups:
+            return family
+        return target_or_family
+
+    def maybe_target(self, target_or_family: str) -> TargetSeedSet | None:
+        try:
+            return self.target(target_or_family)
+        except KeyError:
+            return None
+
     def target(self, target_or_family: str) -> TargetSeedSet:
-        return self._targets[self.resolve_family(target_or_family)]
+        resolved = self.resolve_family(target_or_family)
+        if resolved in self._group_targets:
+            return self._group_targets[resolved]
+        return self._targets[resolved]
 
     def sample(
         self,
@@ -255,6 +308,11 @@ class SeedCorpus:
         shuffle: bool,
     ) -> list[Seed]:
         families = self._target_groups[target_name]
+        _, normalized_by_key = _build_group_seed_identity_map(
+            target_name=target_name,
+            families=families,
+            targets=self._targets,
+        )
         family_totals = _split_total_evenly(total, len(families))
         global_bucket_counts = _plan_bucket_counts_from_ratios(
             total,
@@ -301,7 +359,9 @@ class SeedCorpus:
                 rng=rng,
                 target_label=f"{target_name}:{family}",
             )
-            out.extend(family_batch)
+            out.extend(
+                [normalized_by_key[(s.family, s.seed_id)] for s in family_batch]
+            )
 
             for bucket_name, count in counts.items():
                 remaining_bucket_counts[bucket_name] -= count
@@ -316,6 +376,60 @@ class SeedCorpus:
             rng.shuffle(out)
         return out
 
+    def synthetic_generation(
+        self,
+        target_or_family: str,
+        *,
+        needed: int,
+        conn: sqlite3.Connection,
+        config: dict[str, Any],
+        results_folder: str | Path,
+        ordinal_start: int = 1_000_000,
+    ) -> list[Seed]:
+        """
+        Generate additional seeds using the same LLM path as bootstrap fallback.
+
+        This does not mutate the corpus itself; it returns generated Seed objects
+        ready to be added to a scheduler.
+        """
+        if needed <= 0:
+            return []
+
+        from core.llm_seed_fallback import make_generated_seed, maybe_generate_seed_candidates
+
+        target_name = target_or_family
+        target_set = self.target(target_name)
+        requested_config = dict(config)
+        requested_config["llm_seed_candidates"] = needed
+
+        generated = maybe_generate_seed_candidates(
+            conn=conn,
+            corpus=self,
+            target=target_name,
+            config=requested_config,  # type: ignore[arg-type]
+            results_folder=Path(results_folder),
+            include_corpus_context=True,
+        )
+        if generated is None or not generated.seeds:
+            return []
+
+        out: list[Seed] = []
+        seen: set[str] = set()
+        next_ordinal = ordinal_start
+        for text in generated.seeds:
+            if text in seen:
+                continue
+            seen.add(text)
+            out.append(
+                make_generated_seed(
+                    text=text,
+                    family=target_set.family,
+                    ordinal=next_ordinal,
+                )
+            )
+            next_ordinal += 1
+        return out
+
     def summary(self) -> dict[str, Any]:
         return {
             "manifest": str(self.manifest_path) if self.manifest_path else None,
@@ -323,6 +437,30 @@ class SeedCorpus:
                 family: seed_set.summary() for family, seed_set in self._targets.items()
             },
         }
+
+    def _build_group_targets(self) -> None:
+        """
+        Build deterministic grouped TargetSeedSets for runtime targets that pool multiple families.
+
+        Key properties:
+        - `.seeds` is a deterministic round-robin mix across families (50/50 for 2 families)
+        - `seed_id` is namespaced by family to avoid collisions
+        - `ordinal` is re-assigned densely across the combined set to avoid collisions
+        """
+        for target_name, families in self._target_groups.items():
+            for family in families:
+                if family not in self._targets:
+                    known = ", ".join(sorted(self._targets))
+                    raise KeyError(
+                        f"group target {target_name!r} references unknown family {family!r}; "
+                        f"known families: {known}"
+                    )
+
+            self._group_targets[target_name] = _build_group_target_seed_set(
+                target_name=target_name,
+                families=families,
+                targets=self._targets,
+            )
 
 
 def _sample_from_bucket_pools(
@@ -397,6 +535,123 @@ def _plan_bucket_counts_from_ratios(
 
 def _fingerprint_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _build_group_seed_identity_map(
+    *,
+    target_name: str,
+    families: tuple[str, ...],
+    targets: dict[str, TargetSeedSet],
+) -> tuple[tuple[Seed, ...], dict[tuple[str, str], Seed]]:
+    """
+    Return a stable mapping from (family, seed_id) -> normalized Seed for a grouped target.
+
+    The normalized seed has:
+    - `seed_id` prefixed with "{family}:"
+    - `ordinal` reassigned to be unique within the grouped target
+    """
+    normalized: dict[tuple[str, str], Seed] = {}
+    ordered: list[Seed] = []
+    ordinal = 0
+
+    # Round-robin over families to keep a 50/50-ish prefix for two-family groups.
+    per_family_seeds = [list(targets[f].seeds) for f in families]
+    max_len = max((len(s) for s in per_family_seeds), default=0)
+    for i in range(max_len):
+        for fam_idx, family in enumerate(families):
+            seeds = per_family_seeds[fam_idx]
+            if i >= len(seeds):
+                continue
+            base = seeds[i]
+            key = (base.family, base.seed_id)
+            if key in normalized:
+                continue
+            normalized_seed = Seed(
+                seed_id=f"{base.family}:{base.seed_id}",
+                family=base.family,
+                bucket=base.bucket,
+                label=base.label,
+                text=base.text,
+                tags=base.tags,
+                expected=base.expected,
+                ordinal=ordinal,
+                fingerprint=base.fingerprint,
+            )
+            normalized[key] = normalized_seed
+            ordered.append(normalized_seed)
+            ordinal += 1
+
+    # Any remaining seeds that were not reached (shouldn't happen) are appended deterministically.
+    for family in families:
+        for base in targets[family].seeds:
+            key = (base.family, base.seed_id)
+            if key in normalized:
+                continue
+            normalized_seed = Seed(
+                seed_id=f"{base.family}:{base.seed_id}",
+                family=base.family,
+                bucket=base.bucket,
+                label=base.label,
+                text=base.text,
+                tags=base.tags,
+                expected=base.expected,
+                ordinal=ordinal,
+                fingerprint=base.fingerprint,
+            )
+            normalized[key] = normalized_seed
+            ordered.append(normalized_seed)
+            ordinal += 1
+
+    return (tuple(ordered), normalized)
+
+
+def _build_group_target_seed_set(
+    *,
+    target_name: str,
+    families: tuple[str, ...],
+    targets: dict[str, TargetSeedSet],
+) -> TargetSeedSet:
+    """
+    Build a combined TargetSeedSet for a grouped runtime target.
+
+    Buckets are merged by name, and seed IDs/ordinals are normalized to avoid collisions.
+    """
+    ordered_seeds, normalized_by_key = _build_group_seed_identity_map(
+        target_name=target_name,
+        families=families,
+        targets=targets,
+    )
+
+    bucket_names: set[str] = set()
+    for family in families:
+        bucket_names.update(targets[family].buckets)
+
+    # Preserve bucket order deterministically.
+    buckets: dict[str, SeedBucket] = {}
+    for bucket_name in sorted(bucket_names):
+        merged: list[Seed] = []
+        for family in families:
+            seed_set = targets[family]
+            if bucket_name not in seed_set.buckets:
+                continue
+            for base in seed_set.bucket(bucket_name).seeds:
+                merged.append(normalized_by_key[(base.family, base.seed_id)])
+        buckets[bucket_name] = SeedBucket(
+            name=bucket_name,
+            description=f"merged bucket {bucket_name!r} for grouped target {target_name!r}",
+            seeds=tuple(merged),
+        )
+
+    return GroupedTargetSeedSet(
+        family=target_name,
+        dataset_id=target_name,
+        buckets=buckets,
+        metadata={
+            "grouped_target": target_name,
+            "families": list(families),
+        },
+        ordered_seeds=ordered_seeds,
+    )
 
 
 def _load_target_seed_set(file_path: Path, expected_family: str) -> TargetSeedSet:

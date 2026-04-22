@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any
+from typing import Any, Sequence
 
 from seed_corpus import Seed
 
@@ -54,6 +54,14 @@ class QueueScheduler(BaseSeedScheduler):
         """Return the number of queued items ready to be selected."""
         return len(self._queue)
 
+    def complete_batch(self, item: ScheduledSeed, *, batch_scores: Sequence[float]) -> None:
+        if batch_scores:
+            n = len(batch_scores)
+            item.updates += n
+            item.total_isinteresting_score += float(sum(batch_scores))
+            item.last_isinteresting_score = float(batch_scores[-1])
+        self._queue.append(item.item_id)
+
     def stats(self) -> dict[str, Any]:
         """Return queue-oriented scheduler metrics."""
         return {
@@ -61,6 +69,14 @@ class QueueScheduler(BaseSeedScheduler):
             "ready": len(self._queue),
             "total_items": len(self._items),
         }
+
+    def ready_items(self) -> list[ScheduledSeed]:
+        """Return queued items in dequeue order without consuming them."""
+        return [
+            self._items[item_id]
+            for item_id in list(self._queue)
+            if item_id in self._items
+        ]
 
     def debug_dump(self, limit: int = 20) -> dict[str, Any]:
         """Return the current queue order with lightweight per-item metadata."""
